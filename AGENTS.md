@@ -33,6 +33,7 @@ Everything in the repository is written in English.
 - Style: [Google C++ Style Guide](https://google.github.io/styleguide/cppguide.html), formatted with `clang-format-21` (`.clang-format`).
 - Static analysis: `clang-tidy-21` (`.clang-tidy`), run by the `tidy` preset.
 - Warnings: `-Wall -Wextra -Wpedantic -Werror`.
+- Agents do not write comments in code on their own. Comments are written only where the owner asks for them, and for the closing comments of namespaces and include guards required by the style checks.
 - File names are snake_case. Public headers are under `include/hotarubi/`. Test files are named `*_test.cpp`.
 - Unit tests use GoogleTest and are added with `hotarubi_add_test` (root `CMakeLists.txt`).
 - The runtime for the board is cross-compiled for aarch64 against a sysroot of the board's Ubuntu 22.04, with libstdc++ linked statically.

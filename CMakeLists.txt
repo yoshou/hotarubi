@@ -6,7 +6,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# FP32 results must not depend on the compiler: no contraction into fused multiply-add.
 add_compile_options(-Wall -Wextra -Wpedantic -Werror -ffp-contract=off)
 
 option(HOTARUBI_SANITIZE "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
@@ -28,7 +27,6 @@ enable_testing()
 find_package(GTest REQUIRED)
 include(GoogleTest)
 
-# Adds a GoogleTest executable and registers its tests with CTest.
 function(hotarubi_add_test name)
   add_executable(${name} ${ARGN})
   target_link_libraries(${name} PRIVATE GTest::gtest_main)
@@ -36,7 +34,6 @@ function(hotarubi_add_test name)
   set_property(GLOBAL APPEND PROPERTY HOTARUBI_TEST_TARGETS ${name})
 endfunction()
 
-# Merges the profiles written by the tests and reports coverage of the non-test code.
 function(hotarubi_add_coverage_report)
   get_property(test_targets GLOBAL PROPERTY HOTARUBI_TEST_TARGETS)
   if(NOT test_targets)
