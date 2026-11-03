@@ -482,7 +482,7 @@ Linux (Ubuntu 22.04 on the board) loads the design with `xmutil loadapp npu` fro
 - OS: Ubuntu 22.04 on the board.
 - Register access: UIO (`/dev/uioN`).
 - Shared memory: u-dma-buf, one 256 MB buffer from CMA with a 32-bit DMA mask, loaded at boot. udev gives the `plugdev` group read and write access to `/dev/uio*` and `/dev/udmabuf*`. The physical addresses used in instructions are inside this buffer.
-- The driver (register access, start, interrupt wait, counters) and the runtime are written in C++.
+- The driver (register access, start, interrupt wait, counters) and the runtime are written in C++23 and cross-compiled on the host (see "Build").
 - The PS places the inputs in DDR, starts the instruction stream, and runs the processing outside the forward pass:
   - SmolVLA: camera inputs `camera1` = SO-100 `top`, `camera2` = SO-100 `wrist`, `camera3` unused; image resize with padding to 512 × 512 (aspect-preserving bilinear, `align_corners = False`, zero padding at the top left) and scaling from [0, 1] to [−1, 1]; im2col of the 16 × 16 patches into 768-element rows with K = c·256 + ky·16 + kx (patch s = py·32 + px on the 32 × 32 grid), placed in the order p = (i·4 + j)·64 + hq·8 + wq for patch s = (4·hq + i)·32 + 4·wq + j (i, j = 0..3; hq, wq = 0..7), and MXINT8 encoding; lookup of the language embedding rows; state zero-padded to 32 values; noise.
   - SparseDrive-S: images, timestamps, ego pose, projection matrices and image sizes; detection of the start of a scene; hierarchical planning selection and collision rescoring after the forward pass.
@@ -522,8 +522,24 @@ Calibration data:
 
 ## Toolchain
 
-The NPU toolchain is written in C++ and built with CMake: the compiler, the bit-exact model, the instruction-set simulator, the RTL testbenches and the runtime on the board.
+The NPU toolchain is written in C++23:
+
+| Component | Contents |
+|---|---|
+| Instruction-set simulator | The bit-exact arithmetic of each unit, and execution of instruction streams |
+| Compiler | Generation of instruction streams |
+| RTL testbenches | Verilator testbenches |
+| Runtime | Driver and runtime on the board, cross-compiled for aarch64 |
+
+## Build
+
+CMake is the single entry point:
+
+- It builds the toolchain and the Verilator testbenches, and runs the tests with CTest.
+- It runs the Vivado steps (synthesis, implementation, bitstream) through custom targets that call Tcl scripts in `fpga/`.
+- The list of RTL sources is defined once in CMake and used by both Verilator and Vivado.
+- The runtime is cross-compiled for aarch64 against a sysroot of the board's Ubuntu 22.04, with libstdc++ linked statically.
 
 ## RTL verification
 
-The RTL is simulated with Verilator. The testbenches are written in C++ and compare the RTL against the bit-exact model.
+The RTL is simulated with Verilator. The testbenches are written in C++ and compare the RTL against the bit-exact arithmetic of the instruction-set simulator.
