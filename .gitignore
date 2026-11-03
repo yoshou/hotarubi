@@ -1,0 +1,10 @@
+# Build outputs
+/build/
+
+# Verilator
+obj_dir/
+
+# Vivado
+.Xil/
+*.jou
+*.log
