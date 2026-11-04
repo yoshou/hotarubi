@@ -22,7 +22,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" | sudo tee /etc/apt/sources.list.d/llvm.list
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-${LLVM_VERSION} libgtest-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-${LLVM_VERSION} libgtest-dev verilator
       - run: cmake --preset ${{ matrix.preset }}
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
@@ -36,7 +36,7 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" | sudo tee /etc/apt/sources.list.d/llvm.list
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-${LLVM_VERSION} llvm-${LLVM_VERSION} libgtest-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-${LLVM_VERSION} llvm-${LLVM_VERSION} libgtest-dev verilator
       - run: cmake --preset coverage
       - run: cmake --build --preset coverage
       - run: ctest --preset coverage
@@ -67,6 +67,6 @@ jobs:
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
           echo "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${LLVM_VERSION} main" | sudo tee /etc/apt/sources.list.d/llvm.list
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} libgtest-dev
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 clang-${LLVM_VERSION} clang-tidy-${LLVM_VERSION} libgtest-dev verilator
       - run: cmake --preset tidy
       - run: cmake --build --preset tidy
