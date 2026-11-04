@@ -549,7 +549,7 @@ CMake is the single entry point:
 - It builds the toolchain and the Verilator testbenches, and runs the tests with CTest.
 - It runs the Vivado steps (synthesis, implementation, bitstream) through custom targets that call Tcl scripts in `fpga/`.
 - The list of RTL sources is defined once in CMake and used by both Verilator and Vivado.
-- The runtime is cross-compiled for aarch64 against a sysroot of the board's Ubuntu 22.04, with libstdc++ linked statically.
+- The runtime is cross-compiled for aarch64 and linked statically.
 
 ## RTL verification
 

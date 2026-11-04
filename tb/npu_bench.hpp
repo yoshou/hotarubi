@@ -31,6 +31,7 @@ class Ddr {
   void Write32(uint32_t address, uint32_t value);
   [[nodiscard]] Beat ReadBeat(uint32_t address) const;
   void WriteBeat(uint32_t address, const Beat& beat);
+  [[nodiscard]] std::span<uint8_t> Bytes() { return bytes_; }
 
  private:
   std::vector<uint8_t> bytes_;

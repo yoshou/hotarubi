@@ -36,7 +36,7 @@ Everything in the repository is written in English.
 - Agents do not write comments in code on their own. Comments are written only where the owner asks for them, and for the closing comments of namespaces and include guards required by the style checks.
 - File names are snake_case. Public headers are under `include/hotarubi/`. Test files are named `*_test.cpp`.
 - Unit tests use GoogleTest and are added with `hotarubi_add_test` (root `CMakeLists.txt`).
-- The runtime for the board is cross-compiled for aarch64 against a sysroot of the board's Ubuntu 22.04, with libstdc++ linked statically.
+- The runtime for the board is cross-compiled for aarch64 and linked statically.
 
 ## SystemVerilog
 
@@ -53,6 +53,7 @@ CMake is the entry point for the C++ code, the Verilator testbenches and the Viv
 | `sanitize` | Tests with AddressSanitizer and UndefinedBehaviorSanitizer |
 | `coverage` | Clang source-based coverage; the `coverage-report` target prints the report |
 | `tidy` | Build with clang-tidy |
+| `aarch64-release` | Cross-compile the runtime for the board |
 
 ```
 cmake --preset gcc-debug
