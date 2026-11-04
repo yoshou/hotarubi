@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <span>
@@ -28,6 +29,9 @@ struct Program {
   uint32_t instruction_count = 0;
   std::map<std::string, Region, std::less<>> regions;
 };
+
+std::expected<Program, std::string> LoadProgram(
+    const std::filesystem::path& directory);
 
 class Runtime {
  public:

@@ -1,12 +1,17 @@
 #include "hotarubi/runtime.hpp"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "bench_bus.hpp"
@@ -129,6 +134,77 @@ TEST_F(RuntimeTest, RejectsUseBeforeAProgramIsLoaded) {
   const std::vector<std::byte> word(kWordBytes);
   EXPECT_FALSE(runtime_.Write("input", word).has_value());
   EXPECT_FALSE(runtime_.Run(1000ms).has_value());
+}
+
+class ProgramFiles {
+ public:
+  ProgramFiles()
+      : directory_(std::filesystem::path(testing::TempDir()) /
+                   (std::string(testing::UnitTest::GetInstance()
+                                    ->current_test_info()
+                                    ->name()) +
+                    "_" + std::to_string(getpid()))) {
+    std::filesystem::create_directories(directory_);
+  }
+  ProgramFiles(const ProgramFiles&) = delete;
+  ProgramFiles& operator=(const ProgramFiles&) = delete;
+  ProgramFiles(ProgramFiles&&) = delete;
+  ProgramFiles& operator=(ProgramFiles&&) = delete;
+  ~ProgramFiles() { std::filesystem::remove_all(directory_); }
+
+  void Write(const Program& program, uint64_t image_bytes) const {
+    std::ofstream image(directory_ / "image.bin", std::ios::binary);
+    for (const std::byte value : program.image) {
+      image.put(static_cast<char>(value));
+    }
+    std::ofstream(directory_ / "meta.json") << std::format(
+        R"({{"base": {}, "n_instr": {}, "instr_off": {}, "image_bytes": {},)"
+        R"( "regions": {{"input": [{}, {}], "output": [{}, {}]}},)"
+        R"( "outputs": ["output"]}})",
+        program.base, program.instruction_count, program.instruction_offset,
+        image_bytes, kInputOffset, kWordBytes, kOutputOffset, kWordBytes);
+  }
+
+  [[nodiscard]] const std::filesystem::path& Directory() const {
+    return directory_;
+  }
+
+ private:
+  std::filesystem::path directory_;
+};
+
+TEST_F(RuntimeTest, RunsAProgramLoadedFromItsFiles) {
+  const Program compiled = DoubleProgram();
+  const ProgramFiles files;
+  files.Write(compiled, compiled.image.size());
+  auto program = LoadProgram(files.Directory());
+  ASSERT_TRUE(program.has_value()) << program.error();
+  EXPECT_EQ(program->base, compiled.base);
+  EXPECT_EQ(program->instruction_count, compiled.instruction_count);
+  EXPECT_EQ(program->image, compiled.image);
+  EXPECT_EQ(program->regions.at("output").offset, kOutputOffset);
+  ASSERT_TRUE(runtime_.Load(std::move(*program)).has_value());
+  std::array<float, 32> input{};
+  std::array<float, 32> doubled{};
+  for (uint32_t i = 0; i < input.size(); ++i) {
+    input.at(i) = 0.5F * static_cast<float>(i);
+    doubled.at(i) = static_cast<float>(i);
+  }
+  ASSERT_TRUE(runtime_.Write("input", FloatBytes(input)).has_value());
+  ASSERT_TRUE(runtime_.Run(1000ms).has_value());
+  std::vector<std::byte> output(kWordBytes);
+  ASSERT_TRUE(runtime_.Read("output", output).has_value());
+  EXPECT_EQ(output, FloatBytes(doubled));
+}
+
+TEST(LoadProgramTest, RejectsAnImageOfTheWrongSizeOrMissingFiles) {
+  const Program compiled = DoubleProgram();
+  const ProgramFiles files;
+  EXPECT_FALSE(LoadProgram(files.Directory()).has_value());
+  files.Write(compiled, compiled.image.size() + 16);
+  const auto program = LoadProgram(files.Directory());
+  ASSERT_FALSE(program.has_value());
+  EXPECT_NE(program.error().find("image.bin"), std::string::npos);
 }
 
 }  // namespace

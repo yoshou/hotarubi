@@ -5,13 +5,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <filesystem>
 #include <format>
+#include <fstream>
+#include <iterator>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 
 #include "hotarubi/driver.hpp"
+#include "hotarubi/json.hpp"
 
 namespace hotarubi {
 namespace {
@@ -20,6 +25,54 @@ constexpr uint64_t kAddressLimit = uint64_t{1} << 32;
 constexpr uint64_t kInstructionBytes = 16;
 constexpr uint64_t kInstructionAlignment = 256;
 constexpr uint64_t kBeatBytes = 16;
+constexpr uint64_t kWordLimit = 0xFFFFFFFFU;
+
+std::expected<uint64_t, std::string> Field(const Json& meta,
+                                           std::string_view name,
+                                           uint64_t limit) {
+  const Json* field = meta.Find(name);
+  if (field == nullptr) {
+    return std::unexpected(std::format("meta.json has no {}", name));
+  }
+  const auto value = field->Integer();
+  if (!value || *value < 0 || std::cmp_greater(*value, limit)) {
+    return std::unexpected(std::format("meta.json: bad {}", name));
+  }
+  return static_cast<uint64_t>(*value);
+}
+
+std::expected<std::string, std::string> ReadFile(
+    const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return std::unexpected(std::format("cannot open {}", path.string()));
+  }
+  return std::string(std::istreambuf_iterator<char>(file),
+                     std::istreambuf_iterator<char>());
+}
+
+std::expected<std::map<std::string, Region, std::less<>>, std::string>
+ParseRegions(const Json& meta) {
+  const Json* regions = meta.Find("regions");
+  if (regions == nullptr || !regions->IsObject()) {
+    return std::unexpected("meta.json has no regions");
+  }
+  std::map<std::string, Region, std::less<>> parsed;
+  for (const auto& [name, value] : regions->Members()) {
+    if (!value.IsArray() || value.Items().size() != 2) {
+      return std::unexpected(std::format("meta.json: bad region {}", name));
+    }
+    const auto offset = value.Items()[0].Integer();
+    const auto size = value.Items()[1].Integer();
+    if (!offset || !size || *offset < 0 || *size < 0 ||
+        std::cmp_greater(*offset + *size, kWordLimit)) {
+      return std::unexpected(std::format("meta.json: bad region {}", name));
+    }
+    parsed[name] = {.offset = static_cast<uint32_t>(*offset),
+                    .size = static_cast<uint32_t>(*size)};
+  }
+  return parsed;
+}
 
 }  // namespace
 
@@ -109,6 +162,48 @@ std::expected<Counters, std::string> Runtime::Run(
   return device_.Run(
       static_cast<uint32_t>(program_.base + program_.instruction_offset),
       program_.instruction_count, timeout, on_signal);
+}
+
+std::expected<Program, std::string> LoadProgram(
+    const std::filesystem::path& directory) {
+  const auto text = ReadFile(directory / "meta.json");
+  if (!text) {
+    return std::unexpected(text.error());
+  }
+  const auto meta = Json::Parse(*text);
+  if (!meta || !meta->IsObject()) {
+    return std::unexpected(meta ? "meta.json is not an object" : meta.error());
+  }
+  const auto base = Field(*meta, "base", kAddressLimit - 1);
+  const auto offset = Field(*meta, "instr_off", kWordLimit);
+  const auto count = Field(*meta, "n_instr", kWordLimit);
+  const auto bytes = Field(*meta, "image_bytes", kWordLimit);
+  for (const auto* field : {&base, &offset, &count, &bytes}) {
+    if (!*field) {
+      return std::unexpected(field->error());
+    }
+  }
+  auto regions = ParseRegions(*meta);
+  if (!regions) {
+    return std::unexpected(regions.error());
+  }
+  const auto image = ReadFile(directory / "image.bin");
+  if (!image) {
+    return std::unexpected(image.error());
+  }
+  if (image->size() != *bytes) {
+    return std::unexpected(std::format(
+        "image.bin has {} bytes but meta.json says {}", image->size(), *bytes));
+  }
+  Program program{.base = *base,
+                  .image = std::vector<std::byte>(image->size()),
+                  .instruction_offset = static_cast<uint32_t>(*offset),
+                  .instruction_count = static_cast<uint32_t>(*count),
+                  .regions = std::move(*regions)};
+  std::ranges::transform(*image, program.image.begin(), [](char c) {
+    return static_cast<std::byte>(static_cast<unsigned char>(c));
+  });
+  return program;
 }
 
 }  // namespace hotarubi

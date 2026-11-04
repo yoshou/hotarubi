@@ -1,0 +1,418 @@
+#include "program.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <format>
+#include <functional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "isa.hpp"
+
+namespace hotarubi::compiler {
+namespace {
+
+constexpr std::array<uint32_t, 3> kWaitBits = {kWaitDma, kWaitGemm, kWaitVec};
+constexpr std::array<std::string_view, 5> kEngineNames = {"DMA", "GEMM", "VEC",
+                                                          "CTRL", "WAIT"};
+constexpr uint32_t kFlagIndex = 0x1;
+constexpr uint32_t kFlagRow = 0x2;
+constexpr uint32_t kFlagAcc = 0x1;
+constexpr uint32_t kFlagFlush = 0x2;
+constexpr uint32_t kRowLimit = 4096;
+constexpr uint32_t kStrideLimit = 1U << 24;
+constexpr uint32_t kTokLimit = 128;
+constexpr uint32_t kBeatBytes = 16;
+
+size_t MemIndex(Mem mem) { return static_cast<size_t>(mem); }
+
+uint32_t Depth(Mem mem) { return kMemDepth.at(MemIndex(mem)); }
+
+Range Span(Mem mem, uint32_t lo, uint32_t hi) {
+  return {.mem = mem, .lo = lo, .hi = hi};
+}
+
+void CheckRange(const Range& range) {
+  Require(range.lo < range.hi && range.hi <= Depth(range.mem),
+          std::format("bad range {}..{} in memory {}", range.lo, range.hi,
+                      MemIndex(range.mem)));
+}
+
+uint32_t OnchipWords(const Transfer& transfer) {
+  const uint32_t words = transfer.rows * transfer.row_words;
+  if (!transfer.row_format) {
+    return words;
+  }
+  const bool abuf = transfer.mem == Mem::kAbuf;
+  Require(
+      words % 4 == 0 && transfer.tok > 0 && transfer.tok <= (abuf ? 32U : 8U),
+      std::format("row-format transfer of {} words with tok {}", words,
+                  transfer.tok));
+  return words / 4 * (abuf ? transfer.tok : 4 * transfer.tok);
+}
+
+void CheckTransfer(const Transfer& transfer) {
+  Require(transfer.rows < kRowLimit && transfer.row_words < kRowLimit &&
+              transfer.ddr_stride < kStrideLimit &&
+              transfer.ddr_offset % kBeatBytes == 0 && transfer.tok < kTokLimit,
+          std::format("bad DMA transfer: offset {:#x} rows {} row_words {} "
+                      "stride {} tok {}",
+                      transfer.ddr_offset, transfer.rows, transfer.row_words,
+                      transfer.ddr_stride, transfer.tok));
+}
+
+uint32_t TransferFlags(const Transfer& transfer) {
+  return (transfer.index ? kFlagIndex : 0) |
+         (transfer.row_format ? kFlagRow : 0);
+}
+
+bool MultiPass(VecOp op) {
+  return op == VecOp::kLayerNorm || op == VecOp::kRmsNorm ||
+         op == VecOp::kGelu || op == VecOp::kSilu || op == VecOp::kSiluMul ||
+         op == VecOp::kSoftmax || op == VecOp::kRope;
+}
+
+}  // namespace
+
+Program::Program(uint64_t base) : base_(base) {
+  for (size_t m = 0; m < kMemCount; ++m) {
+    const size_t depth = kMemDepth.at(m);
+    Tracker& tracker = trackers_.at(m);
+    tracker.write_index.assign(depth, -1);
+    tracker.write_engine.assign(depth, -1);
+    for (auto& reads : tracker.read_index) {
+      reads.assign(depth, -1);
+    }
+  }
+}
+
+uint32_t Program::DmaAddress(uint64_t offset) const {
+  const uint64_t address = base_ + offset;
+  Require(address < (uint64_t{1} << 32),
+          std::format("DDR address {:#x} is beyond 32 bits", address));
+  return static_cast<uint32_t>(address);
+}
+
+int32_t Program::LatestWrite(const Tracker& tracker, const Range& range,
+                             int engine) {
+  int32_t latest = -1;
+  for (uint32_t a = range.lo; a < range.hi; ++a) {
+    if (tracker.write_engine[a] == engine) {
+      latest = std::max(latest, tracker.write_index[a]);
+    }
+  }
+  return latest;
+}
+
+int32_t Program::LatestRead(const Tracker& tracker, const Range& range,
+                            int engine) {
+  const auto& reads = tracker.read_index.at(engine);
+  return *std::max_element(reads.begin() + range.lo, reads.begin() + range.hi);
+}
+
+uint32_t Program::Dependencies(int engine, const std::vector<Range>& reads,
+                               const std::vector<Range>& writes) const {
+  uint32_t need = 0;
+  for (const auto* list : {&reads, &writes}) {
+    for (const Range& range : *list) {
+      CheckRange(range);
+      const Tracker& tracker = trackers_.at(MemIndex(range.mem));
+      for (int e = 0; e < kEngines; ++e) {
+        if (e != engine && LatestWrite(tracker, range, e) >= known_.at(e)) {
+          need |= 1U << e;
+        }
+      }
+    }
+  }
+  for (const Range& range : writes) {
+    const Tracker& tracker = trackers_.at(MemIndex(range.mem));
+    for (int e = 0; e < kEngines; ++e) {
+      if (e != engine && LatestRead(tracker, range, e) >= known_.at(e)) {
+        need |= 1U << e;
+      }
+    }
+  }
+  return need;
+}
+
+size_t Program::Emit(Engine engine,
+                     const std::function<Instruction(uint32_t)>& make,
+                     const std::vector<Range>& reads,
+                     const std::vector<Range>& writes, std::string_view note) {
+  const auto index = static_cast<int32_t>(instructions_.size());
+  const int e = static_cast<int>(engine);
+  uint32_t need = 0;
+  if (e < kEngines) {
+    need = Dependencies(e, reads, writes);
+  } else if (engine == Engine::kCtrl) {
+    need = (1U << kEngines) - 1;
+  }
+  uint32_t wait = 0;
+  for (int other = 0; other < kEngines; ++other) {
+    if ((need & (1U << other)) != 0) {
+      wait |= kWaitBits.at(other);
+      known_.at(other) = index;
+    }
+  }
+  if (e < kEngines) {
+    known_.at(e) = index;
+  }
+  instructions_.push_back(make(wait));
+  notes_.emplace_back(note);
+  engines_.push_back(engine);
+  if (need != 0) {
+    ++wait_count_;
+  }
+  if (e < kEngines) {
+    for (const Range& range : reads) {
+      auto& reads_by_e = trackers_.at(MemIndex(range.mem)).read_index.at(e);
+      std::fill(reads_by_e.begin() + range.lo, reads_by_e.begin() + range.hi,
+                index);
+    }
+    for (const Range& range : writes) {
+      Tracker& tracker = trackers_.at(MemIndex(range.mem));
+      std::fill(tracker.write_index.begin() + range.lo,
+                tracker.write_index.begin() + range.hi, index);
+      std::fill(tracker.write_engine.begin() + range.lo,
+                tracker.write_engine.begin() + range.hi,
+                static_cast<int8_t>(e));
+      for (auto& reads_by_engine : tracker.read_index) {
+        std::fill(reads_by_engine.begin() + range.lo,
+                  reads_by_engine.begin() + range.hi, -1);
+      }
+    }
+  }
+  return static_cast<size_t>(index);
+}
+
+size_t Program::Load(const Transfer& transfer, std::string_view note) {
+  CheckTransfer(transfer);
+  const uint32_t words = OnchipWords(transfer);
+  const DmaFields fields{.ddr_addr = DmaAddress(transfer.ddr_offset),
+                         .mem = transfer.mem,
+                         .onchip = transfer.onchip,
+                         .rows = transfer.rows,
+                         .row_words = transfer.row_words,
+                         .ddr_stride = transfer.ddr_stride,
+                         .mode = transfer.mode,
+                         .tok = transfer.tok,
+                         .flags = TransferFlags(transfer)};
+  return Emit(
+      Engine::kDma, [&](uint32_t wait) { return EncodeDmaLoad(fields, wait); },
+      {}, {Span(transfer.mem, transfer.onchip, transfer.onchip + words)}, note);
+}
+
+size_t Program::Store(const Transfer& transfer, std::string_view note) {
+  CheckTransfer(transfer);
+  const uint32_t words = OnchipWords(transfer);
+  const DmaFields fields{.ddr_addr = DmaAddress(transfer.ddr_offset),
+                         .mem = transfer.mem,
+                         .onchip = transfer.onchip,
+                         .rows = transfer.rows,
+                         .row_words = transfer.row_words,
+                         .ddr_stride = transfer.ddr_stride,
+                         .mode = DmaMode::kRaw,
+                         .tok = transfer.tok,
+                         .flags = TransferFlags(transfer)};
+  return Emit(
+      Engine::kDma, [&](uint32_t wait) { return EncodeDmaStore(fields, wait); },
+      {Span(transfer.mem, transfer.onchip, transfer.onchip + words)}, {}, note);
+}
+
+size_t Program::Gacc(const GaccArgs& args, std::string_view note) {
+  Require(args.slots < kRowLimit && args.blocks >= 1 && args.blocks <= 8 &&
+              args.quad < (1U << 16) && args.list_offset % kBeatBytes == 0,
+          std::format("bad GACC: slots {} blocks {} quad {}", args.slots,
+                      args.blocks, args.quad));
+  const DmaFields fields{
+      .ddr_addr = DmaAddress(args.list_offset),
+      .mem = Mem::kFbuf,
+      .onchip = args.dst,
+      .rows = args.slots,
+      .row_words = args.blocks,
+      .ddr_stride = args.quad,
+      .mode = DmaMode::kGacc,
+      .tok = 0,
+      .flags = (args.acc ? kFlagAcc : 0) | (args.flush ? kFlagFlush : 0)};
+  std::vector<Range> writes;
+  if (args.flush) {
+    writes.push_back(Span(Mem::kFbuf, args.dst, args.dst + (4 * args.blocks)));
+  }
+  return Emit(
+      Engine::kDma, [&](uint32_t wait) { return EncodeDmaLoad(fields, wait); },
+      {}, writes, note);
+}
+
+size_t Program::Gemm(const GemmArgs& args, std::string_view note) {
+  Require(args.m % 32 == 0 && args.m >= 32 && args.m <= 992 && args.kb >= 1 &&
+              args.kb <= args.a_stride && args.n8 >= 1 && args.n8 <= 255 &&
+              args.w_stride >= args.kb,
+          std::format("bad GEMM: m {} kb {} a_stride {} n8 {} w_stride {}",
+                      args.m, args.kb, args.a_stride, args.n8, args.w_stride));
+  const uint32_t quads = args.m / 4;
+  std::vector<Range> reads = {
+      Span(Mem::kAbuf, args.a_base,
+           args.a_base + ((quads - 1) * args.a_stride) + args.kb),
+      Span(Mem::kWbuf, args.w_base,
+           args.w_base + ((args.n8 - 1) * args.w_stride) + args.kb)};
+  const Range output =
+      Span(Mem::kFbuf, args.c_base, args.c_base + (quads * args.n8));
+  if (args.acc) {
+    reads.push_back(output);
+  }
+  const GemmFields fields{.a_base = args.a_base,
+                          .a_stride = args.a_stride,
+                          .kb = args.kb,
+                          .m = args.m,
+                          .w_base = args.w_base,
+                          .w_stride = args.w_stride,
+                          .n8 = args.n8,
+                          .c_base = args.c_base,
+                          .wmode = args.wmode,
+                          .acc = args.acc};
+  return Emit(
+      Engine::kGemm, [&](uint32_t wait) { return EncodeGemm(fields, wait); },
+      reads, {output}, note);
+}
+
+size_t Program::Vec(const VecArgs& args, std::string_view note) {
+  const VecOp op = args.op;
+  const uint32_t n = args.rows_q * args.n8;
+  uint32_t src2 = args.src2;
+  uint32_t imm = args.imm;
+  std::vector<Range> reads = {Span(Mem::kFbuf, args.src, args.src + n)};
+  std::vector<Range> writes;
+  if (op == VecOp::kAdd || op == VecOp::kMul || op == VecOp::kSiluMul ||
+      op == VecOp::kMax) {
+    reads.push_back(Span(Mem::kFbuf, src2, src2 + n));
+  }
+  if (op == VecOp::kAddP || op == VecOp::kMulP || op == VecOp::kRmsNorm) {
+    reads.push_back(
+        Span(Mem::kPbuf, args.p_base, args.p_base + ((args.n8 + 3) / 4)));
+  }
+  if (op == VecOp::kLayerNorm) {
+    reads.push_back(Span(Mem::kPbuf, args.p_base, args.p_base + (args.n8 / 2)));
+  }
+  if (op == VecOp::kRope) {
+    reads.push_back(
+        Span(Mem::kPbuf, args.p_base, args.p_base + (8 * args.rows_q)));
+  }
+  if (op == VecOp::kGelu || op == VecOp::kSilu || op == VecOp::kSiluMul ||
+      op == VecOp::kSoftmax) {
+    reads.push_back(Span(Mem::kTbuf, 0, Depth(Mem::kTbuf)));
+  }
+  const bool q = args.q || op == VecOp::kQuant;
+  if (q) {
+    Require(args.n8 % 4 == 0 &&
+                args.dst + (args.rows_q * (args.n8 / 4)) <= Depth(Mem::kAbuf),
+            std::format("bad quantized VEC output at {}", args.dst));
+    writes.push_back(
+        Span(Mem::kAbuf, args.dst, args.dst + (args.rows_q * (args.n8 / 4))));
+    if (MultiPass(op)) {
+      Require(args.scratch.has_value(),
+              "a multi-pass VEC operation with Q needs a scratch area");
+      const uint32_t scratch = args.scratch.value_or(0);
+      if (op == VecOp::kLayerNorm || op == VecOp::kRmsNorm) {
+        src2 = scratch;
+      } else {
+        imm = scratch;
+      }
+      reads.push_back(Span(Mem::kFbuf, scratch, scratch + n));
+      writes.push_back(Span(Mem::kFbuf, scratch, scratch + n));
+    }
+  } else {
+    writes.push_back(Span(Mem::kFbuf, args.dst, args.dst + n));
+    if (MultiPass(op)) {
+      reads.push_back(Span(Mem::kFbuf, args.dst, args.dst + n));
+    }
+    Require(op != VecOp::kRope || args.dst != args.src,
+            "ROPE needs a destination different from its source");
+  }
+  const VecFields fields{.op = op,
+                         .src = args.src,
+                         .src2 = src2,
+                         .dst = args.dst,
+                         .rows_q = args.rows_q,
+                         .n8 = args.n8,
+                         .p_base = args.p_base,
+                         .aux = args.aux,
+                         .imm = imm,
+                         .q = op != VecOp::kQuant && q};
+  return Emit(
+      Engine::kVec, [&](uint32_t wait) { return EncodeVec(fields, wait); },
+      reads, writes, note);
+}
+
+size_t Program::Run(const RunArgs& args, std::string_view note) {
+  const Range whole = Span(Mem::kFbuf, 0, Depth(Mem::kFbuf));
+  std::vector<Range> reads = args.reads.value_or(
+      std::vector<Range>{whole, Span(Mem::kPbuf, 0, Depth(Mem::kPbuf)),
+                         Span(Mem::kTbuf, 0, Depth(Mem::kTbuf))});
+  reads.push_back(Span(Mem::kCbuf, 0, Depth(Mem::kCbuf)));
+  const std::vector<Range> writes =
+      args.writes.value_or(std::vector<Range>{whole});
+  const VecFields fields{.op = VecOp::kRun,
+                         .src = args.src,
+                         .src2 = args.src2,
+                         .dst = args.dst,
+                         .rows_q = args.rows_q,
+                         .n8 = args.n8,
+                         .p_base = args.p_base,
+                         .aux = args.pc,
+                         .imm = args.imm,
+                         .q = false};
+  return Emit(
+      Engine::kVec, [&](uint32_t wait) { return EncodeVec(fields, wait); },
+      reads, writes, note);
+}
+
+size_t Program::Signal(uint32_t id, uint32_t value, std::string_view note) {
+  return Emit(
+      Engine::kCtrl,
+      [&](uint32_t wait) { return EncodeSignal(id, value, wait); }, {}, {},
+      note);
+}
+
+size_t Program::WaitHost(uint32_t value, std::string_view note) {
+  return Emit(
+      Engine::kWait, [&](uint32_t wait) { return EncodeWaitHost(value, wait); },
+      {}, {}, note);
+}
+
+size_t Program::Halt(std::string_view note) {
+  return Emit(
+      Engine::kCtrl, [&](uint32_t wait) { return EncodeHalt(wait); }, {}, {},
+      note);
+}
+
+size_t Program::EngineCount(Engine engine) const {
+  return static_cast<size_t>(
+      std::count(engines_.begin(), engines_.end(), engine));
+}
+
+void Program::SetDdrOffset(size_t index, uint64_t ddr_offset) {
+  Require(index < instructions_.size() && engines_[index] == Engine::kDma &&
+              ddr_offset % kBeatBytes == 0,
+          std::format("instruction {} is not a DMA transfer", index));
+  instructions_[index].Set(80, 32, DmaAddress(ddr_offset));
+}
+
+std::vector<std::byte> Program::Bytes() const {
+  return Serialize(instructions_);
+}
+
+std::string Program::Listing() const {
+  std::string text;
+  for (size_t i = 0; i < instructions_.size(); ++i) {
+    const Instruction& instruction = instructions_[i];
+    text += std::format("{:5d} {:4s} w={:x} {} {}\n", i,
+                        kEngineNames.at(static_cast<size_t>(engines_[i])),
+                        instruction.Get(116, 4), instruction.Hex(), notes_[i]);
+  }
+  return text;
+}
+
+}  // namespace hotarubi::compiler
