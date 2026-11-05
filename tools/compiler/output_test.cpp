@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ddr_image.hpp"
@@ -105,6 +106,29 @@ TEST(OutputTest, TheRuntimeLoadsWhatTheCompilerWrites) {
                          compiled.image.Bytes().begin()));
   EXPECT_EQ(program->regions.at("data").offset, 4096U);
   EXPECT_EQ(program->regions.at("data").size, 100U);
+  EXPECT_TRUE(program->streams.empty());
+  EXPECT_EQ(program->parameters.at("cameras"), 2);
+}
+
+TEST(OutputTest, TheRuntimeLoadsEveryStreamTheCompilerWrites) {
+  const std::filesystem::path directory =
+      std::filesystem::path(testing::TempDir()) /
+      ("streams_" + std::to_string(getpid()));
+  Compiled compiled = Example();
+  Program second(kBase);
+  second.Halt();
+  const uint64_t offset = compiled.image.Alloc("instr.second", 16);
+  compiled.image.Put(offset, second.Bytes());
+  compiled.streams.push_back(
+      {.name = "second", .program = std::move(second), .offset = offset});
+  ASSERT_TRUE(WriteCompiled(directory, compiled).has_value());
+  const auto program = LoadProgram(directory);
+  std::filesystem::remove_all(directory);
+  ASSERT_TRUE(program.has_value()) << program.error();
+  ASSERT_EQ(program->streams.size(), 2U);
+  EXPECT_EQ(program->streams.at("inference").count, 2U);
+  EXPECT_EQ(program->streams.at("second").offset, offset);
+  EXPECT_EQ(program->streams.at("second").count, 1U);
 }
 
 }  // namespace

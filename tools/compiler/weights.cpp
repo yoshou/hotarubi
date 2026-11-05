@@ -10,8 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
-#include "safetensors.hpp"
 #include "tensors.hpp"
 
 namespace hotarubi::compiler {

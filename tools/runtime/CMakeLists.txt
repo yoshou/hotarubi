@@ -1,9 +1,28 @@
-add_library(hotarubi_runtime STATIC driver.cpp json.cpp runtime.cpp)
+add_library(hotarubi_runtime STATIC
+  driver.cpp
+  exact.cpp
+  formats.cpp
+  json.cpp
+  require.cpp
+  runtime.cpp
+  safetensors.cpp)
 target_include_directories(hotarubi_runtime PUBLIC ${PROJECT_SOURCE_DIR}/include)
 
+add_library(hotarubi_ps STATIC frame_files.cpp smolvla_ps.cpp sparsedrive_ps.cpp)
+target_link_libraries(hotarubi_ps PUBLIC hotarubi_runtime)
+
+add_executable(hotarubi_run run.cpp)
+target_link_libraries(hotarubi_run PRIVATE hotarubi_ps)
+
 if(NOT CMAKE_CROSSCOMPILING)
-  hotarubi_add_test(json_test json_test.cpp)
-  target_link_libraries(json_test PRIVATE hotarubi_runtime)
+  foreach(test exact_test formats_test json_test safetensors_test)
+    hotarubi_add_test(${test} ${test}.cpp)
+    target_link_libraries(${test} PRIVATE hotarubi_runtime)
+  endforeach()
+  foreach(test smolvla_ps_test sparsedrive_ps_test)
+    hotarubi_add_test(${test} ${test}.cpp)
+    target_link_libraries(${test} PRIVATE hotarubi_ps)
+  endforeach()
   foreach(test driver_test runtime_test)
     hotarubi_add_test(${test} ${test}.cpp)
     target_link_libraries(${test} PRIVATE hotarubi_runtime tb_npu_bench)

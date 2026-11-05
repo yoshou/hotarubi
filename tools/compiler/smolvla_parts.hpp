@@ -9,10 +9,10 @@
 #include <vector>
 
 #include "ddr_image.hpp"
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
 #include "program.hpp"
-#include "safetensors.hpp"
 #include "tensors.hpp"
 
 namespace hotarubi::compiler::smolvla {

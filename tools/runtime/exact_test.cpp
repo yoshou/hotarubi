@@ -1,10 +1,10 @@
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
 
 #include <gtest/gtest.h>
 
 #include <cstdint>
 
-namespace hotarubi::compiler::exact {
+namespace hotarubi::exact {
 namespace {
 
 TEST(ExactTest, ConstantsRoundToTheirKnownValues) {
@@ -65,4 +65,4 @@ TEST(ExactDeathTest, RefusesToRoundAnAmbiguousValue) {
 }
 
 }  // namespace
-}  // namespace hotarubi::compiler::exact
+}  // namespace hotarubi::exact

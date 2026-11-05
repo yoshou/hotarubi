@@ -7,10 +7,10 @@
 #include <vector>
 
 #include "ddr_image.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
 #include "output.hpp"
 #include "program.hpp"
-#include "safetensors.hpp"
 #include "smolvla_parts.hpp"
 
 namespace hotarubi::compiler {

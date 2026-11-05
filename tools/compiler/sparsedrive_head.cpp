@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "ddr_image.hpp"
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
 #include "isa.hpp"
 #include "program.hpp"
 #include "sparsedrive_kernels.hpp"

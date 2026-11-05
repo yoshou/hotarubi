@@ -22,12 +22,19 @@ struct Region {
   uint32_t size = 0;
 };
 
+struct Stream {
+  uint32_t offset = 0;
+  uint32_t count = 0;
+};
+
 struct Program {
   uint64_t base = 0;
   std::vector<std::byte> image;
   uint32_t instruction_offset = 0;
   uint32_t instruction_count = 0;
+  std::map<std::string, Stream, std::less<>> streams;
   std::map<std::string, Region, std::less<>> regions;
+  std::map<std::string, int64_t, std::less<>> parameters;
 };
 
 std::expected<Program, std::string> LoadProgram(
@@ -46,6 +53,13 @@ class Runtime {
       std::string_view region, std::span<std::byte> data) const;
   [[nodiscard]] std::expected<Counters, std::string> Run(
       std::chrono::milliseconds timeout, const SignalHandler& on_signal = {});
+  [[nodiscard]] std::expected<Counters, std::string> Run(
+      std::string_view stream, std::chrono::milliseconds timeout,
+      const SignalHandler& on_signal = {});
+  [[nodiscard]] std::expected<Region, std::string> FindRegion(
+      std::string_view name) const;
+  [[nodiscard]] std::expected<int64_t, std::string> Parameter(
+      std::string_view name) const;
 
  private:
   [[nodiscard]] std::expected<Region, std::string> Find(std::string_view region,

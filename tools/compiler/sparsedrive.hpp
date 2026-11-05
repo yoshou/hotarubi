@@ -4,8 +4,8 @@
 #include <cstdint>
 
 #include "checkpoint.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "output.hpp"
-#include "safetensors.hpp"
 
 namespace hotarubi::compiler {
 

@@ -13,9 +13,10 @@
 
 #include "checkpoint.hpp"
 #include "ddr_image.hpp"
+#include "hotarubi/safetensors.hpp"
+#include "hotarubi/sparsedrive_layout.hpp"
 #include "isa.hpp"
 #include "program.hpp"
-#include "safetensors.hpp"
 #include "tensors.hpp"
 
 namespace hotarubi::compiler::sparsedrive {
@@ -30,7 +31,7 @@ inline constexpr uint32_t kAbufWords = kMemDepth[0];
 inline constexpr uint32_t kWbufWords = kMemDepth[1];
 inline constexpr uint32_t kFbufWords = kMemDepth[2];
 inline constexpr uint32_t kPbufWords = kMemDepth[3];
-inline constexpr uint32_t kCameras = 6;
+using ::hotarubi::sparsedrive::kCameras;
 
 enum class MapKind : uint8_t {
   kInt8,
@@ -140,7 +141,7 @@ struct CameraInput {
 
 std::vector<std::byte> StemListBytes(uint64_t base, uint64_t image);
 
-inline constexpr uint64_t kStemImageBytes = uint64_t{2} * 3 * 256 * 720 * 4;
+using ::hotarubi::sparsedrive::kStemImageBytes;
 
 Backbone ReadBackbone(const Sources& sources);
 std::vector<FMap> EmitEncoder(Program& program, DdrImage& image, uint64_t base,

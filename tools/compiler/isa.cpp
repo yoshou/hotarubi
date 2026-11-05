@@ -2,13 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <format>
-#include <print>
 #include <span>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace hotarubi::compiler {
@@ -43,11 +39,6 @@ Instruction EncodeDma(uint32_t opcode, const DmaFields& fields, uint32_t mode,
 }
 
 }  // namespace
-
-void Fail(std::string_view message) {
-  std::println(stderr, "compiler error: {}", message);
-  std::abort();
-}
 
 Instruction& Instruction::Set(uint32_t lsb, uint32_t width, uint64_t value) {
   Require(width == 64 || value < (uint64_t{1} << width),

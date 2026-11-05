@@ -6,18 +6,11 @@
 #include <cstdint>
 #include <span>
 #include <string>
-#include <string_view>
 #include <vector>
 
+#include "hotarubi/require.hpp"
+
 namespace hotarubi::compiler {
-
-[[noreturn]] void Fail(std::string_view message);
-
-inline void Require(bool condition, std::string_view message) {
-  if (!condition) {
-    Fail(message);
-  }
-}
 
 struct Instruction {
   std::array<uint32_t, 4> words{};

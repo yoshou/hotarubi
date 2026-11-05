@@ -1,5 +1,5 @@
-#ifndef HOTARUBI_TOOLS_COMPILER_SAFETENSORS_HPP_
-#define HOTARUBI_TOOLS_COMPILER_SAFETENSORS_HPP_
+#ifndef HOTARUBI_SAFETENSORS_HPP_
+#define HOTARUBI_SAFETENSORS_HPP_
 
 #include <cstddef>
 #include <cstdint>
@@ -9,9 +9,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-namespace hotarubi::compiler {
+namespace hotarubi {
 
 enum class DType : uint8_t {
   kF32,
@@ -20,6 +21,7 @@ enum class DType : uint8_t {
   kU8,
   kI8,
   kI32,
+  kU32,
   kI64,
   kF64,
 };
@@ -41,6 +43,7 @@ class SafeTensors {
   [[nodiscard]] std::vector<uint32_t> Float32Bits(std::string_view name) const;
   [[nodiscard]] std::vector<uint8_t> Bytes(std::string_view name) const;
   [[nodiscard]] std::vector<int8_t> Int8s(std::string_view name) const;
+  [[nodiscard]] std::vector<int64_t> Int64s(std::string_view name) const;
   [[nodiscard]] std::vector<std::string> Names() const;
   [[nodiscard]] const std::map<std::string, std::string, std::less<>>&
   Metadata() const {
@@ -56,6 +59,23 @@ class SafeTensors {
   std::map<std::string, std::string, std::less<>> metadata_;
 };
 
-}  // namespace hotarubi::compiler
+struct Tensor {
+  DType dtype = DType::kF32;
+  std::vector<uint64_t> shape;
+  std::vector<std::byte> data;
+};
 
-#endif  // HOTARUBI_TOOLS_COMPILER_SAFETENSORS_HPP_
+Tensor FloatTensor(std::vector<uint64_t> shape, std::span<const float> values);
+Tensor Uint32Tensor(std::vector<uint64_t> shape,
+                    std::span<const uint32_t> values);
+Tensor Int64Tensor(std::vector<uint64_t> shape,
+                   std::span<const int64_t> values);
+
+std::expected<void, std::string> WriteSafeTensors(
+    const std::filesystem::path& path,
+    const std::vector<std::pair<std::string, Tensor>>& tensors,
+    const std::vector<std::pair<std::string, std::string>>& metadata);
+
+}  // namespace hotarubi
+
+#endif  // HOTARUBI_SAFETENSORS_HPP_

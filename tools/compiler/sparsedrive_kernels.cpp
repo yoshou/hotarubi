@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
 #include "isa.hpp"
 #include "tensors.hpp"
 #include "vprog.hpp"

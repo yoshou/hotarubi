@@ -21,8 +21,9 @@
 namespace hotarubi::compiler::sparsedrive {
 namespace {
 
-constexpr uint32_t kImageRows = 256;
-constexpr uint32_t kStemRow = 720;
+using ::hotarubi::sparsedrive::kImageRows;
+using ::hotarubi::sparsedrive::kStemPadding;
+using ::hotarubi::sparsedrive::kStemRowFloats;
 constexpr uint32_t kStemBlocks = 6;
 constexpr uint32_t kStemWords = 24;
 constexpr uint32_t kStemTaps = 21;
@@ -582,7 +583,7 @@ std::vector<uint32_t> StemLists(uint64_t base, uint64_t image) {
       const uint32_t c = n / 7;
       const uint32_t ky = n % 7;
       for (uint32_t y = 0; y < kStemH; ++y) {
-        const int64_t row = int64_t{ky} + (2 * int64_t{y}) - 3;
+        const int64_t row = int64_t{ky} + (2 * int64_t{y}) - kStemPadding;
         if (row < 0 || std::cmp_greater_equal(row, kImageRows)) {
           continue;
         }
@@ -593,7 +594,7 @@ std::vector<uint32_t> StemLists(uint64_t base, uint64_t image) {
         out[at] = Entry(base, image +
                                   (((((phase * 3) + c) * uint64_t{kImageRows}) +
                                     static_cast<uint64_t>(row)) *
-                                   kStemRow * 4) +
+                                   kStemRowFloats * 4) +
                                   (uint64_t{s} * 4));
       }
     }
