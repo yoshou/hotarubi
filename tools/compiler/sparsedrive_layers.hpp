@@ -10,9 +10,9 @@
 
 #include "checkpoint.hpp"
 #include "ddr_image.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
 #include "program.hpp"
-#include "safetensors.hpp"
 #include "sparsedrive_kernels.hpp"
 #include "tensors.hpp"
 

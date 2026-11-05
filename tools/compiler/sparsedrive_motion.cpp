@@ -10,7 +10,8 @@
 #include <vector>
 
 #include "ddr_image.hpp"
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
+#include "hotarubi/sparsedrive_layout.hpp"
 #include "isa.hpp"
 #include "program.hpp"
 #include "sparsedrive_head.hpp"
@@ -1543,8 +1544,11 @@ void MotionHead::EmitFrame(Program& program) {
   program.Store(
       Words(tx.Addr((900 * kQueue) + kQueue - 1), Mem::kFbuf, 0, kD / 32),
       std::format("{} st", note));
-  program.Signal(1, 1, std::format("{} SIGNAL 1 motion done", tag));
-  program.WaitHost(1, std::format("{} WAIT_HOST 1", tag));
+  program.Signal(::hotarubi::sparsedrive::kMotionDoneSignal,
+                 ::hotarubi::sparsedrive::kMotionDoneSignal,
+                 std::format("{} SIGNAL motion done", tag));
+  program.WaitHost(::hotarubi::sparsedrive::kMotionDoneSignal,
+                   std::format("{} WAIT_HOST", tag));
 }
 
 }  // namespace hotarubi::compiler::sparsedrive

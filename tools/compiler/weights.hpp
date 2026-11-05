@@ -7,7 +7,7 @@
 #include <string_view>
 #include <vector>
 
-#include "safetensors.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "tensors.hpp"
 
 namespace hotarubi::compiler {

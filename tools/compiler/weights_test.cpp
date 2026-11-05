@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-#include "exact.hpp"
-#include "safetensors.hpp"
+#include "hotarubi/exact.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "tensors.hpp"
 
 namespace hotarubi::compiler {

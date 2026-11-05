@@ -1,10 +1,10 @@
-#ifndef HOTARUBI_TOOLS_COMPILER_EXACT_HPP_
-#define HOTARUBI_TOOLS_COMPILER_EXACT_HPP_
+#ifndef HOTARUBI_EXACT_HPP_
+#define HOTARUBI_EXACT_HPP_
 
 #include <cstdint>
 #include <vector>
 
-namespace hotarubi::compiler::exact {
+namespace hotarubi::exact {
 
 class Real {
  public:
@@ -64,6 +64,6 @@ Real Sin(const Real& x);
 Real Cos(const Real& x);
 Real Tanh(const Real& x);
 
-}  // namespace hotarubi::compiler::exact
+}  // namespace hotarubi::exact
 
-#endif  // HOTARUBI_TOOLS_COMPILER_EXACT_HPP_
+#endif  // HOTARUBI_EXACT_HPP_

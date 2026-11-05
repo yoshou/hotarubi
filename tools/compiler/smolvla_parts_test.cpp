@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
 #include "tensors.hpp"
 
 namespace hotarubi::compiler::smolvla {

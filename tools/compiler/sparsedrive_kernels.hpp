@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "hotarubi/sparsedrive_layout.hpp"
 #include "vprog.hpp"
 
 namespace hotarubi::compiler::sparsedrive {
@@ -25,10 +26,11 @@ inline constexpr uint32_t kConstI2f0 = 8;
 inline constexpr uint32_t kConstCf = 9;
 inline constexpr uint32_t kConstNcf = 10;
 inline constexpr uint32_t kConstHalf = 11;
-inline constexpr uint32_t kConstRwx = 12;
-inline constexpr uint32_t kConstRwy = 13;
+inline constexpr uint32_t kConstRwx = ::hotarubi::sparsedrive::kKpWidthLane;
+inline constexpr uint32_t kConstRwy = ::hotarubi::sparsedrive::kKpHeightLane;
 inline constexpr uint32_t kConstZero = 14;
-inline constexpr uint32_t kConstProjection = 16;
+inline constexpr uint32_t kConstProjection =
+    ::hotarubi::sparsedrive::kKpProjectionLane;
 
 inline constexpr uint32_t kMapSamples = 20;
 inline constexpr uint32_t kMapHeights = 5;

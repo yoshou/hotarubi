@@ -3,8 +3,8 @@
 
 #include <cstdint>
 
+#include "hotarubi/safetensors.hpp"
 #include "output.hpp"
-#include "safetensors.hpp"
 
 namespace hotarubi::compiler {
 

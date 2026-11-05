@@ -58,8 +58,12 @@ Program DoubleProgram() {
       .image = Serialize(instructions),
       .instruction_offset = 0,
       .instruction_count = static_cast<uint32_t>(instructions.size()),
+      .streams = {{"double",
+                   {.offset = 0,
+                    .count = static_cast<uint32_t>(instructions.size())}}},
       .regions = {{"input", {.offset = kInputOffset, .size = kWordBytes}},
-                  {"output", {.offset = kOutputOffset, .size = kWordBytes}}}};
+                  {"output", {.offset = kOutputOffset, .size = kWordBytes}}},
+      .parameters = {{"scale", 2}}};
 }
 
 class RuntimeTest : public testing::Test {
@@ -92,6 +96,36 @@ TEST_F(RuntimeTest, RunsAProgramWithInputsAndOutputs) {
   }
 }
 
+TEST_F(RuntimeTest, RunsANamedStreamAndReportsAnUnknownOne) {
+  ASSERT_TRUE(runtime_.Load(DoubleProgram()).has_value());
+  std::array<float, 32> input{};
+  input.fill(3.0F);
+  std::array<float, 32> doubled{};
+  doubled.fill(6.0F);
+  ASSERT_TRUE(runtime_.Write("input", FloatBytes(input)).has_value());
+  const auto counters = runtime_.Run("double", 1000ms);
+  ASSERT_TRUE(counters.has_value()) << counters.error();
+  EXPECT_EQ(counters->issued, 4U);
+  std::vector<std::byte> output(kWordBytes);
+  ASSERT_TRUE(runtime_.Read("output", output).has_value());
+  EXPECT_EQ(output, FloatBytes(doubled));
+  const auto missing = runtime_.Run("triple", 1000ms);
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_NE(missing.error().find("triple"), std::string::npos);
+}
+
+TEST_F(RuntimeTest, FindsRegionsAndParameters) {
+  EXPECT_FALSE(runtime_.FindRegion("input").has_value());
+  ASSERT_TRUE(runtime_.Load(DoubleProgram()).has_value());
+  const auto input = runtime_.FindRegion("input");
+  ASSERT_TRUE(input.has_value()) << input.error();
+  EXPECT_EQ(input->offset, kInputOffset);
+  EXPECT_EQ(input->size, kWordBytes);
+  EXPECT_FALSE(runtime_.FindRegion("weights").has_value());
+  EXPECT_EQ(runtime_.Parameter("scale"), 2);
+  EXPECT_FALSE(runtime_.Parameter("steps").has_value());
+}
+
 TEST_F(RuntimeTest, RejectsAProgramBuiltForAnotherAddress) {
   Program program = DoubleProgram();
   program.base += 0x100000;
@@ -112,6 +146,11 @@ TEST_F(RuntimeTest, RejectsAMisplacedInstructionStream) {
   EXPECT_FALSE(runtime_.Load(program).has_value());
   program.instruction_offset = 0;
   program.instruction_count = 100;
+  EXPECT_FALSE(runtime_.Load(program).has_value());
+  program = DoubleProgram();
+  program.streams["double"].offset = 16;
+  EXPECT_FALSE(runtime_.Load(program).has_value());
+  program.streams["double"] = {.offset = 0, .count = 0};
   EXPECT_FALSE(runtime_.Load(program).has_value());
 }
 
@@ -159,10 +198,12 @@ class ProgramFiles {
     }
     std::ofstream(directory_ / "meta.json") << std::format(
         R"({{"base": {}, "n_instr": {}, "instr_off": {}, "image_bytes": {},)"
+        R"( "steps": 10, "streams": {{"double": [{}, {}]}},)"
         R"( "regions": {{"input": [{}, {}], "output": [{}, {}]}},)"
         R"( "outputs": ["output"]}})",
         program.base, program.instruction_count, program.instruction_offset,
-        image_bytes, kInputOffset, kWordBytes, kOutputOffset, kWordBytes);
+        image_bytes, program.instruction_offset, program.instruction_count,
+        kInputOffset, kWordBytes, kOutputOffset, kWordBytes);
   }
 
   [[nodiscard]] const std::filesystem::path& Directory() const {
@@ -183,6 +224,9 @@ TEST_F(RuntimeTest, RunsAProgramLoadedFromItsFiles) {
   EXPECT_EQ(program->instruction_count, compiled.instruction_count);
   EXPECT_EQ(program->image, compiled.image);
   EXPECT_EQ(program->regions.at("output").offset, kOutputOffset);
+  EXPECT_EQ(program->streams.at("double").count, compiled.instruction_count);
+  ASSERT_EQ(program->parameters.size(), 1U);
+  EXPECT_EQ(program->parameters.at("steps"), 10);
   ASSERT_TRUE(runtime_.Load(std::move(*program)).has_value());
   std::array<float, 32> input{};
   std::array<float, 32> doubled{};

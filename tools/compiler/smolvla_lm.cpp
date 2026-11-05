@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "ddr_image.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
 #include "program.hpp"
-#include "safetensors.hpp"
 #include "smolvla_parts.hpp"
 #include "tensors.hpp"
 #include "weights.hpp"

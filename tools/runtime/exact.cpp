@@ -1,4 +1,4 @@
-#include "exact.hpp"
+#include "hotarubi/exact.hpp"
 
 #include <bit>
 #include <cstddef>
@@ -7,9 +7,9 @@
 #include <utility>
 #include <vector>
 
-#include "isa.hpp"
+#include "hotarubi/require.hpp"
 
-namespace hotarubi::compiler::exact {
+namespace hotarubi::exact {
 namespace {
 
 using Limbs = std::vector<uint32_t>;
@@ -585,4 +585,4 @@ Real Tanh(const Real& x) {
   return x.Negative() ? value.Negated() : value;
 }
 
-}  // namespace hotarubi::compiler::exact
+}  // namespace hotarubi::exact

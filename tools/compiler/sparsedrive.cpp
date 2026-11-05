@@ -6,15 +6,16 @@
 #include <cstdint>
 #include <format>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "checkpoint.hpp"
 #include "ddr_image.hpp"
+#include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
 #include "output.hpp"
 #include "program.hpp"
-#include "safetensors.hpp"
 #include "sparsedrive_head.hpp"
 #include "sparsedrive_kernels.hpp"
 #include "sparsedrive_layers.hpp"
@@ -190,6 +191,16 @@ std::vector<std::vector<sd::FMap>> EmitEncoders(Program& program,
   return features;
 }
 
+void DefineFinalRows(DdrImage& image, std::string_view stream,
+                     const sd::SparseHead& head) {
+  const std::array<std::pair<std::string_view, const sd::Rows*>, 2> rows = {
+      {{"x", &head.x[head.cur_x]}, {"anchor", &head.anc[head.cur_a]}}};
+  for (const auto& [suffix, final_rows] : rows) {
+    image.Define(std::format("{}.{}.{}", stream, head.tag, suffix),
+                 final_rows->off, image.Region(final_rows->name).size);
+  }
+}
+
 }  // namespace
 
 Compiled CompileSparseDrive(const SparseDriveOptions& options,
@@ -240,6 +251,8 @@ Compiled CompileSparseDrive(const SparseDriveOptions& options,
     map.EmitFrame(program, temp);
     motion.EmitFrame(program);
     program.Halt();
+    DefineFinalRows(image, streams[s].name, det);
+    DefineFinalRows(image, streams[s].name, map);
   }
   const uint64_t heads_w_bytes = image.Region("heads.w").size;
   Require((sd::kCameras - 1) * sd::kStemImageBytes <= heads_w_bytes,
