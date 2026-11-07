@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "hotarubi/json.hpp"
 #include "isa.hpp"
 
 namespace hotarubi::compiler {
@@ -134,6 +135,54 @@ TEST(ProgramTest, ListsAndSerializesInstructions) {
   EXPECT_EQ(bytes[15], std::byte{0x01});
   EXPECT_EQ(bytes[30], std::byte{0xD0});
   EXPECT_EQ(bytes[31], std::byte{0x07});
+}
+
+TEST(ProgramTest, ScopesTagInstructionsAndTheJsonListingHoldsRanges) {
+  Program program(kBase);
+  program.Load({.ddr_offset = 0x10, .mem = Mem::kFbuf, .rows = 2}, "ld");
+  {
+    const Program::Scope vision(program, "vision");
+    const Program::Scope layer(program, "L0");
+    program.Vec(
+        {.op = VecOp::kCopy, .src = 0, .dst = 100, .rows_q = 2, .n8 = 1},
+        "copy \"x\"");
+  }
+  program.Halt();
+  EXPECT_EQ(program.Tag(0), "");
+  EXPECT_EQ(program.Tag(1), "vision/L0");
+  EXPECT_EQ(program.Tag(2), "");
+  EXPECT_EQ(program.Note(1), "copy \"x\"");
+  ASSERT_EQ(program.Writes(0).size(), 1U);
+  EXPECT_EQ(program.Writes(0)[0].mem, Mem::kFbuf);
+  EXPECT_EQ(program.Writes(0)[0].lo, 0U);
+  EXPECT_EQ(program.Writes(0)[0].hi, 2U);
+  ASSERT_EQ(program.Reads(1).size(), 1U);
+  EXPECT_EQ(program.Reads(1)[0].hi, 2U);
+  EXPECT_EQ(program.Writes(1)[0].lo, 100U);
+  const auto listing = Json::Parse(program.ListingJson());
+  ASSERT_TRUE(listing.has_value()) << listing.error();
+  EXPECT_EQ(listing->Find("base")->Integer(), static_cast<int64_t>(kBase));
+  const Json::Array& tags = listing->Find("tags")->Items();
+  ASSERT_EQ(tags.size(), 3U);
+  EXPECT_EQ(tags[1].String(), "vision");
+  EXPECT_EQ(tags[2].String(), "vision/L0");
+  const Json::Array& instructions = listing->Find("instructions")->Items();
+  ASSERT_EQ(instructions.size(), 3U);
+  EXPECT_EQ(instructions[1].Find("engine")->String(), "VEC");
+  EXPECT_EQ(instructions[1].Find("opcode")->Integer(), 5);
+  EXPECT_EQ(instructions[1].Find("wait")->Integer(), 1);
+  EXPECT_EQ(instructions[1].Find("tag")->Integer(), 2);
+  EXPECT_EQ(instructions[1].Find("note")->String(), "copy \"x\"");
+  EXPECT_EQ(instructions[1].Find("hex")->String(),
+            program.Instructions()[1].Hex());
+  const Json::Array& reads = instructions[1].Find("reads")->Items();
+  ASSERT_EQ(reads.size(), 1U);
+  EXPECT_EQ(reads[0].Items()[0].String(), "FBUF");
+  EXPECT_EQ(reads[0].Items()[1].Integer(), 0);
+  EXPECT_EQ(reads[0].Items()[2].Integer(), 2);
+  EXPECT_EQ(instructions[2].Find("engine")->String(), "CTRL");
+  EXPECT_EQ(instructions[2].Find("wait")->Integer(), 0xD);
+  EXPECT_TRUE(instructions[2].Find("reads")->Items().empty());
 }
 
 TEST(ProgramDeathTest, RejectsAGemmOutsideTheSpecifiedRanges) {

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -93,6 +94,19 @@ struct RunArgs {
 
 class Program {
  public:
+  class Scope {
+   public:
+    Scope(Program& program, std::string_view tag);
+    Scope(const Scope&) = delete;
+    Scope& operator=(const Scope&) = delete;
+    Scope(Scope&&) = delete;
+    Scope& operator=(Scope&&) = delete;
+    ~Scope();
+
+   private:
+    Program& program_;
+  };
+
   explicit Program(uint64_t base);
 
   size_t Load(const Transfer& transfer, std::string_view note = {});
@@ -115,6 +129,20 @@ class Program {
   }
   [[nodiscard]] std::vector<std::byte> Bytes() const;
   [[nodiscard]] std::string Listing() const;
+  [[nodiscard]] std::string ListingJson() const;
+  [[nodiscard]] Engine EngineOf(size_t index) const {
+    return engines_.at(index);
+  }
+  [[nodiscard]] std::string_view Tag(size_t index) const;
+  [[nodiscard]] std::string_view Note(size_t index) const {
+    return notes_.at(index);
+  }
+  [[nodiscard]] const std::vector<Range>& Reads(size_t index) const {
+    return reads_.at(index);
+  }
+  [[nodiscard]] const std::vector<Range>& Writes(size_t index) const {
+    return writes_.at(index);
+  }
 
  private:
   static constexpr int kEngines = 3;
@@ -137,10 +165,20 @@ class Program {
               std::string_view note);
   [[nodiscard]] uint32_t DmaAddress(uint64_t offset) const;
 
+  void PushScope(std::string_view tag);
+  void PopScope();
+
   uint64_t base_;
   std::vector<Instruction> instructions_;
   std::vector<std::string> notes_;
   std::vector<Engine> engines_;
+  std::vector<std::vector<Range>> reads_;
+  std::vector<std::vector<Range>> writes_;
+  std::vector<uint32_t> tag_index_;
+  std::vector<std::string> tags_;
+  std::map<std::string, uint32_t, std::less<>> tag_lookup_;
+  std::vector<size_t> scope_lengths_;
+  std::string scope_;
   std::array<int32_t, kEngines> known_{};
   std::array<Tracker, kMemCount> trackers_;
   size_t wait_count_ = 0;

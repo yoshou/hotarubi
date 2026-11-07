@@ -55,6 +55,7 @@ struct Result {
   Matrix actions;
   Matrix x_t;
   Counters counters;
+  Timing timing;
 };
 
 class LanguageTable {
@@ -83,7 +84,8 @@ std::expected<Frame, std::string> ReadFrame(const SafeTensors& file,
 std::expected<Result, std::string> RunFrame(Runtime& runtime,
                                             const Frame& frame,
                                             const Matrix& language,
-                                            std::chrono::milliseconds timeout);
+                                            std::chrono::milliseconds timeout,
+                                            const TraceRequest& trace = {});
 std::vector<std::pair<std::string, Tensor>> OutputTensors(const Frame& frame,
                                                           const Result& result);
 

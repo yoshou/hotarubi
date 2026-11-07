@@ -48,7 +48,11 @@ module dma_engine (
   input  logic          rd_grant_i,
   output logic [2:0]    rd_mem_o,
   output logic [19:0]   rd_addr_o,
-  input  logic [1055:0] rd_data_i
+  input  logic [1055:0] rd_data_i,
+  output logic          stat_rd_beat_o,
+  output logic          stat_wr_beat_o,
+  output logic          stat_denied_o,
+  output logic          stat_null_o
 );
 
   localparam int RfDepth = 128;
@@ -93,6 +97,13 @@ module dma_engine (
 
   assign cmd_ready_o = (st == SIdle);
   assign busy_o      = (st != SIdle);
+
+  logic ga_null;
+
+  assign stat_rd_beat_o = m_axi_rvalid_i;
+  assign stat_wr_beat_o = m_axi_wvalid_o && m_axi_wready_i;
+  assign stat_denied_o  = (rd_req_o && !rd_grant_i) || (wr_req_o && !wr_grant_i);
+  assign stat_null_o    = ga_null || (gi_step && gi_null);
 
   always_comb begin
     case (c_mem)
@@ -851,7 +862,8 @@ module dma_engine (
     .out_ready_i(ga_out_ready),
     .out_word_o (ga_out_word),
     .out_addr_o (ga_out_addr),
-    .idle_o     (ga_idle)
+    .idle_o     (ga_idle),
+    .null_o     (ga_null)
   );
 
   assign ga_out_ready = !wf_afull && run && c_gacc;

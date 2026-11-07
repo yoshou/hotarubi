@@ -16,6 +16,9 @@ add_library(hotarubi_iss STATIC
   machine.cpp
   memories.cpp
   scalar.cpp
+  timeline.cpp
+  timing.cpp
+  trace_record.cpp
   vec_engine.cpp
   ${rom_source})
 target_include_directories(hotarubi_iss PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -25,8 +28,10 @@ add_library(iss_reference STATIC encoding.cpp reference.cpp)
 target_include_directories(iss_reference PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(iss_reference PUBLIC hotarubi_runtime)
 
-foreach(test dma_engine_test fp32_test gemm_array_test machine_test vec_engine_test
-    vec_pass_test)
-  hotarubi_add_test(${test} ${test}.cpp)
-  target_link_libraries(${test} PRIVATE hotarubi_iss iss_reference)
-endforeach()
+if(NOT CMAKE_CROSSCOMPILING)
+  foreach(test dma_engine_test fp32_test gemm_array_test machine_test timing_test
+      vec_engine_test vec_pass_test)
+    hotarubi_add_test(${test} ${test}.cpp)
+    target_link_libraries(${test} PRIVATE hotarubi_iss iss_reference)
+  endforeach()
+endif()

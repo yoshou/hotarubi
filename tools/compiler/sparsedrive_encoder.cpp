@@ -885,13 +885,20 @@ class EncoderEmitter {
     FMap conv1 =
         MakeMap("stem.conv1", kStemH, kStemW, kStemOut, MapKind::kFloat);
     PlaceMap(conv1, image_, std::nullopt, &arena_);
-    EmitStem(program_, PlaceStem(image_, base_, backbone_, input), conv1,
-             input.gathers);
+    {
+      const Program::Scope scope(program_, "stem");
+      EmitStem(program_, PlaceStem(image_, base_, backbone_, input), conv1,
+               input.gathers);
+    }
     FMap x8 =
         MakeMap("stem.out", kStemH / 2, kStemW / 2, kStemOut, MapKind::kInt8);
     PlaceMap(x8, image_);
-    EmitMaxpool(program_, image_, base_, conv1, x8);
+    {
+      const Program::Scope scope(program_, "maxpool");
+      EmitMaxpool(program_, image_, base_, conv1, x8);
+    }
     std::vector<FMap> c = Resnet(std::move(x8));
+    const Program::Scope scope(program_, "fpn");
     return Fpn(c, camera);
   }
 
@@ -932,6 +939,7 @@ class EncoderEmitter {
       for (uint32_t j = 0; j < stage.blocks; ++j) {
         const uint32_t s = j == 0 ? s0 : 1;
         const std::string tag = std::format("layer{}.{}", i + 1, j);
+        const Program::Scope scope(program_, tag);
         FMap t1 = MakeMap(tag + ".t1", h, w, stage.mid, MapKind::kInt8);
         AliasMap(t1, t1_0);
         EmitConv(program_, image_, base_,

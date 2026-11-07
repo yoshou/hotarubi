@@ -427,11 +427,20 @@ std::expected<Frame, std::string> ReadFrame(const SafeTensors& file,
 std::expected<Result, std::string> RunFrame(Runtime& runtime,
                                             const Frame& frame,
                                             const Matrix& language,
-                                            std::chrono::milliseconds timeout) {
+                                            std::chrono::milliseconds timeout,
+                                            const TraceRequest& trace) {
   if (frame.state.size() > kStateWidth || frame.noise.rows != kChunk ||
       frame.noise.cols != kActionWidth) {
     return std::unexpected("the state or the noise has the wrong size");
   }
+  Timing timing;
+  auto clock = std::chrono::steady_clock::now();
+  const auto lap = [&clock] {
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = now - clock;
+    clock = now;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
+  };
   const auto layout = ReadLayout(runtime, language.rows);
   if (!layout) {
     return std::unexpected(layout.error());
@@ -449,7 +458,9 @@ std::expected<Result, std::string> RunFrame(Runtime& runtime,
       return std::unexpected(written.error());
     }
   }
-  auto counters = runtime.Run(timeout);
+  timing.inputs = lap();
+  auto counters = runtime.Run(timeout, {}, trace);
+  timing.run = lap();
   if (!counters) {
     return std::unexpected(counters.error());
   }
@@ -460,9 +471,11 @@ std::expected<Result, std::string> RunFrame(Runtime& runtime,
   }
   Matrix x_t = UnpackFbuf(output, layout->output_rows, kActionWidth);
   Matrix actions = Actions(x_t);
+  timing.outputs = lap();
   return Result{.actions = std::move(actions),
                 .x_t = std::move(x_t),
-                .counters = *counters};
+                .counters = *counters,
+                .timing = timing};
 }
 
 std::vector<std::pair<std::string, Tensor>> OutputTensors(

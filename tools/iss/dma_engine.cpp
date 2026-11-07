@@ -37,6 +37,7 @@ constexpr uint32_t kGatherEntriesPerSlot = 16;
 constexpr uint32_t kGatherMaxBlocks = 8;
 constexpr uint32_t kGatherMaxSlots = 2047;
 constexpr uint32_t kMaxRowBeats = 65536;
+constexpr uint32_t kBurstBeats = 16;
 
 using WordBytes = std::array<std::byte, kWordBufferBytes>;
 using Mxint8Word = std::array<std::byte, kMxint8WordBytes>;
@@ -65,11 +66,26 @@ uint32_t UnitAddress(uint32_t entry) { return (entry & 0x0FFFFFFFU) << 4; }
 
 uint8_t Byte(std::byte value) { return std::to_integer<uint8_t>(value); }
 
-std::vector<uint32_t> ReadEntries(const Ddr& ddr, uint32_t address,
-                                  uint32_t count) {
+uint64_t Bursts(uint64_t beats) {
+  return (beats + kBurstBeats - 1) / kBurstBeats;
+}
+
+void CountRead(DmaActivity& activity, uint64_t beats) {
+  activity.read_beats += beats;
+  activity.read_bursts += Bursts(beats);
+}
+
+void CountWrite(DmaActivity& activity, uint64_t beats) {
+  activity.write_beats += beats;
+  activity.write_bursts += Bursts(beats);
+}
+
+std::vector<uint32_t> ReadList(const Ddr& ddr, uint32_t address, uint32_t count,
+                               DmaActivity& activity) {
+  CountRead(activity, (uint64_t{count} + 3) / 4);
+  std::vector<uint32_t> entries(count);
   std::vector<std::byte> bytes(size_t{count} * 4);
   ddr.Read(address, bytes);
-  std::vector<uint32_t> entries(count);
   for (size_t i = 0; i < entries.size(); ++i) {
     entries[i] =
         static_cast<uint32_t>(LoadLittle(std::span(bytes).subspan(i * 4, 4)));
@@ -195,25 +211,32 @@ void UnpackQuad(const RowFormat& format, const Memories& memories, uint32_t mem,
   }
 }
 
-void LoadWords(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
-  const uint32_t bytes = BeatsPerWord(command.mem) * kBeatBytes;
+void LoadWords(const DmaCommand& command, const Ddr& ddr, Memories& memories,
+               DmaActivity& activity) {
+  const uint32_t beats = BeatsPerWord(command.mem);
+  const uint32_t bytes = beats * kBeatBytes;
   const uint32_t count = command.rows * command.row_words;
   if ((command.flags & kFlagIndex) != 0) {
     const std::vector<uint32_t> entries =
-        ReadEntries(ddr, command.ddr_addr, count);
+        ReadList(ddr, command.ddr_addr, count, activity);
     for (uint32_t e = 0; e < count; ++e) {
       WordBytes word{};
       if (entries[e] != kNullEntry) {
+        CountRead(activity, beats);
         ddr.Read(UnitAddress(entries[e]), std::span(word).first(bytes));
-      } else if (command.mem == 0) {
-        std::ranges::fill(std::span(word).subspan(kAbufScaleOffset, kTokens),
-                          kNullScale);
+      } else {
+        ++activity.null_entries;
+        if (command.mem == 0) {
+          std::ranges::fill(std::span(word).subspan(kAbufScaleOffset, kTokens),
+                            kNullScale);
+        }
       }
       WriteWord(memories, command.mem, command.onchip + e, word);
     }
     return;
   }
   for (uint32_t r = 0; r < command.rows; ++r) {
+    CountRead(activity, uint64_t{command.row_words} * beats);
     for (uint32_t w = 0; w < command.row_words; ++w) {
       WordBytes word{};
       ddr.Read(RowAddress(command, r, uint64_t{w} * bytes),
@@ -224,26 +247,32 @@ void LoadWords(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
   }
 }
 
-void LoadRows(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
+void LoadRows(const DmaCommand& command, const Ddr& ddr, Memories& memories,
+              DmaActivity& activity) {
   const bool indexed = (command.flags & kFlagIndex) != 0;
   const RowFormat format = MakeRowFormat(command, indexed);
   const uint32_t count = command.rows * command.row_words;
   const std::vector<uint32_t> entries =
-      indexed ? ReadEntries(ddr, command.ddr_addr, count)
+      indexed ? ReadList(ddr, command.ddr_addr, count, activity)
               : std::vector<uint32_t>{};
   Quad quad;
   for (uint32_t u = 0; u < count; ++u) {
     Unit& unit = quad.at(u % kTokens);
     unit.assign(format.bytes, std::byte{0});
     if (!indexed) {
+      CountRead(activity, format.bytes / kBeatBytes);
       ddr.Read(RowAddress(command, u / command.row_words,
                           uint64_t{u % command.row_words} * format.bytes),
                unit);
     } else if (entries[u] != kNullEntry) {
+      CountRead(activity, format.bytes / kBeatBytes);
       ddr.Read(UnitAddress(entries[u]), unit);
-    } else if (format.mxint8) {
-      std::ranges::fill(std::span(unit).subspan(format.data_bytes, format.tok),
-                        kNullScale);
+    } else {
+      ++activity.null_entries;
+      if (format.mxint8) {
+        std::ranges::fill(
+            std::span(unit).subspan(format.data_bytes, format.tok), kNullScale);
+      }
     }
     if (u % kTokens == kTokens - 1) {
       PackQuad(format, quad, memories, command.mem,
@@ -252,22 +281,28 @@ void LoadRows(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
   }
 }
 
-void StoreWords(const DmaCommand& command, Ddr& ddr, const Memories& memories) {
-  const uint32_t bytes = BeatsPerWord(command.mem) * kBeatBytes;
+void StoreWords(const DmaCommand& command, Ddr& ddr, const Memories& memories,
+                DmaActivity& activity) {
+  const uint32_t beats = BeatsPerWord(command.mem);
+  const uint32_t bytes = beats * kBeatBytes;
   const uint32_t count = command.rows * command.row_words;
   if ((command.flags & kFlagIndex) != 0) {
     const std::vector<uint32_t> entries =
-        ReadEntries(ddr, command.ddr_addr, count);
+        ReadList(ddr, command.ddr_addr, count, activity);
     for (uint32_t e = 0; e < count; ++e) {
       if (entries[e] != kNullEntry) {
+        CountWrite(activity, beats);
         const WordBytes word =
             ReadWord(memories, command.mem, command.onchip + e);
         ddr.Write(UnitAddress(entries[e]), std::span(word).first(bytes));
+      } else {
+        ++activity.null_entries;
       }
     }
     return;
   }
   for (uint32_t r = 0; r < command.rows; ++r) {
+    CountWrite(activity, uint64_t{command.row_words} * beats);
     for (uint32_t w = 0; w < command.row_words; ++w) {
       const WordBytes word = ReadWord(
           memories, command.mem, command.onchip + (r * command.row_words) + w);
@@ -277,12 +312,13 @@ void StoreWords(const DmaCommand& command, Ddr& ddr, const Memories& memories) {
   }
 }
 
-void StoreRows(const DmaCommand& command, Ddr& ddr, const Memories& memories) {
+void StoreRows(const DmaCommand& command, Ddr& ddr, const Memories& memories,
+               DmaActivity& activity) {
   const bool indexed = (command.flags & kFlagIndex) != 0;
   const RowFormat format = MakeRowFormat(command, indexed);
   const uint32_t count = command.rows * command.row_words;
   const std::vector<uint32_t> entries =
-      indexed ? ReadEntries(ddr, command.ddr_addr, count)
+      indexed ? ReadList(ddr, command.ddr_addr, count, activity)
               : std::vector<uint32_t>{};
   Quad quad;
   for (uint32_t q = 0; q < count / kTokens; ++q) {
@@ -291,11 +327,15 @@ void StoreRows(const DmaCommand& command, Ddr& ddr, const Memories& memories) {
     for (uint32_t j = 0; j < kTokens; ++j) {
       const uint32_t u = (q * kTokens) + j;
       if (!indexed) {
+        CountWrite(activity, format.bytes / kBeatBytes);
         ddr.Write(RowAddress(command, u / command.row_words,
                              uint64_t{u % command.row_words} * format.bytes),
                   quad.at(j));
       } else if (entries[u] != kNullEntry) {
+        CountWrite(activity, format.bytes / kBeatBytes);
         ddr.Write(UnitAddress(entries[u]), quad.at(j));
+      } else {
+        ++activity.null_entries;
       }
     }
   }
@@ -307,7 +347,8 @@ void SetNibble(WbufWord& word, uint32_t index, uint32_t value) {
                         : static_cast<uint8_t>((byte & 0x0FU) | (value << 4));
 }
 
-void LoadSplit8(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
+void LoadSplit8(const DmaCommand& command, const Ddr& ddr, Memories& memories,
+                DmaActivity& activity) {
   Require(command.rows % 2 == 0,
           std::format("SPLIT8 with an odd number of rows {}", command.rows));
   const uint32_t half = (command.rows * command.row_words) / 2;
@@ -317,6 +358,7 @@ void LoadSplit8(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
       WbufWord low{};
       for (uint32_t r = 0; r < 2; ++r) {
         Mxint8Word in{};
+        CountRead(activity, in.size() / kBeatBytes);
         ddr.Read(RowAddress(command, (2 * p) + r, uint64_t{w} * in.size()), in);
         for (uint32_t k = 0; k < kTokens * kBlock; ++k) {
           const uint32_t value = Byte(in.at(k));
@@ -378,7 +420,8 @@ std::array<WbufWord, 8> TransposeGroup(
   return out;
 }
 
-void LoadT32(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
+void LoadT32(const DmaCommand& command, const Ddr& ddr, Memories& memories,
+             DmaActivity& activity) {
   Require(command.rows % kT32Rows == 0,
           std::format("T32_SPLIT8 with {} rows, not a multiple of 8",
                       command.rows));
@@ -388,6 +431,7 @@ void LoadT32(const DmaCommand& command, const Ddr& ddr, Memories& memories) {
     for (uint32_t w = 0; w < command.row_words; ++w) {
       std::array<Mxint8Word, kT32Rows> in{};
       for (uint32_t f = 0; f < kT32Rows; ++f) {
+        CountRead(activity, kMxint8WordBytes / kBeatBytes);
         ddr.Read(RowAddress(command, (g * kT32Rows) + f,
                             uint64_t{w} * kMxint8WordBytes),
                  in.at(f));
@@ -413,10 +457,12 @@ using GatherCoefficients = std::array<FbufWord, kGatherMaxBlocks>;
 
 GatherCoefficients LoadGatherCoefficients(const Ddr& ddr,
                                           const GatherWeights& weights,
-                                          uint32_t group) {
+                                          uint32_t group,
+                                          DmaActivity& activity) {
   GatherCoefficients w{};
   for (uint32_t i = 0; i < weights.blocks; ++i) {
     std::array<std::byte, size_t{kFbufElements} * 4> chunk{};
+    CountRead(activity, chunk.size() / kBeatBytes);
     ddr.Read(weights.base + (group * 128) + (i * weights.stride), chunk);
     for (uint32_t e = 0; e < kFbufElements; ++e) {
       w.at(i).at(e) = static_cast<uint32_t>(
@@ -496,15 +542,16 @@ uint8_t AlignElement(uint8_t value, uint32_t shift) {
 
 void DmaEngine::Execute(const DmaCommand& command, Ddr& ddr,
                         Memories& memories) {
+  activity_ = {};
   const bool rows = (command.flags & kFlagRows) != 0;
   if (command.store) {
     if (command.rows * command.row_words == 0) {
       return;
     }
     if (rows) {
-      StoreRows(command, ddr, memories);
+      StoreRows(command, ddr, memories, activity_);
     } else {
-      StoreWords(command, ddr, memories);
+      StoreWords(command, ddr, memories, activity_);
     }
     return;
   }
@@ -517,9 +564,9 @@ void DmaEngine::Execute(const DmaCommand& command, Ddr& ddr,
   }
   if (command.mode == kModeRaw) {
     if (rows) {
-      LoadRows(command, ddr, memories);
+      LoadRows(command, ddr, memories, activity_);
     } else {
-      LoadWords(command, ddr, memories);
+      LoadWords(command, ddr, memories, activity_);
     }
     return;
   }
@@ -527,9 +574,9 @@ void DmaEngine::Execute(const DmaCommand& command, Ddr& ddr,
   Require(command.mem == static_cast<uint32_t>(Mem::kWbuf),
           "SPLIT8 and T32_SPLIT8 write WBUF");
   if (command.mode == kModeSplit8) {
-    LoadSplit8(command, ddr, memories);
+    LoadSplit8(command, ddr, memories, activity_);
   } else {
-    LoadT32(command, ddr, memories);
+    LoadT32(command, ddr, memories, activity_);
   }
 }
 
@@ -545,6 +592,9 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
       token.fill(0);
     }
   }
+  const uint64_t entries = uint64_t{command.rows} * kGatherEntriesPerSlot;
+  activity_.gather_entries = entries;
+  CountRead(activity_, 1 + (entries / 2));
   const uint64_t header = ddr.Read64(command.ddr_addr);
   const GatherWeights weights{
       .base = UnitAddress(static_cast<uint32_t>(header)) +
@@ -558,7 +608,7 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
   std::vector<std::byte> row(((size_t{2} * blocks) + 1) * kBeatBytes);
   for (uint32_t s = 0; s < command.rows; ++s) {
     if (s % kGatherSlotGroup == 0) {
-      w = LoadGatherCoefficients(ddr, weights, s / kGatherSlotGroup);
+      w = LoadGatherCoefficients(ddr, weights, s / kGatherSlotGroup, activity_);
     }
     for (uint32_t t = 0; t < kTokens; ++t) {
       for (uint32_t k = 0; k < kTokens; ++k) {
@@ -566,8 +616,11 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
             ddr.Read64(command.ddr_addr + kBeatBytes +
                        (((s * kGatherEntriesPerSlot) + (t * kTokens) + k) * 8));
         if (static_cast<uint32_t>(entry) == kNullEntry) {
+          ++activity_.null_entries;
           continue;
         }
+        CountRead(activity_, row.size() / kBeatBytes);
+        ++activity_.gather_rows;
         ddr.Read(UnitAddress(static_cast<uint32_t>(entry)), row);
         for (uint32_t i = 0; i < blocks; ++i) {
           AccumulateGatherBlock(

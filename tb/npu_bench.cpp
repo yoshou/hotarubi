@@ -35,18 +35,18 @@ void FromBeat(VlWide<4>& wide, const Beat& beat) {
 
 }  // namespace
 
-Ddr::Ddr() : bytes_(kSize, 0) {}
+Ddr::Ddr(uint32_t base, uint32_t size) : base_(base), bytes_(size, 0) {}
 
-bool Ddr::Contains(uint64_t address, uint64_t bytes) {
-  return address >= kBase && address + bytes <= uint64_t{kBase} + kSize;
+bool Ddr::Contains(uint64_t address, uint64_t bytes) const {
+  return address >= base_ && address + bytes <= uint64_t{base_} + bytes_.size();
 }
 
 uint8_t Ddr::Read8(uint32_t address) const {
-  return bytes_.at(address - kBase);
+  return bytes_.at(address - base_);
 }
 
 void Ddr::Write8(uint32_t address, uint8_t value) {
-  bytes_.at(address - kBase) = value;
+  bytes_.at(address - base_) = value;
 }
 
 uint32_t Ddr::Read32(uint32_t address) const {
@@ -119,7 +119,7 @@ AxiSlaveOutputs AxiSlave::Drive(const Ddr& ddr, uint64_t cycle) {
     if (out_.r_valid) {
       const AxiRequest& request = reads_.front();
       const uint32_t address = request.address + (16 * request.done);
-      if (Ddr::Contains(address, 16)) {
+      if (ddr.Contains(address, 16)) {
         out_.r_data = ddr.ReadBeat(address);
       }
       out_.r_last = request.done + 1 == request.beats;
@@ -157,7 +157,7 @@ void AxiSlave::AcceptWriteBeat(Ddr& ddr, uint64_t cycle,
   if (master.w_last != (request.done + 1 == request.beats)) {
     Error("WLAST mismatch");
   }
-  if (!Ddr::Contains(address, 16)) {
+  if (!ddr.Contains(address, 16)) {
     Error("write outside DDR at " + std::to_string(address));
   } else {
     for (uint32_t byte = 0; byte < 16; ++byte) {
@@ -174,11 +174,12 @@ void AxiSlave::AcceptWriteBeat(Ddr& ddr, uint64_t cycle,
   }
 }
 
-void AxiSlave::AcceptAddresses(uint64_t cycle, const AxiMasterOutputs& master) {
+void AxiSlave::AcceptAddresses(const Ddr& ddr, uint64_t cycle,
+                               const AxiMasterOutputs& master) {
   if (master.ar_valid && out_.ar_ready) {
     CheckAddress("AR", master.ar_addr, master.ar_len, master.ar_size,
                  master.ar_burst);
-    if (!Ddr::Contains(master.ar_addr, 16 * (uint64_t{master.ar_len} + 1))) {
+    if (!ddr.Contains(master.ar_addr, 16 * (uint64_t{master.ar_len} + 1))) {
       Error("read outside DDR at " + std::to_string(master.ar_addr));
     }
     reads_.push_back({.address = master.ar_addr,
@@ -208,7 +209,7 @@ void AxiSlave::Sample(Ddr& ddr, uint64_t cycle,
   if (master.w_valid && out_.w_ready) {
     AcceptWriteBeat(ddr, cycle, master);
   }
-  AcceptAddresses(cycle, master);
+  AcceptAddresses(ddr, cycle, master);
   if (out_.b_valid && master.b_ready) {
     responses_.pop_front();
   }
@@ -225,8 +226,9 @@ Instruction& Instruction::Set(uint32_t lsb, uint32_t width, uint64_t value) {
   return *this;
 }
 
-NpuBench::NpuBench(uint32_t seed)
+NpuBench::NpuBench(uint32_t seed, uint32_t ddr_base, uint32_t ddr_size)
     : top_(std::make_unique<Vnpu_top>()),
+      ddr_(ddr_base, ddr_size),
       rng_(seed),
       slave0_("m0", 16, rng_),
       slave1_("m1", 256, rng_) {

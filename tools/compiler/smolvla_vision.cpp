@@ -587,19 +587,39 @@ class Fc2Residual {
 void Layer(Program& program, const Vision& vision, const VisionLayer& layer,
            const std::array<uint64_t, 3>& x, std::string_view tag) {
   constexpr uint32_t kA = 0;
-  LayerNorm(program, x[0], kPbLn1, kA, std::format("{} LN1", tag));
+  {
+    const Program::Scope scope(program, "ln1");
+    LayerNorm(program, x[0], kPbLn1, kA, std::format("{} LN1", tag));
+  }
   const std::array<uint64_t, 3> outputs = {vision.q, vision.k, vision.v};
   for (size_t i = 0; i < outputs.size(); ++i) {
+    const Program::Scope scope(program, std::format("{}_proj", kLinearTags[i]));
     Projection(program, layer.weights[i], kPbBias[i], outputs[i], false,
                std::format("{} {}_proj", tag, kLinearTags[i]));
   }
-  Attention(program, vision, std::format("{} attn", tag)).Emit();
-  QuantToAbuf(program, vision.o, kA, std::format("{} quant O", tag));
-  OutProjResidual(program, layer.weights[kO], kPbBias[kO], x[0], x[1],
-                  std::format("{} out_proj", tag));
-  LayerNorm(program, x[1], kPbLn2, kA, std::format("{} LN2", tag));
-  Projection(program, layer.weights[kFc1], kPbBias[kFc1], vision.h, true,
-             std::format("{} fc1", tag));
+  {
+    const Program::Scope scope(program, "attn");
+    Attention(program, vision, std::format("{} attn", tag)).Emit();
+  }
+  {
+    const Program::Scope scope(program, "quant_o");
+    QuantToAbuf(program, vision.o, kA, std::format("{} quant O", tag));
+  }
+  {
+    const Program::Scope scope(program, "out_proj");
+    OutProjResidual(program, layer.weights[kO], kPbBias[kO], x[0], x[1],
+                    std::format("{} out_proj", tag));
+  }
+  {
+    const Program::Scope scope(program, "ln2");
+    LayerNorm(program, x[1], kPbLn2, kA, std::format("{} LN2", tag));
+  }
+  {
+    const Program::Scope scope(program, "fc1");
+    Projection(program, layer.weights[kFc1], kPbBias[kFc1], vision.h, true,
+               std::format("{} fc1", tag));
+  }
+  const Program::Scope scope(program, "fc2");
   Fc2Residual(program, vision.h, layer.weights[kFc2], kPbBias[kFc2],
               std::format("{} fc2", tag))
       .Emit(x[1], x[2]);
@@ -793,16 +813,26 @@ Vision PlaceVision(DdrImage& image, const SafeTensors& quant,
 
 void EmitVision(Program& program, const Vision& vision, const Dims& dims,
                 uint64_t lm_input) {
-  Ld(program, vision.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
-     kTbufWordsLoaded * kWordT, "ld TBUF (exp2 + gelu)");
-  Ld(program, vision.patch_pbuf, Mem::kPbuf, 0, 1, kKb, kKb * kWordF,
-     "patch ld PBUF (bias)");
+  const Program::Scope vision_scope(program, "vision");
+  {
+    const Program::Scope scope(program, "setup");
+    Ld(program, vision.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
+       kTbufWordsLoaded * kWordT, "ld TBUF (exp2 + gelu)");
+    Ld(program, vision.patch_pbuf, Mem::kPbuf, 0, 1, kKb, kKb * kWordF,
+       "patch ld PBUF (bias)");
+  }
   for (uint32_t c = 0; c < dims.cameras; ++c) {
+    const Program::Scope scope(program, std::format("patch/c{}", c));
     PatchCamera(program, vision, c, std::format("c{} patch", c));
   }
-  StateProjection(program, vision, dims, lm_input);
+  {
+    const Program::Scope scope(program, "state");
+    StateProjection(program, vision, dims, lm_input);
+  }
   for (uint32_t c = 0; c < dims.cameras; ++c) {
+    const Program::Scope camera(program, std::format("c{}", c));
     for (uint32_t l = 0; l < kLayers; ++l) {
+      const Program::Scope scope(program, std::format("L{}", l));
       const std::string tag = std::format("c{} L{}", c, l);
       Ld(program, vision.layers[l].pbuf, Mem::kPbuf, 0, 1, kPbWords,
          kPbWords * kWordF, std::format("{} ld PBUF", tag));
@@ -811,6 +841,7 @@ void EmitVision(Program& program, const Vision& vision, const Dims& dims,
       Layer(program, vision, vision.layers[l],
             {x_in, vision.x[3], vision.x[1 + (l % 2)]}, tag);
     }
+    const Program::Scope scope(program, "conn");
     Connector(program, vision, vision.x[1 + ((kLayers - 1) % 2)],
               lm_input + (uint64_t{c} * (kImageTokens / 4) * kLmWords * kWordF),
               std::format("c{} conn", c));

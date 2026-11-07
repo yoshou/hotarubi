@@ -5,6 +5,7 @@
 #include <expected>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,15 @@ struct Compiled {
   std::vector<std::pair<std::string, uint64_t>> parameters;
 };
 
+inline constexpr uint64_t kSharedBytes = uint64_t{320} << 20;
+inline constexpr std::string_view kTraceRegion = "trace";
+inline constexpr uint64_t kTraceRecordBytes = 16;
+inline constexpr uint64_t kTraceRecordsPerInstruction = 2;
+
+[[nodiscard]] uint64_t TraceRegionBytes(const std::vector<Stream>& streams);
+uint64_t ReserveTraceRegion(DdrImage& image,
+                            const std::vector<Stream>& streams);
+[[nodiscard]] std::string ListingFileName(std::string_view stream);
 [[nodiscard]] std::string MetaJson(const Compiled& compiled);
 [[nodiscard]] std::expected<void, std::string> WriteCompiled(
     const std::filesystem::path& directory, const Compiled& compiled);

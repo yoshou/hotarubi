@@ -152,6 +152,7 @@ struct VecEngine::PassState {
 };
 
 void VecEngine::Execute(const VecCommand& command, Memories& memories) {
+  activity_ = {};
   Initialize(command);
   uint32_t pc = command.op == kVecRun ? command.aux & kPcMask
                                       : kRomStart.at(command.op & 0xFU);
@@ -163,13 +164,19 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
         RunPass(instruction, memories);
         break;
       case kKindSalu:
+        ++activity_.salu;
         RunSalu(instruction);
         break;
       case kKindSmem:
+        ++activity_.smem;
+        if (undrained_) {
+          ++activity_.drains;
+        }
         Drain();
         RunSmem(instruction, memories);
         break;
       case kKindBranch:
+        ++activity_.branches;
         if (Taken(instruction)) {
           pc = instruction.Field(0, 10);
         }
@@ -230,6 +237,8 @@ void VecEngine::RunPass(const Word128& instruction, Memories& memories) {
   state.pb = Register(pass.rpb) & kPbufAddressMask;
   state.imm = Register(pass.rimm);
   state.imm2 = Register(pass.rimm2);
+  ++activity_.passes;
+  activity_.words += uint64_t{quads} * words;
   for (uint32_t q = 0; q < quads; ++q) {
     for (uint32_t w = 0; w < words; ++w) {
       RunWord(state, w, memories);
@@ -250,7 +259,18 @@ void VecEngine::RunPass(const Word128& instruction, Memories& memories) {
     undrained_pbuf_at_mul_ = undrained_pbuf_at_mul_ || pass.pa_at_mul;
     return;
   }
+  ++activity_.drains;
+  if (pass.red != Reduction::kNone) {
+    ++activity_.drains_reduction;
+  }
+  if (pass.wr == WriteTarget::kAbuf ||
+      (pass.wr == WriteTarget::kFinal && quantize_)) {
+    ++activity_.drains_quantized;
+  }
   Drain();
+  if (pass.sc != RowScalar::kNone) {
+    ++activity_.scalars.at(static_cast<size_t>(pass.sc));
+  }
   ApplyRowScalar(pass.sc, state.reductions, state.imm, rn_, rows_);
 }
 
@@ -363,6 +383,7 @@ void VecEngine::RunSmem(const Word128& instruction, const Memories& memories) {
       scalars.fill(a);
       break;
     case kSmemCount:
+      ++activity_.rn;
       rn_ = CountReciprocal(a);
       break;
     default:

@@ -32,6 +32,9 @@ constexpr uint32_t kIrqAxiError = 0x8;
 constexpr uint32_t kIrqAll = kIrqSignal | kIrqHalt | kIrqIllegal | kIrqAxiError;
 constexpr uint32_t kIrqEnd = kIrqHalt | kIrqIllegal | kIrqAxiError;
 constexpr uint32_t kSignalIdMask = 0xFF;
+constexpr uint32_t kTraceEnable = 0x1;
+constexpr uint32_t kTraceIdle = 0x2;
+constexpr uint32_t kTraceStatistics = 0x4;
 constexpr uint64_t kAddressLimit = uint64_t{1} << 32;
 
 std::string ErrnoMessage(std::string_view what,
@@ -229,22 +232,74 @@ Counters Device::ReadCounters() const {
           .vec_cycles = bus_.Read(Register::kVecCycles),
           .dma_cycles = bus_.Read(Register::kDmaCycles),
           .stall_cycles = bus_.Read(Register::kStallCycles),
-          .starve_cycles = bus_.Read(Register::kStarveCycles)};
+          .starve_cycles = bus_.Read(Register::kStarveCycles),
+          .trace_count = bus_.Read(Register::kTraceCount)};
+}
+
+std::expected<uint32_t, std::string> Device::FinishTrace(
+    const TraceOptions& trace, uint32_t issued, Deadline deadline) {
+  while ((bus_.Read(Register::kTraceCtrl) & kTraceIdle) == 0) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      bus_.Write(Register::kTraceCtrl, 0);
+      return std::unexpected(
+          std::format("the trace did not drain: {} records written",
+                      bus_.Read(Register::kTraceCount)));
+    }
+  }
+  const uint32_t count = bus_.Read(Register::kTraceCount);
+  bus_.Write(Register::kTraceCtrl, 0);
+  const uint32_t most = trace.statistics ? 2 * issued : issued;
+  if (count < issued || count > most) {
+    return std::unexpected(std::format(
+        "the trace holds {} records for {} instructions", count, issued));
+  }
+  return count;
+}
+
+std::expected<Counters, std::string> Device::Finish(uint32_t pending,
+                                                    const TraceOptions& trace,
+                                                    Deadline deadline) {
+  bus_.Write(Register::kIrqStatus, pending & kIrqEnd);
+  bus_.Write(Register::kIrqEnable, 0);
+  if ((pending & kIrqIllegal) != 0) {
+    return std::unexpected(
+        std::format("illegal instruction after {} instructions",
+                    bus_.Read(Register::kIssued)));
+  }
+  if ((pending & kIrqAxiError) != 0) {
+    return std::unexpected("AXI error response");
+  }
+  Counters counters = ReadCounters();
+  if (trace.base) {
+    const auto recorded = FinishTrace(trace, counters.issued, deadline);
+    if (!recorded) {
+      return std::unexpected(recorded.error());
+    }
+    counters.trace_count = *recorded;
+  }
+  return counters;
 }
 
 std::expected<Counters, std::string> Device::Run(
     uint32_t address, uint32_t count, std::chrono::milliseconds timeout,
-    const SignalHandler& on_signal) {
+    const SignalHandler& on_signal, const TraceOptions& trace) {
   const uint32_t enabled_irqs = on_signal ? kIrqAll : kIrqEnd;
   bus_.Write(Register::kIrqStatus, kIrqAll);
   bus_.Write(Register::kIrqEnable, enabled_irqs);
   bus_.Write(Register::kInstrBase, address);
   bus_.Write(Register::kInstrCount, count);
+  if (trace.base) {
+    bus_.Write(Register::kTraceBase, *trace.base);
+    bus_.Write(Register::kTraceCtrl,
+               kTraceEnable | (trace.statistics ? kTraceStatistics : 0U));
+  } else {
+    bus_.Write(Register::kTraceCtrl, 0);
+  }
   if (auto enabled = bus_.EnableInterrupt(); !enabled) {
     return std::unexpected(enabled.error());
   }
   bus_.Write(Register::kCtrl, kCtrlStart);
-  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  const Deadline deadline = std::chrono::steady_clock::now() + timeout;
   while (true) {
     const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now());
@@ -255,6 +310,7 @@ std::expected<Counters, std::string> Device::Run(
     }
     if (!*interrupted) {
       bus_.Write(Register::kIrqEnable, 0);
+      bus_.Write(Register::kTraceCtrl, 0);
       return std::unexpected(std::format(
           "the instruction stream did not halt within {} ms (status {:#x}, "
           "{} instructions issued)",
@@ -270,17 +326,7 @@ std::expected<Counters, std::string> Device::Run(
       bus_.Write(Register::kHostGo, signal.value);
     }
     if ((pending & kIrqEnd) != 0) {
-      bus_.Write(Register::kIrqStatus, pending & kIrqEnd);
-      bus_.Write(Register::kIrqEnable, 0);
-      if ((pending & kIrqIllegal) != 0) {
-        return std::unexpected(
-            std::format("illegal instruction after {} instructions",
-                        bus_.Read(Register::kIssued)));
-      }
-      if ((pending & kIrqAxiError) != 0) {
-        return std::unexpected("AXI error response");
-      }
-      return ReadCounters();
+      return Finish(pending, trace, deadline);
     }
     if (auto enabled = bus_.EnableInterrupt(); !enabled) {
       return std::unexpected(enabled.error());

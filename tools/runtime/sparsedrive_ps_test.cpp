@@ -365,6 +365,7 @@ class SparseDriveRunTest : public testing::Test {
                     .instruction_offset = 0,
                     .instruction_count = 1,
                     .streams = {{"start", {.offset = 0, .count = 1}}},
+                    .listings = {},
                     .regions = layout_.regions,
                     .parameters = {{"cameras", kCameras}}};
     ASSERT_TRUE(runtime_->Load(std::move(program)).has_value());

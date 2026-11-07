@@ -15,6 +15,7 @@ A neural processing unit with its own instruction set, implemented in the progra
 | `include/hotarubi/` | Public C++ headers |
 | `tools/iss/` | Instruction-set simulator |
 | `tools/compiler/` | Compiler |
+| `tools/trace/` | Trace analyzer |
 | `tools/runtime/` | Driver, runtime and the program that runs on the board |
 | `scripts/` | Quantization, board inputs and FP32 references, comparison of board outputs |
 | `AGENTS.md` | Instructions for coding agents, including the coding conventions |
@@ -73,7 +74,7 @@ They write `build/quant/smolvla.safetensors` and `build/quant/sparsedrive.safete
 
 ### 4. Board setup (once)
 
-The board runs Ubuntu 22.04 for Kria; its default boot arguments already reserve the CMA area and enable `generic-uio`. Build the u-dma-buf driver on the board, load it at boot with one 256 MB buffer below 4 GB, give the `plugdev` group (which includes the default `ubuntu` user) access to the devices, and make the firmware directory writable:
+The board runs Ubuntu 22.04 for Kria; its default boot arguments already reserve the CMA area and enable `generic-uio`. Build the u-dma-buf driver on the board, load it at boot with one 320 MB buffer below 4 GB, give the `plugdev` group (which includes the default `ubuntu` user) access to the devices, and make the firmware directory writable:
 
 ```
 ssh kv260
@@ -82,7 +83,7 @@ cd udmabuf && make KERNEL_SRC_DIR=/lib/modules/$(uname -r)/build
 sudo mkdir -p /lib/modules/$(uname -r)/extra
 sudo cp u-dma-buf.ko /lib/modules/$(uname -r)/extra/ && sudo depmod -a
 echo u-dma-buf | sudo tee /etc/modules-load.d/u-dma-buf.conf
-echo "options u-dma-buf udmabuf0=268435456 dma_mask_bit=32" | sudo tee /etc/modprobe.d/u-dma-buf.conf
+echo "options u-dma-buf udmabuf0=335544320 dma_mask_bit=32" | sudo tee /etc/modprobe.d/u-dma-buf.conf
 printf 'SUBSYSTEM=="uio", MODE="0660", GROUP="plugdev"\nKERNEL=="udmabuf*", MODE="0660", GROUP="plugdev"\n' |
     sudo tee /etc/udev/rules.d/90-npu.rules
 sudo udevadm control --reload-rules && sudo modprobe u-dma-buf && sudo udevadm trigger
@@ -90,7 +91,7 @@ sudo mkdir -p /lib/firmware/xilinx/npu && sudo chown $USER: /lib/firmware/xilinx
 cat /sys/class/u-dma-buf/udmabuf0/phys_addr
 ```
 
-The last command prints the physical address of the buffer, which the compiler takes as `--base`. It is `0x38700000` on the board used here; replace it below if it differs.
+The last command prints the physical address of the buffer, which the compiler takes as `--base`. It is `0x4f300000` on the board used here; replace it below if it differs.
 
 ### 5. Compilation
 
@@ -99,12 +100,12 @@ cmake --preset gcc-release
 cmake --build --preset gcc-release
 build/gcc-release/tools/compiler/hotarubi_compile smolvla --quant build/quant/smolvla.safetensors \
     --model ~/.cache/huggingface/hub/models--lerobot--smolvla_base/snapshots/5e8d12a6e2975b0e5e5fce7c8caf47c371d257b6/model.safetensors \
-    --base 0x38700000 --lang-tokens 12 --cameras 2 --steps 10 --output build/compiled/smolvla
+    --base 0x4f300000 --lang-tokens 12 --cameras 2 --steps 10 --output build/compiled/smolvla
 build/gcc-release/tools/compiler/hotarubi_compile sparsedrive --quant build/quant/sparsedrive.safetensors \
-    --checkpoint build/sparsedrive/sparsedrive_stage2.pth --base 0x38700000 --output build/compiled/sparsedrive
+    --checkpoint build/sparsedrive/sparsedrive_stage2.pth --base 0x4f300000 --output build/compiled/sparsedrive
 ```
 
-Each output directory holds `image.bin` and `meta.json`. `--lang-tokens` is the number of language tokens of the task prompts, the same as `--lang-tokens` of `scripts/prepare_smolvla.py` (12 by default).
+Each output directory holds `image.bin`, `meta.json` and one `<stream>.listing.json` per instruction stream. `--lang-tokens` is the number of language tokens of the task prompts, the same as `--lang-tokens` of `scripts/prepare_smolvla.py` (12 by default).
 
 ### 6. Bitstream and board program
 
@@ -149,7 +150,7 @@ rsync -a kv260:hotarubi/outputs/smolvla/ build/board/smolvla/outputs/
 rsync -a kv260:hotarubi/outputs/sparsedrive/ build/board/sparsedrive/outputs/
 ```
 
-`hotarubi_run` prints the NPU cycles and the time of each frame.
+`hotarubi_run` prints the NPU cycles and the time of each frame. With `--device iss` it runs the same frames on the instruction-set simulator instead of the board (on the host or on the board), which gives the bit-exact reference outputs and the predicted trace of the cycle model for the same inputs. With `--trace DIR` it also records the execution trace of each frame into `DIR/<frame>.trace.bin` and the counters, the timing split and the provenance hashes into `DIR/<frame>.counters.json`; `--trace-stats` adds the statistics records.
 
 ### 9. Comparison
 
@@ -162,6 +163,23 @@ build/.venv/bin/python scripts/compare_board.py sparsedrive \
 
 - SmolVLA: cosine similarity and largest absolute difference of the actions of each frame, and the mean and minimum cosine similarity.
 - SparseDrive-S: mean L2 distance of the planned trajectories to the FP32 trajectories, for all modes and for the selected trajectory; how often the best mode of the driving command agrees; and the detections with a score of at least 0.5, matched to the FP32 detections within 1 m with the same class.
+
+### 10. Traces
+
+```
+ssh kv260 'cd hotarubi && bin/hotarubi_run smolvla --program compiled/smolvla \
+    --language inputs/smolvla/language.safetensors --input inputs/smolvla/frames --output outputs/smolvla \
+    --trace traces/smolvla --trace-stats'
+rsync -a kv260:hotarubi/traces/ build/traces/
+build/gcc-release/tools/trace/hotarubi_trace check --program build/compiled/smolvla --stream inference \
+    --trace build/traces/smolvla/0000.trace.bin --counters build/traces/smolvla/0000.counters.json
+build/gcc-release/tools/trace/hotarubi_trace report --program build/compiled/smolvla --stream inference \
+    --trace build/traces/smolvla/0000.trace.bin --counters build/traces/smolvla/0000.counters.json --depth 2
+```
+
+`hotarubi_trace` validates a trace against the compiled image (`check`), prints the engine occupancy, the phases by tag, the categories with their streaming efficiency and the largest issue gaps (`report`, with `--json FILE` for the same as JSON), aggregates by tag at a depth (`kernels`), writes a Perfetto timeline (`perfetto --out FILE`), compares two traces (`diff --trace2 FILE`), runs the simulator's cycle model on an image and writes the predicted trace in the same format (`predict --out DIR`), and fits the cycle-model parameters to a board trace (`calibrate`). For SparseDrive-S the stream is `start` or `continue`, as named in the counters file.
+
+`hotarubi_kernel_bench --program DIR --stream NAME --first N --last N --out DIR [--preamble I,J] [--stats]` runs a window of a compiled stream on the Verilator model and writes the same files for `DIR`, so a kernel's RTL trace and its predicted trace can be compared with `hotarubi_trace diff`.
 
 ## License
 

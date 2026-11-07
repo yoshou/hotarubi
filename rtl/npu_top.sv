@@ -100,6 +100,8 @@ module npu_top
   logic [1:0]  dma_mode, dma_flags;
   logic [6:0]  dma_tok;
   logic        dma_axi_err;
+  logic        gemm_stat_fed, vec_stat_issue, vec_stat_drain, vec_stat_scalar, vec_stat_pass;
+  logic        dma_stat_rd_beat, dma_stat_wr_beat, dma_stat_denied, dma_stat_null;
 
   assign dma_axi_err = (m0_axi_rvalid_i && m0_axi_rresp_i[1]) ||
                        (m0_axi_bvalid_i && m0_axi_bresp_i[1]);
@@ -190,7 +192,16 @@ module npu_top
     .dma_ddr_stride_o(dma_ddr_stride),
     .dma_mode_o      (dma_mode),
     .dma_flags_o     (dma_flags),
-    .dma_tok_o       (dma_tok)
+    .dma_tok_o       (dma_tok),
+    .gemm_stat_fed_i (gemm_stat_fed),
+    .vec_stat_issue_i(vec_stat_issue),
+    .vec_stat_drain_i(vec_stat_drain),
+    .vec_stat_scalar_i(vec_stat_scalar),
+    .vec_stat_pass_i (vec_stat_pass),
+    .dma_stat_rd_beat_i(dma_stat_rd_beat),
+    .dma_stat_wr_beat_i(dma_stat_wr_beat),
+    .dma_stat_denied_i(dma_stat_denied),
+    .dma_stat_null_i (dma_stat_null)
   );
 
   logic [19:0]   g_abuf_addr, g_wbuf_addr, g_fbuf_raddr, g_fbuf_waddr;
@@ -231,7 +242,8 @@ module npu_top
     .fbuf_rdata_i  (fbuf_q2),
     .fbuf_we_o     (g_fbuf_we),
     .fbuf_waddr_o  (g_fbuf_waddr),
-    .fbuf_wdata_o  (g_fbuf_wdata)
+    .fbuf_wdata_o  (g_fbuf_wdata),
+    .stat_fed_o    (gemm_stat_fed)
   );
 
   logic          v_fb_rd_req, v_fb_rd_grant, v_fb_wr_req, v_fb_wr_grant, v_ab_wr_req, v_ab_wr_grant;
@@ -278,7 +290,11 @@ module npu_top
     .abuf_waddr_o   (v_ab_waddr),
     .abuf_wdata_o   (v_ab_wdata),
     .cbuf_addr_o    (cb_addr),
-    .cbuf_rdata_i   (cb_rdata)
+    .cbuf_rdata_i   (cb_rdata),
+    .stat_issue_o   (vec_stat_issue),
+    .stat_drain_o   (vec_stat_drain),
+    .stat_scalar_o  (vec_stat_scalar),
+    .stat_pass_o    (vec_stat_pass)
   );
 
   logic          d_wr_req, d_wr_grant, d_rd_req, d_rd_grant;
@@ -337,7 +353,11 @@ module npu_top
     .rd_grant_i      (d_rd_grant),
     .rd_mem_o        (d_rd_mem),
     .rd_addr_o       (d_rd_addr),
-    .rd_data_i       (d_rd_data)
+    .rd_data_i       (d_rd_data),
+    .stat_rd_beat_o  (dma_stat_rd_beat),
+    .stat_wr_beat_o  (dma_stat_wr_beat),
+    .stat_denied_o   (dma_stat_denied),
+    .stat_null_o     (dma_stat_null)
   );
 
   logic vec_busy_r;

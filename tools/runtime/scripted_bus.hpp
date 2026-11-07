@@ -29,6 +29,10 @@ class ScriptedBus final : public Bus {
         return signal_.id;
       case Register::kSignalValue:
         return signal_.value;
+      case Register::kTraceCtrl:
+        return trace_ctrl_ | (trace_idle_ ? 2U : 0U);
+      case Register::kTraceCount:
+        return trace_count_;
       default:
         return 0;
     }
@@ -50,6 +54,12 @@ class ScriptedBus final : public Bus {
         host_go_.push_back(value);
         Advance();
         break;
+      case Register::kTraceBase:
+        trace_base_ = value;
+        break;
+      case Register::kTraceCtrl:
+        trace_ctrl_ = value & 5U;
+        break;
       default:
         break;
     }
@@ -64,6 +74,10 @@ class ScriptedBus final : public Bus {
 
   [[nodiscard]] uint32_t Starts() const { return starts_; }
   [[nodiscard]] const std::vector<uint32_t>& HostGo() const { return host_go_; }
+  [[nodiscard]] uint32_t TraceBase() const { return trace_base_; }
+  [[nodiscard]] uint32_t TraceCtrl() const { return trace_ctrl_; }
+  void SetTraceIdle(bool idle) { trace_idle_ = idle; }
+  void SetTraceCount(uint32_t count) { trace_count_ = count; }
 
  private:
   void Advance() {
@@ -81,6 +95,10 @@ class ScriptedBus final : public Bus {
   uint32_t irq_ = 0;
   uint32_t starts_ = 0;
   std::vector<uint32_t> host_go_;
+  uint32_t trace_base_ = 0;
+  uint32_t trace_ctrl_ = 0;
+  uint32_t trace_count_ = 0;
+  bool trace_idle_ = true;
 };
 
 }  // namespace hotarubi

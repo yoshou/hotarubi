@@ -1849,24 +1849,29 @@ void SparseHead::EmitFrame(Program& program, bool temp) {
   temp_ = temp;
   cur_x = 0;
   cur_a = 0;
-  program.Load(
-      {.ddr_offset = tb,
-       .mem = Mem::kTbuf,
-       .onchip = 0,
-       .rows = 1,
-       .row_words = kTbufWords,
-       .ddr_stride = static_cast<uint32_t>(uint64_t{kTbufWords} * kWordT)},
-      std::format("{} ld TBUF", tag));
-  cbuf_has_ = 0;
-  if (temp) {
-    AnchorProject(std::format("{} temp anchor proj", tag));
+  {
+    const Program::Scope scope(program, "init");
+    program.Load(
+        {.ddr_offset = tb,
+         .mem = Mem::kTbuf,
+         .onchip = 0,
+         .rows = 1,
+         .row_words = kTbufWords,
+         .ddr_stride = static_cast<uint32_t>(uint64_t{kTbufWords} * kWordT)},
+        std::format("{} ld TBUF", tag));
+    cbuf_has_ = 0;
+    if (temp) {
+      AnchorProject(std::format("{} temp anchor proj", tag));
+    }
+    Init(std::format("{} init", tag));
+    AnchorEncoder(std::format("{} E0", tag));
   }
-  Init(std::format("{} init", tag));
-  AnchorEncoder(std::format("{} E0", tag));
   uint32_t refines = 0;
   for (size_t l = 0; l < p.layers.size(); ++l) {
     const HeadLayer& layer = p.layers[l];
     const auto& [pb, keys, note] = pb_layers[l];
+    const Program::Scope scope(program,
+                               std::format("L{}.{}", l, OpName(layer.op)));
     pb.Load(program, note);
     switch (layer.op) {
       case Op::kGnn:
@@ -1900,6 +1905,7 @@ void SparseHead::EmitFrame(Program& program, bool temp) {
         break;
     }
   }
+  const Program::Scope scope(program, "end");
   Bank(false, std::format("{} ibank cache", tag));
   Keep(std::format("{} keep", tag));
   KeepAnchor(std::format("{} keep anchor", tag));

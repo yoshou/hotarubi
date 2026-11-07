@@ -288,5 +288,197 @@ TEST(SequencerTest, TraceRecordsEveryInstruction) {
   EXPECT_TRUE(bench.Errors().empty());
 }
 
+struct StatisticsRecord {
+  uint32_t index = 0;
+  uint32_t source = 0;
+  uint32_t type = 0;
+  uint32_t a = 0;
+  uint32_t b = 0;
+  uint32_t c = 0;
+  uint32_t d = 0;
+  uint32_t zero = 0;
+};
+
+StatisticsRecord ReadStatistics(const Ddr& ddr, uint32_t address) {
+  const uint32_t word1 = ddr.Read32(address + 4);
+  const uint32_t word2 = ddr.Read32(address + 8);
+  const uint32_t word3 = ddr.Read32(address + 12);
+  return {.index = ddr.Read32(address),
+          .source = word1 & 0xFU,
+          .type = (word3 >> 20) & 0xFU,
+          .a = word1 >> 8,
+          .b = word2 & 0xFFFFFFU,
+          .c = (word2 >> 24) | ((word3 & 0xFFFFU) << 8),
+          .d = word3 >> 24,
+          .zero = ((word1 >> 4) & 0xFU) | (((word3 >> 16) & 0xFU) << 4)};
+}
+
+constexpr uint32_t kTraceStatistics = 0x5;
+
+TEST(SequencerTest, StatisticsRecordsFollowEngineCompletions) {
+  NpuBench bench(70);
+  constexpr uint32_t kList = Ddr::kBase + 0x180000U;
+  constexpr uint32_t kData = Ddr::kBase + 0x100000U;
+  bench.Memory().Write32(kList, kData >> 4);
+  bench.Memory().Write32(kList + 4, 0xFFFFFFFFU);
+  bench.Memory().Write32(kList + 8, (kData + 0x80) >> 4);
+  bench.Memory().Write32(kList + 12, 0xFFFFFFFFU);
+  bench.WriteReg(kRegTraceBase, kTraceArea);
+  bench.WriteReg(kRegTraceCtrl, kTraceStatistics);
+  EXPECT_EQ(bench.ReadReg(kRegTraceCtrl) & 0x5U, 0x5U);
+  const std::vector<Instruction> program = {
+      DmaLoad({.ddr_addr = kData,
+               .mem = Mem::kFbuf,
+               .onchip = 0,
+               .rows = 1,
+               .row_words = 4}),
+      Gemm({.a_base = 0,
+            .a_stride = 1,
+            .kb = 1,
+            .m = 32,
+            .w_base = 0,
+            .w_stride = 1,
+            .n8 = 1,
+            .c_base = 8,
+            .wmode = 0,
+            .acc = false,
+            .wait = kWaitDma}),
+      Vec({.op = 0,
+           .src = 0,
+           .src2 = 0,
+           .dst = 16,
+           .rows_q = 1,
+           .n8 = 4,
+           .p_base = 0,
+           .aux = 0,
+           .imm = 0,
+           .q = false,
+           .wait = kWaitGemm}),
+      DmaStore({.ddr_addr = kData + 0x1000,
+                .mem = Mem::kFbuf,
+                .onchip = 16,
+                .rows = 1,
+                .row_words = 2,
+                .wait = kWaitVec}),
+      DmaLoad({.ddr_addr = kList,
+               .mem = Mem::kFbuf,
+               .onchip = 32,
+               .rows = 1,
+               .row_words = 4,
+               .flags = kDmaFlagIndex}),
+      Signal(11, 22, kWaitDma),
+      Halt()};
+  ASSERT_TRUE(bench.Run(program));
+  ASSERT_TRUE(bench.WaitStatus(
+      [&](uint32_t) { return (bench.ReadReg(kRegTraceCtrl) & 2U) != 0; },
+      100000));
+  ASSERT_EQ(bench.ReadReg(kRegTraceCount), 12U);
+  const std::vector<uint32_t> indices = {0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 6};
+  const std::vector<uint32_t> types = {0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0};
+  for (uint32_t i = 0; i < 12; ++i) {
+    const uint32_t address = kTraceArea + (16 * i);
+    if (types[i] == 0) {
+      const TraceRecord record = ReadRecord(bench.Memory(), address);
+      EXPECT_EQ(record.index, indices[i]) << "record " << i;
+      EXPECT_EQ(record.zero, 0U) << "record " << i;
+    } else {
+      const StatisticsRecord record = ReadStatistics(bench.Memory(), address);
+      EXPECT_EQ(record.index, indices[i]) << "record " << i;
+      EXPECT_EQ(record.type, 1U) << "record " << i;
+      EXPECT_EQ(record.zero, 0U) << "record " << i;
+    }
+  }
+  const StatisticsRecord load = ReadStatistics(bench.Memory(), kTraceArea + 16);
+  EXPECT_EQ(load.source, 0U);
+  EXPECT_EQ(load.a, 32U);
+  EXPECT_EQ(load.b, 0U);
+  EXPECT_EQ(load.d, 0U);
+  const StatisticsRecord gemm = ReadStatistics(bench.Memory(), kTraceArea + 48);
+  EXPECT_EQ(gemm.source, 1U);
+  EXPECT_EQ(gemm.a, 8U);
+  EXPECT_EQ(gemm.b, 0U);
+  EXPECT_EQ(gemm.c, 0U);
+  EXPECT_EQ(gemm.d, 0U);
+  const StatisticsRecord vec = ReadStatistics(bench.Memory(), kTraceArea + 80);
+  EXPECT_EQ(vec.source, 2U);
+  EXPECT_EQ(vec.d, 1U);
+  EXPECT_EQ(vec.a, 14U);
+  EXPECT_GT(vec.b, 0U);
+  EXPECT_EQ(vec.c, 0U);
+  const StatisticsRecord store =
+      ReadStatistics(bench.Memory(), kTraceArea + 112);
+  EXPECT_EQ(store.source, 0U);
+  EXPECT_EQ(store.a, 0U);
+  EXPECT_EQ(store.b, 16U);
+  const StatisticsRecord indexed =
+      ReadStatistics(bench.Memory(), kTraceArea + 144);
+  EXPECT_EQ(indexed.a, 1U + 16U);
+  EXPECT_EQ(indexed.d, 2U);
+  EXPECT_TRUE(bench.Errors().empty());
+}
+
+TEST(SequencerTest, StatisticsRecordsSurviveTraceBackPressure) {
+  NpuBench bench(71);
+  bench.WriteReg(kRegTraceBase, kTraceArea);
+  bench.WriteReg(kRegTraceCtrl, kTraceStatistics);
+  std::vector<Instruction> program;
+  for (uint32_t i = 0; i < 40; ++i) {
+    program.push_back(Vec({.op = 5,
+                           .src = 0,
+                           .src2 = 0,
+                           .dst = 64,
+                           .rows_q = 1,
+                           .n8 = 1,
+                           .p_base = 0,
+                           .aux = 0,
+                           .imm = 0,
+                           .q = false,
+                           .wait = 0}));
+    program.push_back(Gemm({.a_base = 0,
+                            .a_stride = 1,
+                            .kb = 1,
+                            .m = 32,
+                            .w_base = 0,
+                            .w_stride = 1,
+                            .n8 = 1,
+                            .c_base = 128,
+                            .wmode = 0,
+                            .acc = false,
+                            .wait = 0}));
+    program.push_back(Nop());
+  }
+  program.push_back(Halt());
+  ASSERT_TRUE(bench.Run(program));
+  ASSERT_TRUE(bench.WaitStatus(
+      [&](uint32_t) { return (bench.ReadReg(kRegTraceCtrl) & 2U) != 0; },
+      400000));
+  ASSERT_EQ(bench.ReadReg(kRegTraceCount), 121U + 80U);
+  std::vector<bool> completed(program.size(), false);
+  std::vector<bool> described(program.size(), false);
+  uint32_t last_completion_index = 0;
+  for (uint32_t i = 0; i < 201; ++i) {
+    const uint32_t address = kTraceArea + (16 * i);
+    const uint32_t type = (bench.Memory().Read32(address + 12) >> 20) & 0xFU;
+    if (type == 0) {
+      const TraceRecord record = ReadRecord(bench.Memory(), address);
+      ASSERT_LT(record.index, program.size());
+      EXPECT_FALSE(completed[record.index]);
+      completed[record.index] = true;
+      last_completion_index = record.index;
+    } else {
+      const StatisticsRecord record = ReadStatistics(bench.Memory(), address);
+      EXPECT_EQ(type, 1U);
+      EXPECT_EQ(record.index, last_completion_index) << "record " << i;
+      EXPECT_FALSE(described[record.index]);
+      described[record.index] = true;
+    }
+  }
+  for (size_t i = 0; i < program.size(); ++i) {
+    EXPECT_TRUE(completed[i]) << i;
+    EXPECT_EQ(described[i], i % 3 != 2 && i + 1 != program.size()) << i;
+  }
+  EXPECT_TRUE(bench.Errors().empty());
+}
+
 }  // namespace
 }  // namespace hotarubi::tb

@@ -17,6 +17,8 @@
 #include "bench_bus.hpp"
 #include "npu_bench.hpp"
 #include "npu_isa.hpp"
+#include "scripted_bus.hpp"
+#include "trace_record.hpp"
 
 namespace hotarubi {
 namespace {
@@ -198,6 +200,66 @@ TEST(DeviceTest, ResumesAfterTheHostHandlesASignal) {
     EXPECT_EQ(std::bit_cast<float>(bench.Memory().Read32(kOutput + (4 * i))),
               2.0F * (static_cast<float>(i) - 7.5F));
   }
+}
+
+iss::TraceRecord RecordAt(tb::Ddr& ddr, uint32_t address) {
+  std::array<std::byte, 16> bytes{};
+  for (uint32_t i = 0; i < 16; ++i) {
+    bytes.at(i) = static_cast<std::byte>(ddr.Read8(address + i));
+  }
+  return iss::DecodeRecord(iss::LoadWord128(bytes));
+}
+
+TEST(DeviceTest, RecordsATraceWhenAsked) {
+  tb::NpuBench bench;
+  BenchBus bus(bench);
+  Device device(bus);
+  const std::vector<tb::Instruction> program = DoubleWord();
+  bench.LoadProgram(program, tb::Ddr::kBase);
+  constexpr uint32_t kTrace = tb::Ddr::kBase + 0x8000U;
+  const auto counters =
+      device.Run(tb::Ddr::kBase, static_cast<uint32_t>(program.size()), 1000ms,
+                 {}, {.base = kTrace, .statistics = false});
+  ASSERT_TRUE(counters.has_value()) << counters.error();
+  EXPECT_EQ(counters->issued, 4U);
+  EXPECT_EQ(counters->trace_count, 4U);
+  for (uint32_t i = 0; i < 4; ++i) {
+    const iss::TraceRecord record = RecordAt(bench.Memory(), kTrace + (16 * i));
+    EXPECT_EQ(record.type, iss::RecordType::kCompletion);
+    EXPECT_EQ(record.index, i);
+  }
+  EXPECT_EQ(RecordAt(bench.Memory(), kTrace).source, iss::Source::kDma);
+  EXPECT_EQ(RecordAt(bench.Memory(), kTrace + 16).source, iss::Source::kVec);
+  const auto untraced =
+      device.Run(tb::Ddr::kBase, static_cast<uint32_t>(program.size()), 1000ms);
+  ASSERT_TRUE(untraced.has_value()) << untraced.error();
+  EXPECT_EQ(untraced->trace_count, 0U);
+}
+
+TEST(DeviceTest, ProgramsTheTraceRegistersAndChecksTheRecordCount) {
+  ScriptedBus bus({});
+  Device device(bus);
+  const auto plain = device.Run(0x1000, 3, 1000ms);
+  ASSERT_TRUE(plain.has_value()) << plain.error();
+  EXPECT_EQ(bus.TraceCtrl(), 0U);
+  const auto traced =
+      device.Run(0x1000, 3, 1000ms, {}, {.base = 0x2000, .statistics = true});
+  ASSERT_TRUE(traced.has_value()) << traced.error();
+  EXPECT_EQ(bus.TraceBase(), 0x2000U);
+  EXPECT_EQ(bus.TraceCtrl(), 0U);
+  bus.SetTraceCount(1);
+  const auto mismatch =
+      device.Run(0x1000, 3, 1000ms, {}, {.base = 0x2000, .statistics = false});
+  ASSERT_FALSE(mismatch.has_value());
+  EXPECT_NE(mismatch.error().find("1 records for 0 instructions"),
+            std::string::npos);
+  bus.SetTraceCount(0);
+  bus.SetTraceIdle(false);
+  const auto stuck =
+      device.Run(0x1000, 3, 10ms, {}, {.base = 0x2000, .statistics = false});
+  ASSERT_FALSE(stuck.has_value());
+  EXPECT_NE(stuck.error().find("did not drain"), std::string::npos);
+  EXPECT_EQ(bus.TraceCtrl(), 0U);
 }
 
 TEST(DeviceTest, ReportsAnIllegalInstruction) {

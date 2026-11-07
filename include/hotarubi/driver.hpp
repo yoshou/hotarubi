@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -44,6 +45,12 @@ struct Counters {
   uint32_t dma_cycles = 0;
   uint32_t stall_cycles = 0;
   uint32_t starve_cycles = 0;
+  uint32_t trace_count = 0;
+};
+
+struct TraceOptions {
+  std::optional<uint32_t> base;
+  bool statistics = false;
 };
 
 struct Signal {
@@ -130,9 +137,16 @@ class Device {
   [[nodiscard]] Counters ReadCounters() const;
   [[nodiscard]] std::expected<Counters, std::string> Run(
       uint32_t address, uint32_t count, std::chrono::milliseconds timeout,
-      const SignalHandler& on_signal = {});
+      const SignalHandler& on_signal = {}, const TraceOptions& trace = {});
 
  private:
+  using Deadline = std::chrono::steady_clock::time_point;
+
+  [[nodiscard]] std::expected<Counters, std::string> Finish(
+      uint32_t pending, const TraceOptions& trace, Deadline deadline);
+  [[nodiscard]] std::expected<uint32_t, std::string> FinishTrace(
+      const TraceOptions& trace, uint32_t issued, Deadline deadline);
+
   Bus& bus_;
 };
 

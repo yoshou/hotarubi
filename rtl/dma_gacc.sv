@@ -27,7 +27,8 @@ module dma_gacc (
   input  logic          out_ready_i,
   output logic [1023:0] out_word_o,
   output logic [12:0]   out_addr_o,
-  output logic          idle_o
+  output logic          idle_o,
+  output logic          null_o
 );
 
   localparam int Nl     = 8;
@@ -649,6 +650,7 @@ module dma_gacc (
   end
 
   assign idle_o = (st == GIdle);
+  assign null_o = ent_take && ent_null;
 
   logic unused_gacc;
 

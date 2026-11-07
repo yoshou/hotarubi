@@ -1,5 +1,6 @@
 #include "output.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -11,7 +12,10 @@
 #include <string_view>
 #include <system_error>
 
+#include "ddr_image.hpp"
 #include "hotarubi/json.hpp"
+#include "hotarubi/require.hpp"
+#include "program.hpp"
 
 namespace hotarubi::compiler {
 namespace {
@@ -30,6 +34,24 @@ std::expected<void, std::string> WriteFile(const std::filesystem::path& path,
 }
 
 }  // namespace
+
+uint64_t TraceRegionBytes(const std::vector<Stream>& streams) {
+  uint64_t instructions = 0;
+  for (const Stream& stream : streams) {
+    instructions = std::max<uint64_t>(instructions, stream.program.Size());
+  }
+  return instructions * kTraceRecordBytes * kTraceRecordsPerInstruction;
+}
+
+uint64_t ReserveTraceRegion(DdrImage& image,
+                            const std::vector<Stream>& streams) {
+  Require(!streams.empty(), "the trace region needs at least one stream");
+  return image.Alloc(kTraceRegion, TraceRegionBytes(streams));
+}
+
+std::string ListingFileName(std::string_view stream) {
+  return std::format("{}.listing.json", stream);
+}
 
 std::string MetaJson(const Compiled& compiled) {
   Json::Object regions;
@@ -56,6 +78,11 @@ std::string MetaJson(const Compiled& compiled) {
     }
     meta.emplace_back("streams", Json(std::move(streams)));
   }
+  Json::Object listings;
+  for (const Stream& stream : compiled.streams) {
+    listings.emplace_back(stream.name, Json(ListingFileName(stream.name)));
+  }
+  meta.emplace_back("listings", Json(std::move(listings)));
   meta.emplace_back("regions", Json(std::move(regions)));
   return Json(std::move(meta)).Dump();
 }
@@ -71,6 +98,14 @@ std::expected<void, std::string> WriteCompiled(
   if (auto written = WriteFile(directory / "image.bin", compiled.image.Bytes());
       !written) {
     return written;
+  }
+  for (const Stream& stream : compiled.streams) {
+    const std::string listing = stream.program.ListingJson();
+    if (auto written = WriteFile(directory / ListingFileName(stream.name),
+                                 std::as_bytes(std::span<const char>(listing)));
+        !written) {
+      return written;
+    }
   }
   const std::string meta = MetaJson(compiled) + "\n";
   return WriteFile(directory / "meta.json",

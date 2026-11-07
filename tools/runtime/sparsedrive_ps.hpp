@@ -93,6 +93,7 @@ struct Result {
   int64_t map_x0 = 0;
   uint32_t fs_flag = 0;
   Counters counters;
+  Timing timing;
 };
 
 class SceneTracker {
@@ -119,7 +120,8 @@ std::expected<Frame, std::string> ReadFrame(const SafeTensors& file);
 std::expected<Result, std::string> RunFrame(Runtime& runtime,
                                             std::string_view stream,
                                             const Frame& frame,
-                                            std::chrono::milliseconds timeout);
+                                            std::chrono::milliseconds timeout,
+                                            const TraceRequest& trace = {});
 std::vector<std::pair<std::string, Tensor>> OutputTensors(const Frame& frame,
                                                           const Result& result);
 

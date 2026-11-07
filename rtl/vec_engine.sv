@@ -34,7 +34,11 @@ module vec_engine
   output logic [12:0]   abuf_waddr_o,
   output logic [1055:0] abuf_wdata_o,
   output logic [9:0]    cbuf_addr_o,
-  input  logic [127:0]  cbuf_rdata_i
+  input  logic [127:0]  cbuf_rdata_i,
+  output logic          stat_issue_o,
+  output logic          stat_drain_o,
+  output logic          stat_scalar_o,
+  output logic          stat_pass_o
 );
 
   function automatic logic uses_imm(input logic [4:0] op);
@@ -90,8 +94,12 @@ module vec_engine
   logic [10:0]  c_aux;
   logic [31:0]  c_imm;
 
-  assign cmd_ready_o = (st == StIdle);
-  assign busy_o      = (st != StIdle);
+  assign cmd_ready_o   = (st == StIdle);
+  assign busy_o        = (st != StIdle);
+  assign stat_issue_o  = (st == StIssue);
+  assign stat_drain_o  = (st == StDrain) || (st == StMdrain);
+  assign stat_scalar_o = (st == StScalarWait) || (st == StRnwait);
+  assign stat_pass_o   = (st == StSegSetup);
 
   (* ram_style = "distributed" *) logic [31:0] rf [32];
   logic        rf_we;

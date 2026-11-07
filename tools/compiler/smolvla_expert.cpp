@@ -912,25 +912,36 @@ Expert PlaceExpert(DdrImage& image, const SafeTensors& quant,
 
 void EmitExpert(Program& program, const Expert& expert, const Lm& lm,
                 const Dims& dims) {
+  const Program::Scope expert_scope(program, "expert");
   const uint32_t dt = Fp32OfFp64(exact::Real::Ratio(-1, dims.steps));
-  Ld(program, expert.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
-     kTbufWordsLoaded * kWordT, "ex ld TBUF (exp2 + silu)");
-  Ld(program, expert.rope, Mem::kPbuf, kPbCosSelf, 1, kRopeWords,
-     kRopeWords * kWordF, "ex ld PBUF cos/sin tiles (self / cross)");
-  Ld(program, expert.pb_heads, Mem::kPbuf, kPbIn, 1, kPbEnd - kPbIn,
-     uint64_t{kPbEnd - kPbIn} * kWordF,
-     "ex ld PBUF head biases and final norm gamma");
+  {
+    const Program::Scope scope(program, "setup");
+    Ld(program, expert.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
+       kTbufWordsLoaded * kWordT, "ex ld TBUF (exp2 + silu)");
+    Ld(program, expert.rope, Mem::kPbuf, kPbCosSelf, 1, kRopeWords,
+       kRopeWords * kWordF, "ex ld PBUF cos/sin tiles (self / cross)");
+    Ld(program, expert.pb_heads, Mem::kPbuf, kPbIn, 1, kPbEnd - kPbIn,
+       uint64_t{kPbEnd - kPbIn} * kWordF,
+       "ex ld PBUF head biases and final norm gamma");
+  }
   for (uint32_t l = 1; l < kLayers; l += 2) {
+    const Program::Scope scope(program, std::format("cross_kv/E{}", l));
     CrossKv(program, expert, lm, dims, l);
   }
   for (uint32_t k = 0; k < dims.steps; ++k) {
-    Suffix(program, expert, std::format("S{} suffix", k))
-        .Emit(k, expert.xt[k], expert.x[0]);
+    const Program::Scope step(program, std::format("S{}", k));
+    {
+      const Program::Scope scope(program, "suffix");
+      Suffix(program, expert, std::format("S{} suffix", k))
+          .Emit(k, expert.xt[k], expert.x[0]);
+    }
     for (uint32_t l = 0; l < kLayers; ++l) {
+      const Program::Scope scope(program, std::format("E{}", l));
       Layer(program, expert, lm, dims, l,
             {expert.x[l % 2], expert.x[2], expert.x[(l + 1) % 2]},
             std::format("S{} E{}", k, l));
     }
+    const Program::Scope scope(program, "out");
     StepEpilogue(
         program, expert, dt,
         {expert.x[kLayers % 2], expert.xt[k], expert.vt[k], expert.xt[k + 1]},

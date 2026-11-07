@@ -22,9 +22,13 @@ class Ddr {
   static constexpr uint32_t kBase = 0x10000000U;
   static constexpr uint32_t kSize = 0x01000000U;
 
-  Ddr();
+  explicit Ddr(uint32_t base = kBase, uint32_t size = kSize);
 
-  [[nodiscard]] static bool Contains(uint64_t address, uint64_t bytes);
+  [[nodiscard]] uint32_t Base() const { return base_; }
+  [[nodiscard]] uint32_t Size() const {
+    return static_cast<uint32_t>(bytes_.size());
+  }
+  [[nodiscard]] bool Contains(uint64_t address, uint64_t bytes) const;
   [[nodiscard]] uint8_t Read8(uint32_t address) const;
   void Write8(uint32_t address, uint8_t value);
   [[nodiscard]] uint32_t Read32(uint32_t address) const;
@@ -34,6 +38,7 @@ class Ddr {
   [[nodiscard]] std::span<uint8_t> Bytes() { return bytes_; }
 
  private:
+  uint32_t base_;
   std::vector<uint8_t> bytes_;
 };
 
@@ -91,7 +96,8 @@ class AxiSlave {
   void CheckStability(const AxiMasterOutputs& master);
   void AcceptWriteBeat(Ddr& ddr, uint64_t cycle,
                        const AxiMasterOutputs& master);
-  void AcceptAddresses(uint64_t cycle, const AxiMasterOutputs& master);
+  void AcceptAddresses(const Ddr& ddr, uint64_t cycle,
+                       const AxiMasterOutputs& master);
 
   std::string name_;
   uint32_t max_beats_;
@@ -117,7 +123,8 @@ class NpuBench {
  public:
   static constexpr uint32_t kProgramBase = Ddr::kBase;
 
-  explicit NpuBench(uint32_t seed = 1);
+  explicit NpuBench(uint32_t seed = 1, uint32_t ddr_base = Ddr::kBase,
+                    uint32_t ddr_size = Ddr::kSize);
   ~NpuBench();
   NpuBench(const NpuBench&) = delete;
   NpuBench& operator=(const NpuBench&) = delete;

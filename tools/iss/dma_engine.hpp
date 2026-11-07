@@ -11,6 +11,19 @@ namespace hotarubi::iss {
 
 inline constexpr uint32_t kGatherChannels = 256;
 
+struct DmaActivity {
+  uint64_t read_beats = 0;
+  uint64_t write_beats = 0;
+  uint64_t read_bursts = 0;
+  uint64_t write_bursts = 0;
+  uint64_t null_entries = 0;
+  uint64_t gather_entries = 0;
+  uint64_t gather_rows = 0;
+
+  friend constexpr bool operator==(const DmaActivity&,
+                                   const DmaActivity&) = default;
+};
+
 struct DmaCommand {
   bool store = false;
   uint32_t ddr_addr = 0;
@@ -37,11 +50,13 @@ class DmaEngine {
   Accumulators() const {
     return accumulators_;
   }
+  [[nodiscard]] const DmaActivity& Activity() const { return activity_; }
 
  private:
   void Gather(const DmaCommand& command, const Ddr& ddr, Memories& memories);
 
   std::array<std::array<uint32_t, kGatherChannels>, kTokens> accumulators_{};
+  DmaActivity activity_;
 };
 
 }  // namespace hotarubi::iss

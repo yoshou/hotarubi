@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "hotarubi/json.hpp"
 #include "isa.hpp"
 
 namespace hotarubi::compiler {
@@ -18,6 +19,8 @@ namespace {
 constexpr std::array<uint32_t, 3> kWaitBits = {kWaitDma, kWaitGemm, kWaitVec};
 constexpr std::array<std::string_view, 5> kEngineNames = {"DMA", "GEMM", "VEC",
                                                           "CTRL", "WAIT"};
+constexpr std::array<std::string_view, kMemCount> kMemNames = {
+    "ABUF", "WBUF", "FBUF", "PBUF", "TBUF", "CBUF"};
 constexpr uint32_t kFlagIndex = 0x1;
 constexpr uint32_t kFlagRow = 0x2;
 constexpr uint32_t kFlagAcc = 0x1;
@@ -77,7 +80,16 @@ bool MultiPass(VecOp op) {
 
 }  // namespace
 
+Program::Scope::Scope(Program& program, std::string_view tag)
+    : program_(program) {
+  program_.PushScope(tag);
+}
+
+Program::Scope::~Scope() { program_.PopScope(); }
+
 Program::Program(uint64_t base) : base_(base) {
+  tags_.emplace_back();
+  tag_lookup_.emplace("", 0);
   for (size_t m = 0; m < kMemCount; ++m) {
     const size_t depth = kMemDepth.at(m);
     Tracker& tracker = trackers_.at(m);
@@ -163,6 +175,9 @@ size_t Program::Emit(Engine engine,
   instructions_.push_back(make(wait));
   notes_.emplace_back(note);
   engines_.push_back(engine);
+  reads_.push_back(reads);
+  writes_.push_back(writes);
+  tag_index_.push_back(tag_lookup_.at(scope_));
   if (need != 0) {
     ++wait_count_;
   }
@@ -400,6 +415,29 @@ void Program::SetDdrOffset(size_t index, uint64_t ddr_offset) {
   instructions_[index].Set(80, 32, DmaAddress(ddr_offset));
 }
 
+void Program::PushScope(std::string_view tag) {
+  const size_t length = scope_.size();
+  if (!scope_.empty()) {
+    scope_ += '/';
+  }
+  scope_ += tag;
+  scope_lengths_.push_back(length);
+  if (!tag_lookup_.contains(scope_)) {
+    tag_lookup_.emplace(scope_, static_cast<uint32_t>(tags_.size()));
+    tags_.push_back(scope_);
+  }
+}
+
+void Program::PopScope() {
+  Require(!scope_lengths_.empty(), "a scope is closed that was not opened");
+  scope_.resize(scope_lengths_.back());
+  scope_lengths_.pop_back();
+}
+
+std::string_view Program::Tag(size_t index) const {
+  return tags_.at(tag_index_.at(index));
+}
+
 std::vector<std::byte> Program::Bytes() const {
   return Serialize(instructions_);
 }
@@ -413,6 +451,36 @@ std::string Program::Listing() const {
                         instruction.Get(116, 4), instruction.Hex(), notes_[i]);
   }
   return text;
+}
+
+std::string Program::ListingJson() const {
+  const auto ranges = [](const std::vector<Range>& list) {
+    std::string text = "[";
+    for (size_t i = 0; i < list.size(); ++i) {
+      text += std::format("{}[\"{}\",{},{}]", i == 0 ? "" : ",",
+                          kMemNames.at(MemIndex(list[i].mem)), list[i].lo,
+                          list[i].hi);
+    }
+    return text + "]";
+  };
+  std::string text = std::format(R"({{"base":{},"tags":[)", base_);
+  for (size_t i = 0; i < tags_.size(); ++i) {
+    text += (i == 0 ? "" : ",") + Json(tags_[i]).Dump();
+  }
+  text += "],\"instructions\":[\n";
+  for (size_t i = 0; i < instructions_.size(); ++i) {
+    const Instruction& instruction = instructions_[i];
+    text += std::format(
+        "{}{{\"index\":{},\"engine\":\"{}\",\"opcode\":{},\"wait\":{},"
+        "\"flags\":{},\"hex\":\"{}\",\"tag\":{},\"note\":{},\"reads\":{},"
+        "\"writes\":{}}}",
+        i == 0 ? "" : ",\n", i,
+        kEngineNames.at(static_cast<size_t>(engines_[i])),
+        instruction.Get(120, 8), instruction.Get(116, 4),
+        instruction.Get(112, 4), instruction.Hex(), tag_index_[i],
+        Json(notes_[i]).Dump(), ranges(reads_[i]), ranges(writes_[i]));
+  }
+  return text + "\n]}\n";
 }
 
 }  // namespace hotarubi::compiler

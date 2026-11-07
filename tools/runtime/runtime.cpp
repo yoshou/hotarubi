@@ -94,6 +94,25 @@ ParseStreams(const Json& meta) {
   return parsed;
 }
 
+std::expected<std::map<std::string, std::string, std::less<>>, std::string>
+ParseListings(const Json& meta) {
+  std::map<std::string, std::string, std::less<>> parsed;
+  const Json* listings = meta.Find("listings");
+  if (listings == nullptr) {
+    return parsed;
+  }
+  if (!listings->IsObject()) {
+    return std::unexpected("meta.json: listings is not an object");
+  }
+  for (const auto& [name, value] : listings->Members()) {
+    if (!value.IsString()) {
+      return std::unexpected(std::format("meta.json: bad listing {}", name));
+    }
+    parsed[name] = value.String();
+  }
+  return parsed;
+}
+
 std::map<std::string, int64_t, std::less<>> ParseParameters(const Json& meta) {
   std::map<std::string, int64_t, std::less<>> parsed;
   for (const auto& [name, value] : meta.Members()) {
@@ -207,19 +226,46 @@ std::expected<void, std::string> Runtime::Read(
   return {};
 }
 
+std::expected<TraceOptions, std::string> Runtime::TraceOptionsFor(
+    const TraceRequest& trace, uint32_t count) const {
+  if (!trace.enabled) {
+    return TraceOptions{};
+  }
+  const auto region = FindRegion(kTraceRegion);
+  if (!region) {
+    return std::unexpected("the program has no trace region");
+  }
+  const uint64_t needed =
+      uint64_t{count} * kTraceRecordBytes * (trace.statistics ? 2 : 1);
+  if (region->size < needed) {
+    return std::unexpected(
+        std::format("the trace region holds {} bytes but {} instructions "
+                    "need {}",
+                    region->size, count, needed));
+  }
+  return TraceOptions{
+      .base = static_cast<uint32_t>(physical_address_ + region->offset),
+      .statistics = trace.statistics};
+}
+
 std::expected<Counters, std::string> Runtime::Run(
-    std::chrono::milliseconds timeout, const SignalHandler& on_signal) {
+    std::chrono::milliseconds timeout, const SignalHandler& on_signal,
+    const TraceRequest& trace) {
   if (!loaded_) {
     return std::unexpected("no program is loaded");
   }
+  const auto options = TraceOptionsFor(trace, program_.instruction_count);
+  if (!options) {
+    return std::unexpected(options.error());
+  }
   return device_.Run(
       static_cast<uint32_t>(program_.base + program_.instruction_offset),
-      program_.instruction_count, timeout, on_signal);
+      program_.instruction_count, timeout, on_signal, *options);
 }
 
 std::expected<Counters, std::string> Runtime::Run(
     std::string_view stream, std::chrono::milliseconds timeout,
-    const SignalHandler& on_signal) {
+    const SignalHandler& on_signal, const TraceRequest& trace) {
   if (!loaded_) {
     return std::unexpected("no program is loaded");
   }
@@ -228,8 +274,28 @@ std::expected<Counters, std::string> Runtime::Run(
     return std::unexpected(
         std::format("no instruction stream named {}", stream));
   }
+  const auto options = TraceOptionsFor(trace, it->second.count);
+  if (!options) {
+    return std::unexpected(options.error());
+  }
   return device_.Run(static_cast<uint32_t>(program_.base + it->second.offset),
-                     it->second.count, timeout, on_signal);
+                     it->second.count, timeout, on_signal, *options);
+}
+
+std::expected<std::vector<std::byte>, std::string> Runtime::ReadTrace(
+    uint32_t count) const {
+  const auto region = FindRegion(kTraceRegion);
+  if (!region) {
+    return std::unexpected(region.error());
+  }
+  const uint64_t bytes = uint64_t{count} * kTraceRecordBytes;
+  if (bytes > region->size) {
+    return std::unexpected(
+        std::format("{} trace records exceed the trace region of {} bytes",
+                    count, region->size));
+  }
+  const auto source = memory_.subspan(region->offset, bytes);
+  return std::vector<std::byte>(source.begin(), source.end());
 }
 
 std::expected<Region, std::string> Runtime::FindRegion(
@@ -284,6 +350,10 @@ std::expected<Program, std::string> LoadProgram(
   if (!regions) {
     return std::unexpected(regions.error());
   }
+  auto listings = ParseListings(*meta);
+  if (!listings) {
+    return std::unexpected(listings.error());
+  }
   const auto image = ReadFile(directory / "image.bin");
   if (!image) {
     return std::unexpected(image.error());
@@ -297,6 +367,7 @@ std::expected<Program, std::string> LoadProgram(
                   .instruction_offset = static_cast<uint32_t>(*offset),
                   .instruction_count = static_cast<uint32_t>(*count),
                   .streams = std::move(*streams),
+                  .listings = std::move(*listings),
                   .regions = std::move(*regions),
                   .parameters = ParseParameters(*meta)};
   std::ranges::transform(*image, program.image.begin(), [](char c) {

@@ -611,13 +611,18 @@ Lm PlaceLm(DdrImage& image, const SafeTensors& quant, const SafeTensors& model,
 }
 
 void EmitLm(Program& program, const Lm& lm, const Dims& dims) {
+  const Program::Scope lm_scope(program, "lm");
   const Plan plan = MakePlan(dims);
   const uint32_t rope_words = 2 * plan.quads * 4;
-  Ld(program, lm.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
-     kTbufWordsLoaded * kWordT, "lm ld TBUF (exp2 + silu)");
-  Ld(program, lm.rope, Mem::kPbuf, kPbCos, 1, rope_words, rope_words * kWordF,
-     "lm ld PBUF cos/sin tiles");
+  {
+    const Program::Scope scope(program, "setup");
+    Ld(program, lm.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
+       kTbufWordsLoaded * kWordT, "lm ld TBUF (exp2 + silu)");
+    Ld(program, lm.rope, Mem::kPbuf, kPbCos, 1, rope_words, rope_words * kWordF,
+       "lm ld PBUF cos/sin tiles");
+  }
   for (uint32_t l = 0; l < kLayers; ++l) {
+    const Program::Scope scope(program, std::format("L{}", l));
     const uint64_t x_in = l == 0 ? lm.x[0] : lm.x[1 + ((l - 1) % 2)];
     Layer(program, plan, lm, l, {x_in, lm.x[3], lm.x[1 + (l % 2)]},
           std::format("T{}", l));

@@ -16,6 +16,7 @@ hotarubi is a toy project: an NPU with its own instruction set on the KV260 that
 | `fpga/` | Vivado Tcl scripts, constraints, device tree |
 | `tools/iss/` | Instruction-set simulator: bit-exact arithmetic of each unit and execution of instruction streams |
 | `tools/compiler/` | Compiler |
+| `tools/trace/` | Trace analyzer: validation, reports and calibration of execution traces, prediction with the simulator |
 | `tools/runtime/` | Driver and runtime on the board |
 
 ## Documents

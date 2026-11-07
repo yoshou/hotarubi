@@ -30,7 +30,8 @@ module gemm_engine #(
   input  logic [1023:0]        fbuf_rdata_i,
   output logic                 fbuf_we_o,
   output logic [AddrWidth-1:0] fbuf_waddr_o,
-  output logic [1023:0]        fbuf_wdata_o
+  output logic [1023:0]        fbuf_wdata_o,
+  output logic                 stat_fed_o
 );
 
   logic [AddrWidth-1:0] a_base, w_base, c_base;
@@ -51,6 +52,7 @@ module gemm_engine #(
   assign issue_v     = running & !issue_done;
   assign cmd_ready_o = !running;
   assign busy_o      = running;
+  assign stat_fed_o  = issue_v;
 
   logic last_i, last_kb, last_qg, last_g;
 

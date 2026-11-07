@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,6 +24,12 @@ namespace {
 
 constexpr uint64_t kBase = 0x38700000;
 
+std::string ReadText(const std::filesystem::path& path) {
+  std::ifstream file(path);
+  return {std::istreambuf_iterator<char>(file),
+          std::istreambuf_iterator<char>()};
+}
+
 Compiled Example() {
   DdrImage image(uint64_t{1} << 20);
   Program program(kBase);
@@ -35,6 +43,7 @@ Compiled Example() {
   streams.push_back({.name = "inference",
                      .program = std::move(program),
                      .offset = instructions});
+  ReserveTraceRegion(image, streams);
   return {.streams = std::move(streams),
           .image = std::move(image),
           .parameters = {{"cameras", 2}}};
@@ -47,14 +56,34 @@ TEST(OutputTest, MetadataDescribesTheImage) {
   EXPECT_EQ(meta->Find("base")->Integer(), static_cast<int64_t>(kBase));
   EXPECT_EQ(meta->Find("instr_off")->Integer(), 0);
   EXPECT_EQ(meta->Find("n_instr")->Integer(), 2);
-  EXPECT_EQ(meta->Find("image_bytes")->Integer(), 4096 + 100);
+  EXPECT_EQ(meta->Find("image_bytes")->Integer(), 8192 + 64);
   EXPECT_EQ(meta->Find("cameras")->Integer(), 2);
   const Json* regions = meta->Find("regions");
   ASSERT_NE(regions, nullptr);
-  ASSERT_EQ(regions->Members().size(), 2U);
+  ASSERT_EQ(regions->Members().size(), 3U);
   EXPECT_EQ(regions->Members()[1].first, "data");
   EXPECT_EQ(regions->Members()[1].second.Items()[0].Integer(), 4096);
   EXPECT_EQ(regions->Members()[1].second.Items()[1].Integer(), 100);
+  EXPECT_EQ(regions->Members()[2].first, "trace");
+  EXPECT_EQ(regions->Members()[2].second.Items()[0].Integer(), 8192);
+  EXPECT_EQ(regions->Members()[2].second.Items()[1].Integer(), 64);
+  const Json* listings = meta->Find("listings");
+  ASSERT_NE(listings, nullptr);
+  ASSERT_EQ(listings->Members().size(), 1U);
+  EXPECT_EQ(listings->Members()[0].first, "inference");
+  EXPECT_EQ(listings->Members()[0].second.String(), "inference.listing.json");
+}
+
+TEST(OutputTest,
+     TheTraceRegionHoldsTwoRecordsPerInstructionOfTheLongestStream) {
+  Compiled compiled = Example();
+  Program second(kBase);
+  for (int i = 0; i < 5; ++i) {
+    second.Halt();
+  }
+  compiled.streams.push_back(
+      {.name = "second", .program = std::move(second), .offset = 0});
+  EXPECT_EQ(TraceRegionBytes(compiled.streams), 5U * 32);
 }
 
 TEST(OutputTest, MetadataListsEveryStreamWhenThereAreSeveral) {
@@ -96,6 +125,8 @@ TEST(OutputTest, TheRuntimeLoadsWhatTheCompilerWrites) {
   const Compiled compiled = Example();
   ASSERT_TRUE(WriteCompiled(directory, compiled).has_value());
   const auto program = LoadProgram(directory);
+  const auto listing =
+      Json::Parse(ReadText(directory / "inference.listing.json"));
   std::filesystem::remove_all(directory);
   ASSERT_TRUE(program.has_value()) << program.error();
   EXPECT_EQ(program->base, kBase);
@@ -106,8 +137,13 @@ TEST(OutputTest, TheRuntimeLoadsWhatTheCompilerWrites) {
                          compiled.image.Bytes().begin()));
   EXPECT_EQ(program->regions.at("data").offset, 4096U);
   EXPECT_EQ(program->regions.at("data").size, 100U);
+  EXPECT_EQ(program->regions.at("trace").size, 64U);
   EXPECT_TRUE(program->streams.empty());
   EXPECT_EQ(program->parameters.at("cameras"), 2);
+  ASSERT_TRUE(listing.has_value()) << listing.error();
+  ASSERT_EQ(listing->Find("instructions")->Items().size(), 2U);
+  EXPECT_EQ(listing->Find("instructions")->Items()[0].Find("note")->String(),
+            "ld");
 }
 
 TEST(OutputTest, TheRuntimeLoadsEveryStreamTheCompilerWrites) {

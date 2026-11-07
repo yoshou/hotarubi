@@ -16,7 +16,6 @@
 namespace hotarubi::compiler {
 namespace {
 
-constexpr uint64_t kSharedBytes = uint64_t{256} << 20;
 constexpr uint64_t kInstructionBytes = uint64_t{4} << 20;
 
 }  // namespace
@@ -49,6 +48,7 @@ Compiled CompileSmolVla(const SmolVlaOptions& options, const SafeTensors& quant,
   streams.push_back({.name = "inference",
                      .program = std::move(program),
                      .offset = instructions});
+  ReserveTraceRegion(image, streams);
   return {.streams = std::move(streams),
           .image = std::move(image),
           .parameters = {{"cameras", options.cameras},

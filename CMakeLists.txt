@@ -25,6 +25,7 @@ endif()
 
 if(CMAKE_CROSSCOMPILING)
   add_subdirectory(tools/runtime)
+  add_subdirectory(tools/iss)
   return()
 endif()
 
@@ -68,3 +69,4 @@ add_subdirectory(fpga)
 add_subdirectory(tools/runtime)
 add_subdirectory(tools/iss)
 add_subdirectory(tools/compiler)
+add_subdirectory(tools/trace)

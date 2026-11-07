@@ -37,3 +37,12 @@ foreach(test vec_test vec_program_test)
   hotarubi_add_test(${test} ${test}.cpp)
   target_link_libraries(${test} PRIVATE tb_npu_bench tb_vec_ref)
 endforeach()
+
+add_library(tb_kernel_bench STATIC kernel_bench.cpp)
+target_link_libraries(tb_kernel_bench PUBLIC tb_npu_bench hotarubi_trace_lib)
+
+add_executable(hotarubi_kernel_bench kernel_bench_main.cpp)
+target_link_libraries(hotarubi_kernel_bench PRIVATE tb_kernel_bench)
+
+hotarubi_add_test(kernel_bench_test kernel_bench_test.cpp)
+target_link_libraries(kernel_bench_test PRIVATE tb_kernel_bench hotarubi_compiler)

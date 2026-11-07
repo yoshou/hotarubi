@@ -459,17 +459,35 @@ AXI-Lite, byte offsets:
 | 0x34 | Issue-stall cycles | An instruction is waiting but not issued |
 | 0x38 | Starve cycles | No instruction is waiting to issue |
 | 0x3C | TRACE_BASE | Trace destination in DDR (16-byte aligned) |
-| 0x40 | TRACE_CTRL | bit 0 enable (set before START); read bit 1 idle |
-| 0x44 | TRACE_COUNT (R) | Trace records written |
+| 0x40 | TRACE_CTRL | bit 0 enable, bit 2 statistics records (both set before START); read bit 1 idle |
+| 0x44 | TRACE_COUNT (R) | Trace records written, of both types |
 | 0x48 | HOST_GO (R/W) | Value written by the PS; WAIT_HOST proceeds when HOST_GO ≥ value; cleared by START |
 
 ### Execution trace
 
-With trace enabled, the sequencer writes one 16-byte record per instruction to DDR from TRACE_BASE, through the write channel of the instruction-fetch AXI master. GEMM, VEC and DMA instructions are recorded when they complete; the other instructions, including NOP and illegal opcodes, when they issue. Each source holds one pending record. One pending record per cycle moves into the 64-entry record FIFO; when several are pending, the order is DMA, GEMM, VEC, sequencer. Issue is held while the source's record slot is occupied or the record FIFO holds 56 or more records.
+With trace enabled, the sequencer writes one 16-byte completion record per instruction to DDR from TRACE_BASE, through the write channel of the instruction-fetch AXI master. GEMM, VEC and DMA instructions are recorded when they complete; the other instructions, including NOP and illegal opcodes, when they issue. Bits [119:116] of every record hold its type.
+
+Completion record (type 0):
 
 ```
-[31:0] instruction index (issue order)  [63:32] issue cycle  [95:64] completion cycle  [99:96] source (0 DMA, 1 GEMM, 2 VEC, 3 sequencer)  [107:100] opcode  [111:108] wait  [115:112] flags  [127:116] 0
+[31:0] instruction index (issue order)  [63:32] issue cycle  [95:64] completion cycle  [99:96] source (0 DMA, 1 GEMM, 2 VEC, 3 sequencer)  [107:100] opcode  [111:108] wait  [115:112] flags  [119:116] 0  [127:120] 0
 ```
+
+With TRACE_CTRL bit 2 set, the completion record of a GEMM, VEC or DMA instruction is followed by a statistics record (type 1) of the same instruction:
+
+```
+[31:0] instruction index  [35:32] source  [39:36] 0  [63:40] A  [87:64] B  [111:88] C  [115:112] 0  [119:116] 1  [127:120] D
+```
+
+A, B and C are 24-bit counters and D an 8-bit counter; all saturate, are cleared when the engine accepts the command and are captured when it completes:
+
+| Source | A | B | C | D |
+|---|---|---|---|---|
+| DMA | AXI read beats | AXI write beats | cycles with an on-chip read or write request not granted | null index-list and gather entries |
+| GEMM | cycles with the array fed | 0 | 0 | 0 |
+| VEC | cycles in the issue state | cycles in the drain states | cycles waiting for the scalar unit | PASS instructions started |
+
+Each source holds one pending completion record with its statistics record. One record per cycle moves into the 64-entry record FIFO: the completion record of the selected source, then its statistics record when enabled; when several sources are pending, the order is DMA, GEMM, VEC, sequencer. Issue is held while the source's record slot is occupied or the record FIFO holds 56 or more records. TRACE_COUNT counts the records of both types.
 
 ## Board integration
 
@@ -492,7 +510,9 @@ Linux (Ubuntu 22.04 on the board) loads the design with `xmutil loadapp npu` fro
 
 - OS: Ubuntu 22.04 on the board.
 - Register access: UIO (`/dev/uioN`).
-- Shared memory: u-dma-buf, one 256 MB buffer from CMA with a 32-bit DMA mask, loaded at boot. udev gives the `plugdev` group read and write access to `/dev/uio*` and `/dev/udmabuf*`. The physical addresses used in instructions are inside this buffer.
+- Shared memory: u-dma-buf, one 320 MB buffer from CMA with a 32-bit DMA mask, loaded at boot. udev gives the `plugdev` group read and write access to `/dev/uio*` and `/dev/udmabuf*`. The physical addresses used in instructions are inside this buffer.
+- The board program runs its frames either on the NPU or, with `--device iss`, on the instruction-set simulator through the same driver interface.
+- Tracing: the runtime enables the execution trace on request, with TRACE_BASE at the `trace` region of the image (32 bytes per instruction of the longest stream), waits for the trace to drain after HALT and checks TRACE_COUNT against the issued count. `hotarubi_run --trace DIR` (and `--trace-stats` for statistics records) writes per frame `<frame>.trace.bin` with the records and `<frame>.counters.json` with the stream name, the trace mode, every counter, the wall time of the frame split into input placement, NPU run, signal handling and output reading (nanoseconds), the SHA-256 of the image, the bitstream and the input file, and the PL clock when readable.
 - The driver (register access, start, interrupt wait, counters) and the runtime are written in C++23 and cross-compiled on the host (see "Build").
 - The PS places the inputs in DDR, starts the instruction stream, and runs the processing outside the forward pass:
   - SmolVLA: camera inputs `camera1` = SO-100 `top`, `camera2` = SO-100 `wrist`, `camera3` unused; image resize with padding to 512 × 512 (aspect-preserving bilinear, `align_corners = False`, zero padding at the top left) and scaling from [0, 1] to [−1, 1]; im2col of the 16 × 16 patches into 768-element rows with K = c·256 + ky·16 + kx (patch s = py·32 + px on the 32 × 32 grid), placed in the order p = (i·4 + j)·64 + hq·8 + wq for patch s = (4·hq + i)·32 + 4·wq + j (i, j = 0..3; hq, wq = 0..7), and MXINT8 encoding; lookup of the language embedding rows; state zero-padded to 32 values; noise.
@@ -537,10 +557,38 @@ The NPU toolchain is written in C++23:
 
 | Component | Contents |
 |---|---|
-| Instruction-set simulator | The bit-exact arithmetic of each unit, and execution of instruction streams |
-| Compiler | Generation of instruction streams |
+| Instruction-set simulator | The bit-exact arithmetic of each unit, execution of instruction streams, and a cycle model that assigns issue and completion cycles, writes trace records of both types and drives the cycle counters |
+| Compiler | Generation of instruction streams, the DDR image and the JSON listings |
+| Trace analyzer | Validation, reports, kernel tables, timelines, differences and calibration of execution traces; prediction of traces with the cycle model |
 | RTL testbenches | Verilator testbenches |
 | Runtime | Driver and runtime on the board, cross-compiled for aarch64 |
+
+### Compiler output
+
+The compiler writes a directory with `image.bin`, `meta.json` and one `<stream>.listing.json` per instruction stream. `meta.json` holds the base address, the main stream, the stream table, the listing file names, the parameters and the regions of the image; the `trace` region, allocated after the streams, holds 32 bytes per instruction of the longest stream. A listing holds the base address, the tag table and one entry per instruction with its index, engine, opcode, wait bits, flags, hexadecimal word, tag index, note, and the on-chip ranges it reads and writes. Tags are the scopes open when the instruction was emitted, joined with `/`.
+
+### Cycle model
+
+The simulator assigns each instruction an issue cycle and a completion cycle with the sequencer rules: in-order issue one cycle after the previous issue at the earliest, an instruction waits for the completion of every engine named by its wait bits and of its own engine, a DMA load to TBUF or CBUF starts its data phase when the VEC engine is free, and a DMA store from ABUF reads ABUF only while the GEMM engine is idle, so its completion moves past every GEMM command issued before it completes and its record is written when that is known. The first instruction issues at `start_cycles`. The cost of a command is a linear function of the activity counted while the simulator executes it:
+
+| Engine | Cycles |
+|---|---|
+| GEMM | `n8 · (m/32) · kb · 8 + gemm_fixed_cycles` |
+| DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles` |
+| VEC | `vec_fixed_cycles + passes · vec_pass_cycles + issue + drain + scalar + SALU · vec_salu_cycles + SMEM · vec_smem_cycles + branches · vec_branch_cycles` |
+
+For VEC, `issue = words · vec_word_cycles − passes · vec_issue_tail_cycles`, `drain = passes · vec_drain_cycles + reducing passes · vec_drain_reduction_cycles + quantizing passes · vec_drain_quantized_cycles`, and the scalar cost follows the scalar unit's programs: each arithmetic micro-operation costs `vec_scalar_arithmetic_cycles`, each immediate write `vec_scalar_immediate_cycles`, and each program start `vec_scalar_start_cycles`, with the micro-operation counts of the RTL:
+
+| Program | Arithmetic | Immediate |
+|---|---:|---:|
+| MEAN | 8 | 1 |
+| RSTD | 29 | 2 |
+| NEGMAX, MAX | 0 | 1 |
+| RECIPSUM | 19 | 2 |
+| SUM | 7 | 1 |
+| RN | 12 | 2 |
+
+The statistics of a predicted record are the read and write beats, the cycles of the ABUF port rule and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces with statistics records.
 
 ## Build
 
@@ -554,3 +602,5 @@ CMake is the single entry point:
 ## RTL verification
 
 The RTL is simulated with Verilator. The testbenches are written in C++.
+
+The kernel bench runs a window of a compiled instruction stream on the RTL: it loads the image into the simulated DDR, appends the chosen preamble instructions, the window and a HALT as a new stream after the image, records the trace with the image's trace region, and writes a compiled directory (`image.bin` with the DDR contents before the run, `meta.json`, `kernel.listing.json`) together with `kernel.trace.bin` and `kernel.counters.json`.

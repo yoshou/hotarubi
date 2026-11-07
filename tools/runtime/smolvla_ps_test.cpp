@@ -307,6 +307,7 @@ class SmolVlaRunTest : public testing::Test {
         .instruction_offset = 0,
         .instruction_count = 1,
         .streams = {},
+        .listings = {},
         .regions = {{"patch.in", {.offset = kPatchOffset, .size = patch_bytes}},
                     {"xl.0",
                      {.offset = kLanguageOffset,

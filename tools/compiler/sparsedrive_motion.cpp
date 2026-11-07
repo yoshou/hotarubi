@@ -1508,10 +1508,15 @@ void MotionHead::Prep() {
 
 void MotionHead::EmitFrame(Program& program) {
   program_ = &program;
-  Prep();
+  {
+    const Program::Scope scope(program, "prep");
+    Prep();
+  }
   for (size_t l = 0; l < p_.layers.size(); ++l) {
     const MotionLayer& layer = p_.layers[l];
     const std::string note = std::format("{} L{} {}", tag, l, Name(layer.op));
+    const Program::Scope scope(program,
+                               std::format("L{}.{}", l, Name(layer.op)));
     pb_layers_[l].first.Load(program, note);
     keys_ = pb_layers_[l].second;
     switch (layer.op) {
@@ -1537,6 +1542,7 @@ void MotionHead::EmitFrame(Program& program) {
         break;
     }
   }
+  const Program::Scope scope(program, "end");
   const Rows& xr = x[cur_x];
   const std::string note = std::format("{} cache ego feature", tag);
   program.Load(Words(xr.Addr(900), Mem::kFbuf, 0, kD / 32),

@@ -13,6 +13,22 @@ namespace hotarubi::iss {
 
 inline constexpr uint32_t kVecRun = 16;
 
+struct VecActivity {
+  uint32_t passes = 0;
+  uint64_t words = 0;
+  uint32_t drains = 0;
+  uint32_t drains_reduction = 0;
+  uint32_t drains_quantized = 0;
+  std::array<uint32_t, 8> scalars{};
+  uint32_t rn = 0;
+  uint32_t salu = 0;
+  uint32_t smem = 0;
+  uint32_t branches = 0;
+
+  friend constexpr bool operator==(const VecActivity&,
+                                   const VecActivity&) = default;
+};
+
 struct VecCommand {
   uint32_t op = 0;
   bool quantize = false;
@@ -35,6 +51,7 @@ class VecEngine {
   [[nodiscard]] uint32_t Register(uint32_t index) const;
   [[nodiscard]] const RowState& Rows() const { return rows_; }
   [[nodiscard]] uint32_t Rn() const { return rn_; }
+  [[nodiscard]] const VecActivity& Activity() const { return activity_; }
 
  private:
   struct PassState;
@@ -54,6 +71,7 @@ class VecEngine {
   void Write(uint32_t index, uint32_t value);
 
   std::array<uint32_t, kRegisters> registers_{};
+  VecActivity activity_;
   RowState rows_;
   uint32_t rn_ = 0;
   bool quantize_ = false;

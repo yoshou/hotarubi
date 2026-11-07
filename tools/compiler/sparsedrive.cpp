@@ -28,7 +28,6 @@ namespace {
 
 namespace sd = sparsedrive;
 
-constexpr uint64_t kSharedBytes = uint64_t{256} << 20;
 constexpr uint64_t kStemGroupBytes = uint64_t{32} * 24 * 4 * 4;
 constexpr uint32_t kFsScratch = 512;
 
@@ -181,7 +180,9 @@ std::vector<std::vector<sd::FMap>> EmitEncoders(Program& program,
                                                 uint64_t stem_in, bool again,
                                                 Gathers& gathers) {
   std::vector<std::vector<sd::FMap>> features;
+  const Program::Scope encoder(program, "encoder");
   for (uint32_t c = 0; c < sd::kCameras; ++c) {
+    const Program::Scope scope(program, std::format("cam{}", c));
     image.SetReuse(again || c > 0);
     features.push_back(sd::EmitEncoder(
         program, image, base, backbone,
@@ -246,10 +247,22 @@ Compiled CompileSparseDrive(const SparseDriveOptions& options,
     if (temp) {
       EmitEncoders(program, image, base, backbone, stem_in, true, gathers[s]);
     }
-    EmitFrameStart(program, fs, det, map, motion, temp);
-    det.EmitFrame(program, temp);
-    map.EmitFrame(program, temp);
-    motion.EmitFrame(program);
+    {
+      const Program::Scope scope(program, "fs");
+      EmitFrameStart(program, fs, det, map, motion, temp);
+    }
+    {
+      const Program::Scope scope(program, "det");
+      det.EmitFrame(program, temp);
+    }
+    {
+      const Program::Scope scope(program, "map");
+      map.EmitFrame(program, temp);
+    }
+    {
+      const Program::Scope scope(program, "motion");
+      motion.EmitFrame(program);
+    }
     program.Halt();
     DefineFinalRows(image, streams[s].name, det);
     DefineFinalRows(image, streams[s].name, map);
@@ -277,6 +290,7 @@ Compiled CompileSparseDrive(const SparseDriveOptions& options,
         image.Alloc(std::format("instr.{}", stream.name), bytes.size());
     image.Put(stream.offset, bytes);
   }
+  ReserveTraceRegion(image, streams);
   return {.streams = std::move(streams),
           .image = std::move(image),
           .parameters = {{"cameras", sd::kCameras}}};

@@ -15,6 +15,7 @@
 #include "iss_bus.hpp"
 #include "memories.hpp"
 #include "reference.hpp"
+#include "trace_record.hpp"
 #include "word.hpp"
 
 namespace hotarubi::iss {
@@ -35,7 +36,17 @@ constexpr uint32_t kIrqEnable = 0x14;
 constexpr uint32_t kSignal = 0x18;
 constexpr uint32_t kSignalValue = 0x1C;
 constexpr uint32_t kIssued = 0x20;
+constexpr uint32_t kCycles = 0x24;
+constexpr uint32_t kGemmCycles = 0x28;
+constexpr uint32_t kVecCycles = 0x2C;
+constexpr uint32_t kDmaCycles = 0x30;
+constexpr uint32_t kStallCycles = 0x34;
+constexpr uint32_t kStarveCycles = 0x38;
+constexpr uint32_t kTraceBase = 0x3C;
+constexpr uint32_t kTraceCtrl = 0x40;
+constexpr uint32_t kTraceCount = 0x44;
 constexpr uint32_t kHostGo = 0x48;
+constexpr uint32_t kTrace = 0xC000;
 
 uint32_t Address(uint32_t offset) {
   return static_cast<uint32_t>(kBase + offset);
@@ -70,6 +81,16 @@ Word128 Vec(uint32_t op, uint32_t src, uint32_t src2, uint32_t dst,
   return encoding::Set(word, 53, 8, n8);
 }
 
+Word128 GemmOp(uint32_t wait = 0) {
+  Word128 word = Header(4, wait);
+  encoding::Set(word, 82, 10, 1);
+  encoding::Set(word, 72, 10, 1);
+  encoding::Set(word, 62, 10, 32);
+  encoding::Set(word, 32, 10, 1);
+  encoding::Set(word, 24, 8, 1);
+  return encoding::Set(word, 4, 20, 64);
+}
+
 Word128 SignalOp(uint32_t id, uint32_t value) {
   Word128 word = Header(6, 0xD);
   encoding::Set(word, 104, 8, id);
@@ -96,6 +117,14 @@ class MachineTest : public testing::Test {
     for (uint32_t i = 0; i < size; ++i) {
       bytes_.at(offset + i) = static_cast<std::byte>((value >> (8 * i)) & 0xFF);
     }
+  }
+
+  [[nodiscard]] TraceRecord Record(uint32_t index) const {
+    std::array<std::byte, 16> bytes{};
+    for (uint32_t i = 0; i < 16; ++i) {
+      bytes.at(i) = bytes_.at(kTrace + (16 * index) + i);
+    }
+    return DecodeRecord(LoadWord128(bytes));
   }
 
   [[nodiscard]] uint32_t Get32(uint32_t offset) const {
@@ -241,6 +270,118 @@ TEST_F(MachineTest, DriverRunsStreamsThroughTheBus) {
   for (uint32_t i = 0; i < 4 * 32; ++i) {
     EXPECT_EQ(Get32(kOutput + 1024 + (4 * i)), i);
   }
+}
+
+TEST_F(MachineTest, WritesCompletionRecordsAndCounters) {
+  FillInput(8);
+  Load(AddStream());
+  machine_.WriteRegister(kTraceBase, Address(kTrace));
+  machine_.WriteRegister(kTraceCtrl, 1);
+  EXPECT_EQ(machine_.ReadRegister(kTraceCtrl), 0x3U);
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  ASSERT_EQ(machine_.ReadRegister(kTraceCount), 5U);
+  const std::array<Source, 5> sources = {Source::kDma, Source::kDma,
+                                         Source::kVec, Source::kDma,
+                                         Source::kSequencer};
+  uint32_t last_issue = 0;
+  for (uint32_t i = 0; i < 5; ++i) {
+    const TraceRecord record = Record(i);
+    EXPECT_EQ(record.type, RecordType::kCompletion);
+    EXPECT_EQ(record.index, i);
+    EXPECT_EQ(record.source, sources.at(i));
+    EXPECT_GE(record.issue, last_issue + (i == 0 ? 0 : 1));
+    EXPECT_GE(record.completion, record.issue);
+    last_issue = record.issue;
+  }
+  EXPECT_EQ(Record(2).wait, 0x1U);
+  EXPECT_GE(Record(2).issue, Record(1).completion + 1);
+  EXPECT_EQ(Record(4).opcode, 7U);
+  EXPECT_EQ(Record(4).issue, Record(4).completion);
+  EXPECT_GE(Record(4).issue, Record(3).completion + 1);
+  EXPECT_EQ(machine_.ReadRegister(kCycles), Record(4).issue + 1);
+  EXPECT_EQ(machine_.ReadRegister(kDmaCycles),
+            (Record(0).completion - Record(0).issue) +
+                (Record(1).completion - Record(1).issue) +
+                (Record(3).completion - Record(3).issue));
+  EXPECT_EQ(machine_.ReadRegister(kVecCycles),
+            Record(2).completion - Record(2).issue);
+  EXPECT_EQ(machine_.ReadRegister(kGemmCycles), 0U);
+  EXPECT_EQ(machine_.ReadRegister(kStarveCycles), Record(0).issue);
+  EXPECT_EQ(machine_.ReadRegister(kStallCycles),
+            machine_.ReadRegister(kCycles) - Record(0).issue - 5);
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.ReadRegister(kTraceCount), 0U);
+}
+
+TEST_F(MachineTest, WritesStatisticsRecordsForEngineInstructions) {
+  FillInput(8);
+  Load(AddStream());
+  machine_.WriteRegister(kTraceBase, Address(kTrace));
+  machine_.WriteRegister(kTraceCtrl, 5);
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  ASSERT_EQ(machine_.ReadRegister(kTraceCount), 9U);
+  const TraceRecord load = Record(0);
+  const TraceRecord load_statistics = Record(1);
+  EXPECT_EQ(load.type, RecordType::kCompletion);
+  EXPECT_EQ(load_statistics.type, RecordType::kStatistics);
+  EXPECT_EQ(load_statistics.index, 0U);
+  EXPECT_EQ(load_statistics.source, Source::kDma);
+  EXPECT_EQ(load_statistics.statistics.a, 32U);
+  EXPECT_EQ(load_statistics.statistics.b, 0U);
+  EXPECT_EQ(load_statistics.statistics.d, 0U);
+  const TraceRecord vec_statistics = Record(5);
+  EXPECT_EQ(vec_statistics.type, RecordType::kStatistics);
+  EXPECT_EQ(vec_statistics.source, Source::kVec);
+  EXPECT_EQ(vec_statistics.statistics.a, 13U);
+  EXPECT_EQ(vec_statistics.statistics.d, 1U);
+  const TraceRecord store_statistics = Record(7);
+  EXPECT_EQ(store_statistics.statistics.a, 0U);
+  EXPECT_EQ(store_statistics.statistics.b, 32U);
+  EXPECT_EQ(Record(8).type, RecordType::kCompletion);
+  EXPECT_EQ(Record(8).source, Source::kSequencer);
+}
+
+TEST_F(MachineTest, AbufStoresWaitForEveryOverlappingGemm) {
+  Load({Dma(1, kInput, 0, 0, 1, 1, 0), GemmOp(0x1),
+        Dma(2, kOutput, 0, 0, 1, 1, 0), GemmOp(), GemmOp(),
+        Dma(1, kInput, 2, 0, 1, 1, 0), Header(7, 0xD)});
+  machine_.WriteRegister(kTraceBase, Address(kTrace));
+  machine_.WriteRegister(kTraceCtrl, 5);
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  ASSERT_EQ(machine_.ReadRegister(kTraceCount), 13U);
+  std::array<TraceRecord, 7> completion{};
+  std::array<TraceRecord, 7> statistics{};
+  for (uint32_t i = 0; i < 13; ++i) {
+    const TraceRecord record = Record(i);
+    if (record.type == RecordType::kCompletion) {
+      completion.at(record.index) = record;
+    } else {
+      statistics.at(record.index) = record;
+    }
+  }
+  const TraceRecord& first_gemm = completion.at(1);
+  const TraceRecord& store = completion.at(2);
+  const TraceRecord& second_gemm = completion.at(3);
+  const TraceRecord& third_gemm = completion.at(4);
+  const TraceRecord& load = completion.at(5);
+  EXPECT_EQ(store.issue, first_gemm.issue + 1);
+  EXPECT_EQ(second_gemm.issue, first_gemm.completion + 1);
+  EXPECT_EQ(third_gemm.issue, second_gemm.completion + 1);
+  EXPECT_GT(third_gemm.completion, first_gemm.completion + 100);
+  EXPECT_GE(store.completion, third_gemm.completion);
+  EXPECT_EQ(statistics.at(2).statistics.c,
+            (first_gemm.completion - store.issue) +
+                (second_gemm.completion - second_gemm.issue) +
+                (third_gemm.completion - third_gemm.issue));
+  EXPECT_EQ(load.issue, store.completion + 1);
+  EXPECT_EQ(Record(8).index, 2U);
+  EXPECT_EQ(Record(8).type, RecordType::kCompletion);
+  EXPECT_EQ(Record(9).index, 2U);
+  EXPECT_EQ(Record(9).type, RecordType::kStatistics);
+  EXPECT_EQ(Record(10).index, 5U);
 }
 
 TEST_F(MachineTest, DriverReportsIllegalInstructionsAndHangs) {

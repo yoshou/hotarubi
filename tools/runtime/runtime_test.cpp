@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -18,6 +19,8 @@
 #include "hotarubi/driver.hpp"
 #include "npu_bench.hpp"
 #include "npu_isa.hpp"
+#include "trace_record.hpp"
+#include "word.hpp"
 
 namespace hotarubi {
 namespace {
@@ -26,6 +29,8 @@ using std::chrono_literals::operator""ms;
 
 constexpr uint32_t kInputOffset = 0x1000;
 constexpr uint32_t kOutputOffset = 0x2000;
+constexpr uint32_t kTraceOffset = 0x3000;
+constexpr uint32_t kTraceBytes = 4 * 2 * 16;
 constexpr uint32_t kWordBytes = 128;
 constexpr uint32_t kScale = 4;
 constexpr uint32_t kTwo = 0x40000000U;
@@ -53,17 +58,18 @@ Program DoubleProgram() {
                     .ddr_stride = kWordBytes,
                     .wait = tb::kWaitVec}),
       tb::Halt()};
-  return {
-      .base = tb::Ddr::kBase,
-      .image = Serialize(instructions),
-      .instruction_offset = 0,
-      .instruction_count = static_cast<uint32_t>(instructions.size()),
-      .streams = {{"double",
-                   {.offset = 0,
-                    .count = static_cast<uint32_t>(instructions.size())}}},
-      .regions = {{"input", {.offset = kInputOffset, .size = kWordBytes}},
-                  {"output", {.offset = kOutputOffset, .size = kWordBytes}}},
-      .parameters = {{"scale", 2}}};
+  return {.base = tb::Ddr::kBase,
+          .image = Serialize(instructions),
+          .instruction_offset = 0,
+          .instruction_count = static_cast<uint32_t>(instructions.size()),
+          .streams = {{"double",
+                       {.offset = 0,
+                        .count = static_cast<uint32_t>(instructions.size())}}},
+          .listings = {},
+          .regions = {{"input", {.offset = kInputOffset, .size = kWordBytes}},
+                      {"output", {.offset = kOutputOffset, .size = kWordBytes}},
+                      {"trace", {.offset = kTraceOffset, .size = kTraceBytes}}},
+          .parameters = {{"scale", 2}}};
 }
 
 class RuntimeTest : public testing::Test {
@@ -112,6 +118,46 @@ TEST_F(RuntimeTest, RunsANamedStreamAndReportsAnUnknownOne) {
   const auto missing = runtime_.Run("triple", 1000ms);
   ASSERT_FALSE(missing.has_value());
   EXPECT_NE(missing.error().find("triple"), std::string::npos);
+}
+
+TEST_F(RuntimeTest, TracesIntoTheTraceRegion) {
+  ASSERT_TRUE(runtime_.Load(DoubleProgram()).has_value());
+  std::array<float, 32> input{};
+  input.fill(1.5F);
+  ASSERT_TRUE(runtime_.Write("input", FloatBytes(input)).has_value());
+  const auto counters = runtime_.Run("double", 1000ms, {},
+                                     {.enabled = true, .statistics = false});
+  ASSERT_TRUE(counters.has_value()) << counters.error();
+  EXPECT_EQ(counters->trace_count, 4U);
+  const auto records = runtime_.ReadTrace(counters->trace_count);
+  ASSERT_TRUE(records.has_value()) << records.error();
+  ASSERT_EQ(records->size(), 4U * 16);
+  for (uint32_t i = 0; i < 4; ++i) {
+    std::array<std::byte, 16> bytes{};
+    std::ranges::copy(std::span(*records).subspan(size_t{16} * i, 16),
+                      bytes.begin());
+    const iss::TraceRecord record = iss::DecodeRecord(iss::LoadWord128(bytes));
+    EXPECT_EQ(record.index, i);
+    EXPECT_EQ(record.type, iss::RecordType::kCompletion);
+  }
+  EXPECT_FALSE(runtime_.ReadTrace(9).has_value());
+}
+
+TEST_F(RuntimeTest, RefusesATraceThatDoesNotFit) {
+  Program program = DoubleProgram();
+  program.regions.at("trace").size = 3 * 16;
+  ASSERT_TRUE(runtime_.Load(program).has_value());
+  const auto small = runtime_.Run(1000ms, {}, {.enabled = true});
+  ASSERT_FALSE(small.has_value());
+  EXPECT_NE(small.error().find("trace region holds"), std::string::npos);
+  program.regions.erase("trace");
+  ASSERT_TRUE(runtime_.Load(program).has_value());
+  const auto missing = runtime_.Run(1000ms, {}, {.enabled = true});
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_NE(missing.error().find("no trace region"), std::string::npos);
+  EXPECT_FALSE(runtime_.ReadTrace(1).has_value());
+  const auto plain = runtime_.Run(1000ms);
+  ASSERT_TRUE(plain.has_value()) << plain.error();
 }
 
 TEST_F(RuntimeTest, FindsRegionsAndParameters) {

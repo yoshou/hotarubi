@@ -770,34 +770,48 @@ std::expected<Frame, std::string> ReadFrame(const SafeTensors& file) {
 std::expected<Result, std::string> RunFrame(Runtime& runtime,
                                             std::string_view stream,
                                             const Frame& frame,
-                                            std::chrono::milliseconds timeout) {
+                                            std::chrono::milliseconds timeout,
+                                            const TraceRequest& trace) {
+  Timing timing;
+  auto clock = std::chrono::steady_clock::now();
+  const auto lap = [&clock] {
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = now - clock;
+    clock = now;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed);
+  };
   if (auto placed = PlaceInputs(runtime, frame); !placed) {
     return std::unexpected(placed.error());
   }
+  timing.inputs = lap();
   Result result;
   std::optional<std::string> failure;
   bool decoded = false;
   const auto on_signal = [&](const Signal& signal) {
+    const auto begin = std::chrono::steady_clock::now();
     if (decoded || signal.id != kMotionDoneSignal ||
         signal.value != kMotionDoneSignal) {
       failure = std::format("unexpected signal {} with value {}", signal.id,
                             signal.value);
       return;
     }
-    if (auto read = ReadPlanningInputs(runtime, stream, result); !read) {
+    if (auto read = ReadPlanningInputs(runtime, stream, result); read) {
+      result.planning = DecodePlanning({.det_cls = result.det_cls,
+                                        .det_anchor = result.det_anchor,
+                                        .motion_cls = result.motion_cls,
+                                        .motion_reg = result.motion_reg,
+                                        .plan_cls = result.plan_cls,
+                                        .plan_reg = result.plan_reg,
+                                        .command = frame.command});
+      decoded = true;
+    } else {
       failure = read.error();
-      return;
     }
-    result.planning = DecodePlanning({.det_cls = result.det_cls,
-                                      .det_anchor = result.det_anchor,
-                                      .motion_cls = result.motion_cls,
-                                      .motion_reg = result.motion_reg,
-                                      .plan_cls = result.plan_cls,
-                                      .plan_reg = result.plan_reg,
-                                      .command = frame.command});
-    decoded = true;
+    timing.signals += std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - begin);
   };
-  auto counters = runtime.Run(stream, timeout, on_signal);
+  auto counters = runtime.Run(stream, timeout, on_signal, trace);
+  timing.run = lap() - timing.signals;
   if (!counters) {
     return std::unexpected(counters.error());
   }
@@ -813,6 +827,8 @@ std::expected<Result, std::string> RunFrame(Runtime& runtime,
   if (auto read = ReadOutputs(runtime, stream, result); !read) {
     return std::unexpected(read.error());
   }
+  timing.outputs = lap();
+  result.timing = timing;
   return result;
 }
 
