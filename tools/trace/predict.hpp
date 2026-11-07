@@ -16,11 +16,12 @@ namespace hotarubi::trace {
 struct Prediction {
   std::vector<std::byte> records;
   Counters counters;
+  std::string accesses;
 };
 
 std::expected<Prediction, std::string> Predict(
     const LoadedProgram& loaded, std::string_view stream, bool statistics,
-    const iss::TimingParameters& parameters = {});
+    const iss::TimingParameters& parameters = {}, bool accesses = false);
 
 std::string CountersJson(std::string_view stream, bool statistics,
                          const Counters& counters, std::string_view origin);

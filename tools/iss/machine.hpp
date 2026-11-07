@@ -1,10 +1,15 @@
 #ifndef HOTARUBI_TOOLS_ISS_MACHINE_HPP_
 #define HOTARUBI_TOOLS_ISS_MACHINE_HPP_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "ddr.hpp"
 #include "dma_engine.hpp"
@@ -18,6 +23,14 @@
 
 namespace hotarubi::iss {
 
+struct Hazard {
+  uint32_t earlier = 0;
+  uint32_t later = 0;
+  Conflict conflict;
+};
+
+std::string DescribeHazards(const std::vector<Hazard>& hazards, size_t limit);
+
 enum class Stop : uint8_t {
   kIdle,
   kSignal,
@@ -30,6 +43,7 @@ enum class Stop : uint8_t {
 DmaCommand DecodeDma(const Word128& instruction);
 GemmCommand DecodeGemm(const Word128& instruction);
 VecCommand DecodeVec(const Word128& instruction);
+uint64_t EstimateCycles(const Word128& instruction, const CostModel& model);
 
 class Machine {
  public:
@@ -46,6 +60,10 @@ class Machine {
   [[nodiscard]] const VecEngine& Vec() const { return vec_; }
   [[nodiscard]] const DmaEngine& Dma() const { return dma_; }
   [[nodiscard]] const Timeline& Time() const { return timeline_; }
+  [[nodiscard]] const std::vector<Hazard>& Hazards() const { return hazards_; }
+  void Observe(std::function<void(uint32_t, const AccessLog&)> observer) {
+    observer_ = std::move(observer);
+  }
 
  private:
   void Start();
@@ -54,7 +72,7 @@ class Machine {
                              uint64_t& earliest_start);
   void Record(const Word128& instruction, const Span& span,
               const Statistics& statistics);
-  void FlushPendingStore();
+  void CheckHazards(Source source, uint32_t wait, const AccessLog& log);
   [[nodiscard]] Word128 Fetch(uint32_t index) const;
   [[nodiscard]] bool WaitingForHost() const;
   [[nodiscard]] uint32_t Status() const;
@@ -65,13 +83,15 @@ class Machine {
   VecEngine vec_;
   CostModel model_;
   Timeline timeline_;
-  struct PendingStore {
-    Word128 instruction;
-    Span span;
-    Statistics statistics;
+  struct IssuedAccess {
     uint32_t index = 0;
+    AccessLog log;
   };
-  std::optional<PendingStore> pending_store_;
+  std::array<std::vector<IssuedAccess>, Timeline::kEngines> history_;
+  std::array<uint32_t, Timeline::kEngines> last_{};
+  std::array<uint32_t, Timeline::kEngines> known_{};
+  std::vector<Hazard> hazards_;
+  std::function<void(uint32_t, const AccessLog&)> observer_;
   uint32_t instr_base_ = 0;
   uint32_t instr_count_ = 0;
   uint32_t stream_base_ = 0;

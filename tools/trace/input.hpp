@@ -14,10 +14,17 @@
 #include "hotarubi/driver.hpp"
 #include "hotarubi/json.hpp"
 #include "hotarubi/runtime.hpp"
+#include "memories.hpp"
 #include "trace_record.hpp"
 #include "word.hpp"
 
 namespace hotarubi::trace {
+
+struct Range {
+  iss::Mem mem = iss::Mem::kFbuf;
+  uint32_t lo = 0;
+  uint32_t hi = 0;
+};
 
 struct Instruction {
   uint32_t index = 0;
@@ -28,7 +35,12 @@ struct Instruction {
   uint32_t flags = 0;
   std::string tag;
   std::string note;
+  std::vector<Range> reads;
+  std::vector<Range> writes;
 };
+
+std::string_view MemName(iss::Mem mem);
+std::optional<iss::Mem> ParseMem(std::string_view name);
 
 struct Stream {
   std::string name;

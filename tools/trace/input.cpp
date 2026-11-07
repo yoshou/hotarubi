@@ -40,6 +40,47 @@ std::expected<std::vector<std::byte>, std::string> ReadBytes(
   return bytes;
 }
 
+constexpr std::array<std::string_view, 6> kMemNames = {"ABUF", "WBUF", "FBUF",
+                                                       "PBUF", "TBUF", "CBUF"};
+
+std::optional<Range> ParseRange(const Json& item) {
+  if (!item.IsArray() || item.Items().size() != 3) {
+    return std::nullopt;
+  }
+  const Json& name = item.Items()[0];
+  const Json& lo = item.Items()[1];
+  const Json& hi = item.Items()[2];
+  if (!name.IsString() || !lo.Integer() || !hi.Integer()) {
+    return std::nullopt;
+  }
+  const auto mem = ParseMem(name.String());
+  if (!mem || *lo.Integer() < 0 || *hi.Integer() < *lo.Integer()) {
+    return std::nullopt;
+  }
+  return Range{.mem = *mem,
+               .lo = static_cast<uint32_t>(*lo.Integer()),
+               .hi = static_cast<uint32_t>(*hi.Integer())};
+}
+
+bool ParseRanges(const Json& entry, std::string_view name,
+                 std::vector<Range>& ranges) {
+  const Json* list = entry.Find(name);
+  if (list == nullptr) {
+    return true;
+  }
+  if (!list->IsArray()) {
+    return false;
+  }
+  for (const Json& item : list->Items()) {
+    const auto range = ParseRange(item);
+    if (!range) {
+      return false;
+    }
+    ranges.push_back(*range);
+  }
+  return true;
+}
+
 std::expected<void, std::string> ApplyListing(
     const std::filesystem::path& path, std::vector<Instruction>& instructions) {
   const auto text = ReadText(path);
@@ -81,6 +122,14 @@ std::expected<void, std::string> ApplyListing(
     }
     instructions[i].tag = tags->Items()[tag_index].String();
     instructions[i].note = note->String();
+    for (const auto& [name, ranges] :
+         {std::pair{"reads", &instructions[i].reads},
+          std::pair{"writes", &instructions[i].writes}}) {
+      if (!ParseRanges(entry, name, *ranges)) {
+        return std::unexpected(
+            std::format("{}: bad {} of entry {}", path.string(), name, i));
+      }
+    }
   }
   return {};
 }
@@ -96,6 +145,19 @@ std::expected<uint32_t, std::string> Field(const Json& object,
 }
 
 }  // namespace
+
+std::string_view MemName(iss::Mem mem) {
+  return kMemNames.at(static_cast<size_t>(mem));
+}
+
+std::optional<iss::Mem> ParseMem(std::string_view name) {
+  for (size_t i = 0; i < kMemNames.size(); ++i) {
+    if (kMemNames[i] == name) {
+      return static_cast<iss::Mem>(i);
+    }
+  }
+  return std::nullopt;
+}
 
 std::expected<std::string, std::string> ReadText(
     const std::filesystem::path& path) {
@@ -167,7 +229,9 @@ std::expected<Stream, std::string> LoadStream(const LoadedProgram& loaded,
                                    .wait = word.Field(116, 4),
                                    .flags = word.Field(112, 4),
                                    .tag = {},
-                                   .note = {}});
+                                   .note = {},
+                                   .reads = {},
+                                   .writes = {}});
   }
   if (auto applied = ApplyListing(listing, stream.instructions); !applied) {
     return std::unexpected(applied.error());

@@ -157,6 +157,7 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
   uint32_t pc = command.op == kVecRun ? command.aux & kPcMask
                                       : kRomStart.at(command.op & 0xFU);
   while (true) {
+    memories.log.Read(Mem::kCbuf, pc);
     const Word128 instruction = memories.cbuf.at(pc);
     pc = (pc + 1) & kPcMask;
     switch (instruction.Field(124, 4)) {
@@ -283,16 +284,22 @@ void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
           ? Operand(state, (state.src2 + WordOf(pass.wx2, w)) & kFbufMask,
                     memories)
           : x;
-  const WordResult result = ComputeWord(
-      pass,
-      {.x = x,
-       .x2 = x2,
-       .pbuf = memories.pbuf.at(
-           PbufAddress(pass.pa, state.pb, state.tile_row, w) & kPbufMask),
-       .w = w,
-       .imm = state.imm,
-       .imm2 = state.imm2},
-      rows_, memories.tbuf);
+  const uint32_t pbuf_address =
+      PbufAddress(pass.pa, state.pb, state.tile_row, w) & kPbufMask;
+  if (pass.pa != PbufAccess::kNone) {
+    memories.log.Read(Mem::kPbuf, pbuf_address);
+  }
+  if (pass.nl != Nonlinear::kNone) {
+    memories.log.ReadTable(Mem::kTbuf);
+  }
+  const WordResult result = ComputeWord(pass,
+                                        {.x = x,
+                                         .x2 = x2,
+                                         .pbuf = memories.pbuf.at(pbuf_address),
+                                         .w = w,
+                                         .imm = state.imm,
+                                         .imm2 = state.imm2},
+                                        rows_, memories.tbuf);
   for (uint32_t t = 0; t < kTokens; ++t) {
     if (pass.red == Reduction::kSum) {
       uint32_t& sum = state.reductions.sum.at(t).at(state.entry);
@@ -307,7 +314,7 @@ void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
 }
 
 const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
-                                   const Memories& memories) const {
+                                   Memories& memories) const {
   if (state.written.test(address)) {
     Fail(std::format("a PASS reads FBUF word {} after writing it", address));
   }
@@ -316,6 +323,7 @@ const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
         "a PASS reads FBUF word {} written by an undrained nodrain PASS",
         address));
   }
+  memories.log.Read(Mem::kFbuf, address);
   return memories.fbuf.at(address);
 }
 
@@ -327,6 +335,7 @@ void VecEngine::Store(PassState& state, uint32_t word, const FbufWord& out,
   }
   if (target == WriteTarget::kFbuf) {
     const uint32_t address = (state.dst + word) & kFbufMask;
+    memories.log.Write(Mem::kFbuf, address);
     memories.fbuf.at(address) = out;
     state.written.set(address);
   } else if (target == WriteTarget::kAbuf) {
@@ -337,8 +346,9 @@ void VecEngine::Store(PassState& state, uint32_t word, const FbufWord& out,
     state.block.at(quarter) = out;
     state.next_quarter = (quarter + 1) & 3U;
     if (quarter == 3) {
-      memories.abuf.at((state.abuf + (word >> 2)) & kAbufMask) =
-          QuantizeBlock(state.block);
+      const uint32_t address = (state.abuf + (word >> 2)) & kAbufMask;
+      memories.log.Write(Mem::kAbuf, address);
+      memories.abuf.at(address) = QuantizeBlock(state.block);
     }
   }
 }
@@ -351,7 +361,7 @@ void VecEngine::RunSalu(const Word128& instruction) {
   Write(instruction.Field(114, 5), Salu(instruction.Field(119, 5), a, b));
 }
 
-void VecEngine::RunSmem(const Word128& instruction, const Memories& memories) {
+void VecEngine::RunSmem(const Word128& instruction, Memories& memories) {
   const uint32_t rd = instruction.Field(116, 5);
   const uint32_t a = Register(instruction.Field(111, 5));
   const uint32_t column = instruction.Field(105, 1) != 0
@@ -359,9 +369,13 @@ void VecEngine::RunSmem(const Word128& instruction, const Memories& memories) {
                               : Register(instruction.Field(106, 5)) & 31U;
   std::array<uint32_t, kTokens>& scalars =
       instruction.Field(99, 1) != 0 ? rows_.rs0 : rows_.rs1;
-  const FbufWord& word =
-      memories.fbuf.at((a + instruction.Field(0, 32)) & kFbufMask);
-  switch (instruction.Field(121, 3)) {
+  const uint32_t word_address = (a + instruction.Field(0, 32)) & kFbufMask;
+  const uint32_t smem_op = instruction.Field(121, 3);
+  if (smem_op == kSmemLoad || smem_op == kSmemRowLoad) {
+    memories.log.Read(Mem::kFbuf, word_address);
+  }
+  const FbufWord& word = memories.fbuf.at(word_address);
+  switch (smem_op) {
     case kSmemLoad:
       Write(rd, word.at(column));
       break;

@@ -136,6 +136,38 @@ TEST_F(TraceTest, LoadsTheStreamWithTagsAndNotes) {
   EXPECT_EQ(Streaming(stream->instructions[3]), 32U);
   EXPECT_EQ(Streaming(stream->instructions[4]), 64U);
   EXPECT_FALSE(LoadStream(loaded, "missing").has_value());
+  ASSERT_EQ(stream->instructions[2].reads.size(), 2U);
+  EXPECT_EQ(stream->instructions[2].reads[0].mem, iss::Mem::kAbuf);
+  EXPECT_EQ(stream->instructions[2].reads[0].hi, 64U);
+  ASSERT_EQ(stream->instructions[2].writes.size(), 1U);
+  EXPECT_EQ(stream->instructions[2].writes[0].mem, iss::Mem::kFbuf);
+  EXPECT_EQ(stream->instructions[2].writes[0].hi, 8U);
+  EXPECT_TRUE(stream->instructions[5].reads.empty());
+}
+
+TEST_F(TraceTest, PredictChecksTheListedRangesAndDumpsTheAccesses) {
+  const auto prediction = Predict(Loaded(), "inference", false, {}, true);
+  ASSERT_TRUE(prediction.has_value()) << prediction.error();
+  const std::string& accesses = prediction->accesses;
+  EXPECT_NE(accesses.find(R"({"index":2,"reads":[["ABUF",0,64],["WBUF",0,8]],)"
+                          R"("writes":[["FBUF",0,8]]})"),
+            std::string::npos);
+  EXPECT_NE(accesses.find(R"({"index":7,"reads":[],"writes":[]})"),
+            std::string::npos);
+  const std::filesystem::path listing =
+      directory_ / compiler::ListingFileName("inference");
+  auto text = ReadText(listing);
+  ASSERT_TRUE(text.has_value());
+  const size_t position = text->find(R"(["WBUF",0,8])");
+  ASSERT_NE(position, std::string::npos);
+  text->replace(position, 12, R"(["WBUF",0,4])");
+  ASSERT_TRUE(WriteText(listing, *text).has_value());
+  const auto narrowed = Predict(Loaded(), "inference", false);
+  ASSERT_FALSE(narrowed.has_value());
+  EXPECT_NE(narrowed.error().find(
+                "instruction 0 writes WBUF word 4 outside its listed ranges"),
+            std::string::npos)
+      << narrowed.error();
 }
 
 TEST_F(TraceTest, PredictsAndAnalyzesAStream) {

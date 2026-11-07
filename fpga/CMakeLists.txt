@@ -7,6 +7,7 @@ if(NOT VIVADO_EXECUTABLE OR NOT BOOTGEN_EXECUTABLE OR NOT DTC_EXECUTABLE)
 endif()
 
 set(HOTARUBI_BOARD_REPO "" CACHE PATH "Vivado board repository that contains the KV260 SOM board files")
+set(HOTARUBI_IMPL_STRATEGY "" CACHE STRING "Vivado implementation strategy; empty keeps Performance_NetDelay_high")
 
 set(fpga_dir ${CMAKE_CURRENT_BINARY_DIR})
 set(build_tcl ${CMAKE_CURRENT_SOURCE_DIR}/build.tcl)
@@ -26,7 +27,7 @@ add_custom_target(fpga-synth DEPENDS ${fpga_dir}/synth.stamp)
 
 add_custom_command(
   OUTPUT ${fpga_dir}/impl.stamp
-  COMMAND ${vivado_command} -log ${fpga_dir}/impl.log -tclargs impl ${fpga_dir}
+  COMMAND ${vivado_command} -log ${fpga_dir}/impl.log -tclargs impl ${fpga_dir} "${HOTARUBI_IMPL_STRATEGY}"
   COMMAND ${CMAKE_COMMAND} -E touch ${fpga_dir}/impl.stamp
   DEPENDS ${fpga_dir}/synth.stamp
   WORKING_DIRECTORY ${fpga_dir}

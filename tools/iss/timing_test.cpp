@@ -257,6 +257,38 @@ TEST(EstimateTest, GatherCountsListCoefficientsAndRows) {
   EXPECT_EQ(gather.read_beats, 1U + 72 + (2U * 8 * 8) + (144U * 17));
 }
 
+TEST(EstimateTest, DdrExtentsCoverEveryRowOfATransfer) {
+  const DmaCommand raw{.ddr_addr = 0x100000,
+                       .mem = 2,
+                       .rows = 4,
+                       .row_words = 2,
+                       .ddr_stride = 0x1000};
+  EXPECT_EQ(EstimateDdrExtent(raw),
+            (DdrExtent{.lo = 0x100000, .hi = 0x100000 + (3 * 0x1000) + 256}));
+  const DmaCommand abuf_store{
+      .store = true, .ddr_addr = 0x2000, .mem = 0, .rows = 1, .row_words = 3};
+  EXPECT_EQ(EstimateDdrExtent(abuf_store),
+            (DdrExtent{.lo = 0x2000, .hi = 0x2000 + (3 * 9 * 16)}));
+  const DmaCommand split{
+      .ddr_addr = 0x3000, .mem = 1, .rows = 2, .row_words = 4, .mode = 1};
+  EXPECT_EQ(EstimateDdrExtent(split),
+            (DdrExtent{.lo = 0x3000, .hi = 0x3000 + (4 * 9 * 16)}));
+  const DmaCommand rows{.ddr_addr = 0x4000,
+                        .mem = 2,
+                        .rows = 1,
+                        .row_words = 4,
+                        .flags = 2,
+                        .tok = 8};
+  EXPECT_EQ(EstimateDdrExtent(rows),
+            (DdrExtent{.lo = 0x4000, .hi = 0x4000 + (4 * 8 * 8 * 16)}));
+  const DmaCommand indexed{.ddr_addr = 0x5000, .rows = 1, .flags = 1};
+  EXPECT_TRUE(EstimateDdrExtent(indexed).whole);
+  const DmaCommand gather{.ddr_addr = 0x6000, .rows = 1, .mode = 3};
+  EXPECT_TRUE(EstimateDdrExtent(gather).whole);
+  const DmaCommand empty{.ddr_addr = 0x7000, .rows = 0, .row_words = 1};
+  EXPECT_EQ(EstimateDdrExtent(empty), (DdrExtent{.lo = 0x7000, .hi = 0x7000}));
+}
+
 TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
   const VecActivity add = FixedOperationActivity({.op = 0,
                                                   .quantize = false,
@@ -314,6 +346,18 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
                                                   .aux = 300,
                                                   .imm = 0});
   EXPECT_EQ(run.passes, 0U);
+}
+
+TEST(ParseTimingTest, AppliesAssignmentsAndRejectsUnknownNames) {
+  const auto parsed = ParseTiming("gemm_fixed_cycles=7,vec_smem_cycles=4");
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->gemm_fixed_cycles, 7U);
+  EXPECT_EQ(parsed->vec_smem_cycles, 4U);
+  EXPECT_EQ(parsed->dma_fixed_cycles, TimingParameters{}.dma_fixed_cycles);
+  EXPECT_FALSE(ParseTiming("nothing=1").has_value());
+  EXPECT_FALSE(ParseTiming("gemm_fixed_cycles").has_value());
+  EXPECT_FALSE(ParseTiming("gemm_fixed_cycles=x").has_value());
+  EXPECT_TRUE(ParseTiming("").has_value());
 }
 
 TEST(TimelineTest, IssuesInOrderAndHonoursWaitBits) {

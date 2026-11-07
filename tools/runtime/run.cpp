@@ -41,7 +41,8 @@ constexpr std::string_view kUsage =
     "--output DIR [--timeout MS] [--seed N] [--trace DIR] [--trace-stats] "
     "[--device board|iss]\n"
     "       hotarubi_run sparsedrive --program DIR --input DIR --output DIR "
-    "[--timeout MS] [--trace DIR] [--trace-stats] [--device board|iss]";
+    "[--timeout MS] [--trace DIR] [--trace-stats] [--device board|iss] "
+    "[--timing NAME=VALUE,...]";
 constexpr std::string_view kUioClass = "/sys/class/uio";
 constexpr std::string_view kUioName = "npu";
 constexpr std::string_view kBufferClass = "/sys/class/u-dma-buf/udmabuf0";
@@ -68,8 +69,8 @@ struct Provenance {
 std::expected<Options, std::string> ParseOptions(
     std::span<const char* const> args) {
   static const std::set<std::string, std::less<>> kKnown = {
-      "program", "language", "input", "output",
-      "timeout", "seed",     "trace", "device"};
+      "program", "language", "input",  "output", "timeout",
+      "seed",    "trace",    "device", "timing"};
   static const std::set<std::string, std::less<>> kSwitches = {"trace-stats"};
   Options options;
   for (size_t i = 0; i < args.size(); ++i) {
@@ -454,12 +455,26 @@ std::expected<void, std::string> RunOnSimulator(std::string_view model,
   if (!program) {
     return std::unexpected(program.error());
   }
+  const auto timing = options.contains("timing")
+                          ? iss::ParseTiming(options.at("timing"))
+                          : iss::TimingParameters{};
+  if (!timing) {
+    return std::unexpected(timing.error());
+  }
   std::vector<std::byte> memory(program->image.size());
-  iss::Machine machine(memory, program->base);
+  iss::Machine machine(memory, program->base, *timing);
   iss::IssBus bus(machine);
   Device device(bus);
   Runtime runtime(device, memory, program->base);
-  return RunModel(runtime, model, options);
+  if (auto ran = RunModel(runtime, model, options); !ran) {
+    return ran;
+  }
+  if (!machine.Hazards().empty()) {
+    return std::unexpected(
+        std::format("the streams have unordered accesses:\n{}",
+                    iss::DescribeHazards(machine.Hazards(), 10)));
+  }
+  return {};
 }
 
 std::expected<void, std::string> Run(std::string_view model,

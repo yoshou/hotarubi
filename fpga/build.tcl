@@ -91,6 +91,13 @@ switch -- $step {
   }
   impl {
     open_project [file join $project_dir $project_name.xpr]
+    set strategy [lindex $argv 2]
+    if {$strategy ne ""} {
+      reset_run impl_1
+      set_property strategy $strategy [get_runs impl_1]
+      set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+      set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+    }
     launch_runs impl_1 -jobs $jobs
     wait_on_run impl_1
     check_run impl_1

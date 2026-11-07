@@ -82,6 +82,15 @@ Instruction ToBench(const trace::Instruction& instruction) {
   return out;
 }
 
+Json Ranges(const std::vector<trace::Range>& ranges) {
+  Json::Array items;
+  for (const trace::Range& range : ranges) {
+    items.emplace_back(Json::Array{Json(std::string(trace::MemName(range.mem))),
+                                   Number(range.lo), Number(range.hi)});
+  }
+  return Json(std::move(items));
+}
+
 std::string ListingJson(uint64_t base,
                         const std::vector<trace::Instruction>& selected) {
   std::vector<std::string> tags;
@@ -107,8 +116,8 @@ std::string ListingJson(uint64_t base,
                                  instruction.word.low))},
         {"tag", Number(found->second)},
         {"note", Json(instruction.note)},
-        {"reads", Json(Json::Array{})},
-        {"writes", Json(Json::Array{})}});
+        {"reads", Ranges(instruction.reads)},
+        {"writes", Ranges(instruction.writes)}});
   }
   Json::Array tag_array;
   for (const std::string& tag : tags) {

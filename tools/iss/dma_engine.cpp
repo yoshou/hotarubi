@@ -103,6 +103,9 @@ FbufWord ToFbuf(std::span<const std::byte, kWordBufferBytes> word) {
 
 void WriteWord(Memories& memories, uint32_t mem, uint32_t address,
                std::span<const std::byte, kWordBufferBytes> word) {
+  if (mem <= static_cast<uint32_t>(Mem::kCbuf)) {
+    memories.log.Write(static_cast<Mem>(mem), address);
+  }
   switch (mem) {
     case 0:
       std::ranges::transform(word.first<kAbufWordBytes>(),
@@ -130,8 +133,9 @@ void WriteWord(Memories& memories, uint32_t mem, uint32_t address,
   }
 }
 
-WordBytes ReadWord(const Memories& memories, uint32_t mem, uint32_t address) {
+WordBytes ReadWord(Memories& memories, uint32_t mem, uint32_t address) {
   WordBytes word{};
+  memories.log.Read(mem == 0 ? Mem::kAbuf : Mem::kFbuf, address);
   if (mem == 0) {
     std::ranges::transform(memories.abuf.at(address % kAbufDepth), word.begin(),
                            [](uint8_t value) { return std::byte{value}; });
@@ -193,7 +197,7 @@ void PackQuad(const RowFormat& format, const Quad& quad, Memories& memories,
   }
 }
 
-void UnpackQuad(const RowFormat& format, const Memories& memories, uint32_t mem,
+void UnpackQuad(const RowFormat& format, Memories& memories, uint32_t mem,
                 uint32_t base, Quad& quad) {
   for (Unit& unit : quad) {
     unit.assign(format.bytes, std::byte{0});
@@ -281,7 +285,7 @@ void LoadRows(const DmaCommand& command, const Ddr& ddr, Memories& memories,
   }
 }
 
-void StoreWords(const DmaCommand& command, Ddr& ddr, const Memories& memories,
+void StoreWords(const DmaCommand& command, Ddr& ddr, Memories& memories,
                 DmaActivity& activity) {
   const uint32_t beats = BeatsPerWord(command.mem);
   const uint32_t bytes = beats * kBeatBytes;
@@ -312,7 +316,7 @@ void StoreWords(const DmaCommand& command, Ddr& ddr, const Memories& memories,
   }
 }
 
-void StoreRows(const DmaCommand& command, Ddr& ddr, const Memories& memories,
+void StoreRows(const DmaCommand& command, Ddr& ddr, Memories& memories,
                DmaActivity& activity) {
   const bool indexed = (command.flags & kFlagIndex) != 0;
   const RowFormat format = MakeRowFormat(command, indexed);
@@ -372,6 +376,8 @@ void LoadSplit8(const DmaCommand& command, const Ddr& ddr, Memories& memories,
         }
       }
       const uint32_t index = (p * command.row_words) + w;
+      memories.log.Write(Mem::kWbuf, command.onchip + index);
+      memories.log.Write(Mem::kWbuf, command.onchip + half + index);
       memories.wbuf.at((command.onchip + index) % kWbufDepth) = high;
       memories.wbuf.at((command.onchip + half + index) % kWbufDepth) = low;
     }
@@ -440,6 +446,8 @@ void LoadT32(const DmaCommand& command, const Ddr& ddr, Memories& memories,
       const uint32_t base = command.onchip + g + (w * 4 * groups);
       for (uint32_t cg = 0; cg < 4; ++cg) {
         const uint32_t address = base + (cg * groups);
+        memories.log.Write(Mem::kWbuf, address);
+        memories.log.Write(Mem::kWbuf, address + half);
         memories.wbuf.at(address % kWbufDepth) = out.at(cg);
         memories.wbuf.at((address + half) % kWbufDepth) = out.at(4 + cg);
       }
@@ -494,6 +502,7 @@ void FlushGather(
         word.at((t * kLanes) + c) = acc.at(t).at((g * kLanes) + c);
       }
     }
+    memories.log.Write(Mem::kFbuf, (onchip & 0x1FFFU) + g);
     memories.fbuf.at(((onchip & 0x1FFFU) + g) % kFbufDepth) = word;
   }
 }

@@ -27,17 +27,20 @@ namespace {
 
 using Options = std::map<std::string, std::string, std::less<>>;
 
+constexpr uint64_t kDefaultWindow = 64;
+
 constexpr std::string_view kUsage =
     "usage: hotarubi_compile smolvla --quant FILE --model FILE --base ADDRESS "
-    "--lang-tokens N [--cameras N] [--steps N] --output DIR [--listing DIR]\n"
+    "--lang-tokens N [--cameras N] [--steps N] [--schedule-window N] "
+    "--output DIR [--listing DIR]\n"
     "       hotarubi_compile sparsedrive --quant FILE --checkpoint FILE "
-    "--base ADDRESS --output DIR [--listing DIR]";
+    "--base ADDRESS [--schedule-window N] --output DIR [--listing DIR]";
 
 std::expected<Options, std::string> ParseOptions(
     std::span<const char* const> args) {
   static const std::set<std::string, std::less<>> kKnown = {
-      "quant",   "model", "checkpoint", "base",   "lang-tokens",
-      "cameras", "steps", "output",     "listing"};
+      "quant",   "model", "checkpoint", "base",    "lang-tokens",
+      "cameras", "steps", "output",     "listing", "schedule-window"};
   Options options;
   for (size_t i = 0; i < args.size(); i += 2) {
     const std::string_view flag = args[i];
@@ -133,6 +136,7 @@ std::expected<void, std::string> RunSmolVla(const Options& options) {
   const auto lang = Count(options, "lang-tokens", std::nullopt);
   const auto cameras = Count(options, "cameras", 2);
   const auto steps = Count(options, "steps", 10);
+  const auto window = Count(options, "schedule-window", kDefaultWindow);
   for (const auto* text : {&quant_path, &model_path}) {
     if (!*text) {
       return std::unexpected(text->error());
@@ -141,7 +145,7 @@ std::expected<void, std::string> RunSmolVla(const Options& options) {
   if (!base) {
     return std::unexpected(base.error());
   }
-  for (const auto* count : {&lang, &cameras, &steps}) {
+  for (const auto* count : {&lang, &cameras, &steps, &window}) {
     if (!*count) {
       return std::unexpected(count->error());
     }
@@ -157,7 +161,8 @@ std::expected<void, std::string> RunSmolVla(const Options& options) {
   return Write(options, CompileSmolVla({.cameras = *cameras,
                                         .lang_tokens = *lang,
                                         .steps = *steps,
-                                        .base = *base},
+                                        .base = *base,
+                                        .schedule_window = *window},
                                        *quant, *model));
 }
 
@@ -165,6 +170,7 @@ std::expected<void, std::string> RunSparseDrive(const Options& options) {
   const auto quant_path = Text(options, "quant");
   const auto checkpoint_path = Text(options, "checkpoint");
   const auto base = Number(options, "base", std::nullopt);
+  const auto window = Count(options, "schedule-window", kDefaultWindow);
   for (const auto* text : {&quant_path, &checkpoint_path}) {
     if (!*text) {
       return std::unexpected(text->error());
@@ -172,6 +178,9 @@ std::expected<void, std::string> RunSparseDrive(const Options& options) {
   }
   if (!base) {
     return std::unexpected(base.error());
+  }
+  if (!window) {
+    return std::unexpected(window.error());
   }
   const auto quant = SafeTensors::Open(*quant_path);
   if (!quant) {
@@ -182,7 +191,8 @@ std::expected<void, std::string> RunSparseDrive(const Options& options) {
     return std::unexpected(checkpoint.error());
   }
   return Write(options,
-               CompileSparseDrive({.base = *base}, *quant, *checkpoint));
+               CompileSparseDrive({.base = *base, .schedule_window = *window},
+                                  *quant, *checkpoint));
 }
 
 int Main(std::span<const char* const> args) {

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <optional>
 
 #include "trace_record.hpp"
 
@@ -18,7 +17,6 @@ void Timeline::Start() {
   issued_ = 0;
   free_.fill(0);
   busy_.fill(0);
-  abuf_hold_.reset();
 }
 
 Span Timeline::Issue(Source source, uint32_t wait, uint64_t cost,
@@ -40,28 +38,9 @@ Span Timeline::Issue(Source source, uint32_t wait, uint64_t cost,
     free_.at(engine) = span.completion;
     busy_.at(engine) += span.completion - issue;
   }
-  if (source == Source::kGemm && abuf_hold_ && issue < abuf_hold_->completion) {
-    const uint64_t extension = span.completion - span.issue;
-    abuf_hold_->completion += extension;
-    abuf_hold_->denied += extension;
-    free_.at(static_cast<size_t>(Source::kDma)) = abuf_hold_->completion;
-    busy_.at(static_cast<size_t>(Source::kDma)) += extension;
-  }
   last_issue_ = issue;
   ++issued_;
   return span;
-}
-
-void Timeline::HoldAbufPort(const Span& store) {
-  abuf_hold_ = PortHold{.issue = store.issue,
-                        .completion = store.completion,
-                        .denied = store.start - store.issue};
-}
-
-std::optional<PortHold> Timeline::TakeAbufHold() {
-  std::optional<PortHold> hold = abuf_hold_;
-  abuf_hold_.reset();
-  return hold;
 }
 
 uint64_t Timeline::Cycles() const { return issued_ == 0 ? 0 : last_issue_ + 1; }

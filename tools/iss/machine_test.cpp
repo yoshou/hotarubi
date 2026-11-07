@@ -71,8 +71,8 @@ Word128 Dma(uint32_t opcode, uint32_t ddr, uint32_t mem, uint32_t onchip,
 }
 
 Word128 Vec(uint32_t op, uint32_t src, uint32_t src2, uint32_t dst,
-            uint32_t rows_q, uint32_t n8) {
-  Word128 word = Header(5, 0x1);
+            uint32_t rows_q, uint32_t n8, uint32_t wait = 0x1) {
+  Word128 word = Header(5, wait);
   encoding::Set(word, 107, 5, op);
   encoding::Set(word, 95, 12, src);
   encoding::Set(word, 83, 12, src2);
@@ -343,7 +343,7 @@ TEST_F(MachineTest, WritesStatisticsRecordsForEngineInstructions) {
   EXPECT_EQ(Record(8).source, Source::kSequencer);
 }
 
-TEST_F(MachineTest, AbufStoresWaitForEveryOverlappingGemm) {
+TEST_F(MachineTest, AbufStoresDoNotWaitForGemm) {
   Load({Dma(1, kInput, 0, 0, 1, 1, 0), GemmOp(0x1),
         Dma(2, kOutput, 0, 0, 1, 1, 0), GemmOp(), GemmOp(),
         Dma(1, kInput, 2, 0, 1, 1, 0), Header(7, 0xD)});
@@ -362,26 +362,97 @@ TEST_F(MachineTest, AbufStoresWaitForEveryOverlappingGemm) {
       statistics.at(record.index) = record;
     }
   }
-  const TraceRecord& first_gemm = completion.at(1);
-  const TraceRecord& store = completion.at(2);
-  const TraceRecord& second_gemm = completion.at(3);
-  const TraceRecord& third_gemm = completion.at(4);
-  const TraceRecord& load = completion.at(5);
-  EXPECT_EQ(store.issue, first_gemm.issue + 1);
-  EXPECT_EQ(second_gemm.issue, first_gemm.completion + 1);
-  EXPECT_EQ(third_gemm.issue, second_gemm.completion + 1);
-  EXPECT_GT(third_gemm.completion, first_gemm.completion + 100);
-  EXPECT_GE(store.completion, third_gemm.completion);
-  EXPECT_EQ(statistics.at(2).statistics.c,
-            (first_gemm.completion - store.issue) +
-                (second_gemm.completion - second_gemm.issue) +
-                (third_gemm.completion - third_gemm.issue));
-  EXPECT_EQ(load.issue, store.completion + 1);
-  EXPECT_EQ(Record(8).index, 2U);
-  EXPECT_EQ(Record(8).type, RecordType::kCompletion);
-  EXPECT_EQ(Record(9).index, 2U);
-  EXPECT_EQ(Record(9).type, RecordType::kStatistics);
-  EXPECT_EQ(Record(10).index, 5U);
+  EXPECT_EQ(completion.at(2).issue, completion.at(1).issue + 1);
+  EXPECT_LT(completion.at(2).completion, completion.at(3).completion);
+  EXPECT_EQ(statistics.at(2).statistics.c, 0U);
+  EXPECT_EQ(Record(4).index, 2U);
+  EXPECT_EQ(Record(4).type, RecordType::kCompletion);
+}
+
+TEST_F(MachineTest, DetectsAccessesThatNoWaitOrders) {
+  FillInput(8);
+  Load({Dma(1, kInput, 2, 0, 1, 4, 512), Dma(1, kInput + 512, 2, 4, 1, 4, 512),
+        Vec(0, 0, 4, 8, 1, 4, 0), Vec(0, 0, 4, 12, 1, 4, 0),
+        Dma(2, kOutput, 2, 8, 1, 4, 512), Header(7, 0xD)});
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  ASSERT_EQ(machine_.Hazards().size(), 2U);
+  EXPECT_EQ(machine_.Hazards()[0].earlier, 1U);
+  EXPECT_EQ(machine_.Hazards()[0].later, 2U);
+  EXPECT_EQ(machine_.Hazards()[0].conflict.mem, Mem::kFbuf);
+  EXPECT_EQ(machine_.Hazards()[0].conflict.address, 4U);
+  EXPECT_EQ(machine_.Hazards()[1].earlier, 1U);
+  EXPECT_EQ(machine_.Hazards()[1].later, 3U);
+  EXPECT_EQ(machine_.Hazards()[1].conflict.address, 4U);
+  EXPECT_NE(DescribeHazards(machine_.Hazards(), 1).find("... 2 hazards"),
+            std::string::npos);
+  Load(AddStream());
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  EXPECT_TRUE(machine_.Hazards().empty());
+}
+
+TEST_F(MachineTest, OrderingKnowledgeCarriesAcrossLaterInstructions) {
+  FillInput(8);
+  Load({Dma(1, kInput, 2, 0, 1, 4, 512), Vec(5, 0, 0, 8, 1, 4, 0x1),
+        Vec(5, 0, 0, 16, 1, 4, 0), GemmOp(0x8), Header(7, 0xD)});
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  EXPECT_TRUE(machine_.Hazards().empty());
+}
+
+TEST_F(MachineTest, TableWritesAfterVecAreOrderedByHardware) {
+  FillInput(8);
+  Load({Dma(1, kInput, 4, 0, 1, 4, 512), Vec(8, 0, 0, 8, 1, 4, 0x1),
+        Dma(1, kInput, 4, 0, 1, 4, 512), Vec(8, 0, 0, 8, 1, 4, 0),
+        Header(7, 0xD)});
+  machine_.WriteRegister(kCtrl, 1);
+  EXPECT_EQ(machine_.Run(), Stop::kHalt);
+  ASSERT_EQ(machine_.Hazards().size(), 1U);
+  EXPECT_EQ(machine_.Hazards()[0].earlier, 2U);
+  EXPECT_EQ(machine_.Hazards()[0].later, 3U);
+  EXPECT_EQ(machine_.Hazards()[0].conflict.mem, Mem::kTbuf);
+}
+
+TEST(AccessSetTest, ExtentsAndCoverageFollowTheWords) {
+  AccessSet set;
+  set.AddRange(Mem::kFbuf, 10, 14);
+  set.Add(Mem::kAbuf, 7);
+  set.Add(Mem::kCbuf, 300);
+  const std::vector<Extent> expected = {
+      {.mem = Mem::kAbuf, .lo = 7, .hi = 8},
+      {.mem = Mem::kFbuf, .lo = 10, .hi = 14},
+      {.mem = Mem::kCbuf, .lo = 300, .hi = 301}};
+  EXPECT_EQ(Extents(set), expected);
+  AccessSet declared;
+  declared.AddRange(Mem::kFbuf, 0, 16);
+  declared.AddRange(Mem::kAbuf, 0, 8);
+  declared.AddTable(Mem::kCbuf);
+  EXPECT_FALSE(FirstOutside(set, declared).has_value());
+  declared.cbuf.reset(300);
+  const auto outside = FirstOutside(set, declared);
+  ASSERT_TRUE(outside.has_value());
+  const Conflict conflict = outside.value_or(Conflict{});
+  EXPECT_EQ(conflict.mem, Mem::kCbuf);
+  EXPECT_EQ(conflict.address, 300U);
+  EXPECT_TRUE(Extents(AccessSet{}).empty());
+}
+
+TEST(EstimateCyclesTest, MatchesTheCostModelOfEachEngine) {
+  const CostModel model;
+  const Word128 load = Dma(1, kInput, 2, 0, 4, 4, 512);
+  EXPECT_EQ(EstimateCycles(load, model),
+            model.Dma(EstimateDma(DecodeDma(load))).cycles);
+  const Word128 gemm = GemmOp();
+  EXPECT_EQ(EstimateCycles(gemm, model), model.Gemm(DecodeGemm(gemm)).cycles);
+  const Word128 copy = Vec(5, 0, 0, 8, 2, 4);
+  EXPECT_EQ(EstimateCycles(copy, model),
+            model.Vec(FixedOperationActivity(DecodeVec(copy))).cycles);
+  EXPECT_GT(EstimateCycles(copy, model), 23U);
+  const Word128 run = Vec(16, 0, 0, 8, 2, 4);
+  EXPECT_GT(EstimateCycles(run, model), 23U);
+  EXPECT_EQ(EstimateCycles(Header(7, 0xD), model), 0U);
+  EXPECT_EQ(EstimateCycles(SignalOp(1, 2), model), 0U);
 }
 
 TEST_F(MachineTest, DriverReportsIllegalInstructionsAndHangs) {

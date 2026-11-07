@@ -11,6 +11,7 @@ namespace hotarubi::compiler {
 
 struct SparseDriveOptions {
   uint64_t base = 0;
+  uint32_t schedule_window = 64;
 };
 
 Compiled CompileSparseDrive(const SparseDriveOptions& options,

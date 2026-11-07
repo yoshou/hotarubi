@@ -105,7 +105,7 @@ build/gcc-release/tools/compiler/hotarubi_compile sparsedrive --quant build/quan
     --checkpoint build/sparsedrive/sparsedrive_stage2.pth --base 0x4f300000 --output build/compiled/sparsedrive
 ```
 
-Each output directory holds `image.bin`, `meta.json` and one `<stream>.listing.json` per instruction stream. `--lang-tokens` is the number of language tokens of the task prompts, the same as `--lang-tokens` of `scripts/prepare_smolvla.py` (12 by default).
+Each output directory holds `image.bin`, `meta.json` and one `<stream>.listing.json` per instruction stream. `--lang-tokens` is the number of language tokens of the task prompts, the same as `--lang-tokens` of `scripts/prepare_smolvla.py` (12 by default). `--schedule-window N` sets the lookahead of the instruction scheduler (64 by default; 0 keeps the emission order).
 
 ### 6. Bitstream and board program
 
@@ -117,7 +117,7 @@ cmake --preset aarch64-release
 cmake --build --preset aarch64-release
 ```
 
-`fpga-bitstream` writes `npu.bit.bin`, `npu.dtbo` and `shell.json` to `build/gcc-release/fpga/`. If the KV260 SOM board files are not part of the Vivado installation, configure with `-DHOTARUBI_BOARD_REPO=<board repository>`. The board program is `build/aarch64-release/tools/runtime/hotarubi_run`, linked statically.
+`fpga-bitstream` writes `npu.bit.bin`, `npu.dtbo` and `shell.json` to `build/gcc-release/fpga/`. If the KV260 SOM board files are not part of the Vivado installation, configure with `-DHOTARUBI_BOARD_REPO=<board repository>`. `-DHOTARUBI_IMPL_STRATEGY=<strategy>` selects another Vivado implementation strategy than `Performance_NetDelay_high`. The board program is `build/aarch64-release/tools/runtime/hotarubi_run`, linked statically.
 
 ### 7. Inputs and references
 
@@ -150,7 +150,7 @@ rsync -a kv260:hotarubi/outputs/smolvla/ build/board/smolvla/outputs/
 rsync -a kv260:hotarubi/outputs/sparsedrive/ build/board/sparsedrive/outputs/
 ```
 
-`hotarubi_run` prints the NPU cycles and the time of each frame. With `--device iss` it runs the same frames on the instruction-set simulator instead of the board (on the host or on the board), which gives the bit-exact reference outputs and the predicted trace of the cycle model for the same inputs. With `--trace DIR` it also records the execution trace of each frame into `DIR/<frame>.trace.bin` and the counters, the timing split and the provenance hashes into `DIR/<frame>.counters.json`; `--trace-stats` adds the statistics records.
+`hotarubi_run` prints the NPU cycles and the time of each frame. With `--device iss` it runs the same frames on the instruction-set simulator instead of the board (on the host or on the board), which gives the bit-exact reference outputs and the predicted trace of the cycle model for the same inputs and fails on a stream with unordered conflicting accesses. With `--trace DIR` it also records the execution trace of each frame into `DIR/<frame>.trace.bin` and the counters, the timing split and the provenance hashes into `DIR/<frame>.counters.json`; `--trace-stats` adds the statistics records.
 
 ### 9. Comparison
 
@@ -177,7 +177,7 @@ build/gcc-release/tools/trace/hotarubi_trace report --program build/compiled/smo
     --trace build/traces/smolvla/0000.trace.bin --counters build/traces/smolvla/0000.counters.json --depth 2
 ```
 
-`hotarubi_trace` validates a trace against the compiled image (`check`), prints the engine occupancy, the phases by tag, the categories with their streaming efficiency and the largest issue gaps (`report`, with `--json FILE` for the same as JSON), aggregates by tag at a depth (`kernels`), writes a Perfetto timeline (`perfetto --out FILE`), compares two traces (`diff --trace2 FILE`), runs the simulator's cycle model on an image and writes the predicted trace in the same format (`predict --out DIR`), and fits the cycle-model parameters to a board trace (`calibrate`). For SparseDrive-S the stream is `start` or `continue`, as named in the counters file.
+`hotarubi_trace` validates a trace against the compiled image (`check`), prints the engine occupancy, the phases by tag, the categories with their streaming efficiency and the largest issue gaps (`report`, with `--json FILE` for the same as JSON), aggregates by tag at a depth (`kernels`), writes a Perfetto timeline (`perfetto --out FILE`), compares two traces (`diff --trace2 FILE`), runs the simulator's cycle model on an image, checks the stream for unordered conflicting accesses and for accesses outside the listed ranges and writes the predicted trace in the same format (`predict --out DIR`, with `--timing NAME=VALUE,...` for cycle-model parameters and `--accesses` for a dump of the actual access extents), and fits the cycle-model parameters to a board trace (`calibrate`). For SparseDrive-S the stream is `start` or `continue`, as named in the counters file.
 
 `hotarubi_kernel_bench --program DIR --stream NAME --first N --last N --out DIR [--preamble I,J] [--stats]` runs a window of a compiled stream on the Verilator model and writes the same files for `DIR`, so a kernel's RTL trace and its predicted trace can be compared with `hotarubi_trace diff`.
 

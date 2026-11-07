@@ -184,8 +184,8 @@ void PlaceConnector(DdrImage& image, const SafeTensors& quant,
 
 void LayerNorm(Program& program, uint64_t x, uint32_t pb, uint32_t dst,
                std::string_view note) {
-  constexpr std::array<uint32_t, 2> kXt = {0, 768};
-  constexpr uint32_t kScratch = 1536;
+  constexpr std::array<uint32_t, 2> kXt = {1792, 2560};
+  constexpr uint32_t kScratch = 3328;
   for (uint32_t t = 0; t < kQuads / kTileQuads; ++t) {
     Ld(program, x + (uint64_t{t} * kTileQuads * kWords * kWordF), Mem::kFbuf,
        kXt[t % 2], kTileQuads, kWords, kWords * kWordF,
@@ -413,7 +413,7 @@ class Attention {
 
 void QuantToAbuf(Program& program, uint64_t x, uint32_t dst,
                  std::string_view note) {
-  constexpr std::array<uint32_t, 2> kXt = {0, 768};
+  constexpr std::array<uint32_t, 2> kXt = {1792, 2560};
   for (uint32_t t = 0; t < kQuads / kTileQuads; ++t) {
     Ld(program, x + (uint64_t{t} * kTileQuads * kWords * kWordF), Mem::kFbuf,
        kXt[t % 2], kTileQuads, kWords, kWords * kWordF,

@@ -13,6 +13,7 @@ struct SmolVlaOptions {
   uint32_t lang_tokens = 0;
   uint32_t steps = 10;
   uint64_t base = 0;
+  uint32_t schedule_window = 64;
 };
 
 Compiled CompileSmolVla(const SmolVlaOptions& options, const SafeTensors& quant,

@@ -6,8 +6,11 @@
 #include <cstdint>
 #include <format>
 #include <functional>
+#include <numeric>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "hotarubi/json.hpp"
@@ -90,6 +93,12 @@ Program::Scope::~Scope() { program_.PopScope(); }
 Program::Program(uint64_t base) : base_(base) {
   tags_.emplace_back();
   tag_lookup_.emplace("", 0);
+  ResetTracking();
+}
+
+void Program::ResetTracking() {
+  known_.fill(0);
+  wait_count_ = 0;
   for (size_t m = 0; m < kMemCount; ++m) {
     const size_t depth = kMemDepth.at(m);
     Tracker& tracker = trackers_.at(m);
@@ -150,11 +159,9 @@ uint32_t Program::Dependencies(int engine, const std::vector<Range>& reads,
   return need;
 }
 
-size_t Program::Emit(Engine engine,
-                     const std::function<Instruction(uint32_t)>& make,
-                     const std::vector<Range>& reads,
-                     const std::vector<Range>& writes, std::string_view note) {
-  const auto index = static_cast<int32_t>(instructions_.size());
+uint32_t Program::Admit(int32_t index, Engine engine,
+                        const std::vector<Range>& reads,
+                        const std::vector<Range>& writes) {
   const int e = static_cast<int>(engine);
   uint32_t need = 0;
   if (e < kEngines) {
@@ -172,12 +179,6 @@ size_t Program::Emit(Engine engine,
   if (e < kEngines) {
     known_.at(e) = index;
   }
-  instructions_.push_back(make(wait));
-  notes_.emplace_back(note);
-  engines_.push_back(engine);
-  reads_.push_back(reads);
-  writes_.push_back(writes);
-  tag_index_.push_back(tag_lookup_.at(scope_));
   if (need != 0) {
     ++wait_count_;
   }
@@ -200,7 +201,51 @@ size_t Program::Emit(Engine engine,
       }
     }
   }
+  return wait;
+}
+
+size_t Program::Emit(Engine engine,
+                     const std::function<Instruction(uint32_t)>& make,
+                     const std::vector<Range>& reads,
+                     const std::vector<Range>& writes, std::string_view note) {
+  const auto index = static_cast<int32_t>(instructions_.size());
+  const uint32_t wait = Admit(index, engine, reads, writes);
+  instructions_.push_back(make(wait));
+  notes_.emplace_back(note);
+  engines_.push_back(engine);
+  reads_.push_back(reads);
+  writes_.push_back(writes);
+  tag_index_.push_back(tag_lookup_.at(scope_));
   return static_cast<size_t>(index);
+}
+
+void Program::Reorder(std::span<const size_t> order) {
+  const size_t count = instructions_.size();
+  std::vector<size_t> sorted(order.begin(), order.end());
+  std::ranges::sort(sorted);
+  std::vector<size_t> identity(count);
+  std::ranges::iota(identity, size_t{0});
+  Require(order.size() == count && sorted == identity,
+          "the order is not a permutation of the instructions");
+  const auto permute = [&](auto& items) {
+    auto reordered = items;
+    for (size_t i = 0; i < count; ++i) {
+      reordered[i] = std::move(items[order[i]]);
+    }
+    items = std::move(reordered);
+  };
+  permute(instructions_);
+  permute(notes_);
+  permute(engines_);
+  permute(reads_);
+  permute(writes_);
+  permute(tag_index_);
+  ResetTracking();
+  for (size_t i = 0; i < count; ++i) {
+    const uint32_t wait =
+        Admit(static_cast<int32_t>(i), engines_[i], reads_[i], writes_[i]);
+    instructions_[i].Set(116, 4, wait);
+  }
 }
 
 size_t Program::Load(const Transfer& transfer, std::string_view note) {

@@ -124,19 +124,25 @@ void ExecuteGemm(const GemmCommand& command, Memories& memories) {
     for (uint32_t kb = 0; kb < command.kb; ++kb) {
       const uint32_t address =
           (command.w_base + (g * command.w_stride) + kb) & kAddressMask;
+      memories.log.Read(Mem::kWbuf, address);
       weights.at(kb) =
           DecodeWeights(memories.wbuf.at(address % kWbufDepth), mode);
     }
     for (uint32_t q = 0; q < quads; ++q) {
       const uint32_t c_address =
           ((command.c_base + (q * command.n8) + g) & kAddressMask) % kFbufDepth;
+      if (command.acc) {
+        memories.log.Read(Mem::kFbuf, c_address);
+      }
       FbufWord acc = command.acc ? memories.fbuf.at(c_address) : FbufWord{};
       for (uint32_t kb = 0; kb < command.kb; ++kb) {
         const uint32_t a_address =
             (command.a_base + (q * command.a_stride) + kb) & kAddressMask;
+        memories.log.Read(Mem::kAbuf, a_address);
         AccumulateBlock(memories.abuf.at(a_address % kAbufDepth),
                         weights.at(kb), mode, acc);
       }
+      memories.log.Write(Mem::kFbuf, c_address);
       memories.fbuf.at(c_address) = acc;
     }
   }

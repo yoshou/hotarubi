@@ -7,6 +7,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -119,6 +120,7 @@ class Program {
   size_t WaitHost(uint32_t value, std::string_view note = {});
   size_t Halt(std::string_view note = "halt");
   void SetDdrOffset(size_t index, uint64_t ddr_offset);
+  void Reorder(std::span<const size_t> order);
 
   [[nodiscard]] uint64_t Base() const { return base_; }
   [[nodiscard]] size_t Size() const { return instructions_.size(); }
@@ -163,6 +165,9 @@ class Program {
   size_t Emit(Engine engine, const std::function<Instruction(uint32_t)>& make,
               const std::vector<Range>& reads, const std::vector<Range>& writes,
               std::string_view note);
+  uint32_t Admit(int32_t index, Engine engine, const std::vector<Range>& reads,
+                 const std::vector<Range>& writes);
+  void ResetTracking();
   [[nodiscard]] uint32_t DmaAddress(uint64_t offset) const;
 
   void PushScope(std::string_view tag);

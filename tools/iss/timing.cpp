@@ -1,8 +1,15 @@
 #include "timing.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
+#include <expected>
+#include <format>
 #include <memory>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 
 #include "dma_engine.hpp"
 #include "gemm_array.hpp"
@@ -180,6 +187,86 @@ DmaActivity EstimateDma(const DmaCommand& command) {
   beats += uint64_t{command.rows} * row_beats;
   bursts += uint64_t{command.rows} * Bursts(row_beats);
   return activity;
+}
+
+DdrExtent EstimateDdrExtent(const DmaCommand& command) {
+  if ((command.flags & kFlagIndex) != 0 ||
+      (!command.store && command.mode == kModeGather)) {
+    return {.whole = true};
+  }
+  const uint64_t units = uint64_t{command.rows} * command.row_words;
+  if (units == 0) {
+    return {.lo = command.ddr_addr, .hi = command.ddr_addr};
+  }
+  uint64_t unit_beats = BeatsPerWord(command.mem);
+  if (!command.store && command.mode != kModeRaw) {
+    unit_beats = 9;
+  } else if ((command.flags & kFlagRows) != 0) {
+    unit_beats = RowFormatBeats(command);
+  }
+  const uint64_t row_bytes = uint64_t{command.row_words} * unit_beats * 16;
+  const uint64_t last_row =
+      command.ddr_addr + (uint64_t{command.rows - 1} * command.ddr_stride);
+  return {.lo = command.ddr_addr, .hi = last_row + row_bytes};
+}
+
+std::expected<TimingParameters, std::string> ParseTiming(
+    std::string_view assignments, TimingParameters base) {
+  TimingParameters p = base;
+  const std::array<std::pair<std::string_view, uint32_t*>, 22> fields = {
+      {{"start_cycles", &p.start_cycles},
+       {"gemm_fixed_cycles", &p.gemm_fixed_cycles},
+       {"dma_fixed_cycles", &p.dma_fixed_cycles},
+       {"dma_read_cycles_per_kilobeat", &p.dma_read_cycles_per_kilobeat},
+       {"dma_read_burst_cycles", &p.dma_read_burst_cycles},
+       {"dma_write_cycles_per_kilobeat", &p.dma_write_cycles_per_kilobeat},
+       {"dma_write_burst_cycles", &p.dma_write_burst_cycles},
+       {"dma_gather_entry_cycles", &p.dma_gather_entry_cycles},
+       {"dma_gather_row_cycles", &p.dma_gather_row_cycles},
+       {"vec_fixed_cycles", &p.vec_fixed_cycles},
+       {"vec_pass_cycles", &p.vec_pass_cycles},
+       {"vec_word_cycles", &p.vec_word_cycles},
+       {"vec_issue_tail_cycles", &p.vec_issue_tail_cycles},
+       {"vec_drain_cycles", &p.vec_drain_cycles},
+       {"vec_drain_reduction_cycles", &p.vec_drain_reduction_cycles},
+       {"vec_drain_quantized_cycles", &p.vec_drain_quantized_cycles},
+       {"vec_scalar_arithmetic_cycles", &p.vec_scalar_arithmetic_cycles},
+       {"vec_scalar_immediate_cycles", &p.vec_scalar_immediate_cycles},
+       {"vec_scalar_start_cycles", &p.vec_scalar_start_cycles},
+       {"vec_salu_cycles", &p.vec_salu_cycles},
+       {"vec_smem_cycles", &p.vec_smem_cycles},
+       {"vec_branch_cycles", &p.vec_branch_cycles}}};
+  while (!assignments.empty()) {
+    const size_t comma = assignments.find(',');
+    const std::string_view item = assignments.substr(0, comma);
+    assignments = comma == std::string_view::npos
+                      ? std::string_view{}
+                      : assignments.substr(comma + 1);
+    const size_t equals = item.find('=');
+    if (equals == std::string_view::npos) {
+      return std::unexpected(std::format("timing item {} has no value", item));
+    }
+    const std::string_view name = item.substr(0, equals);
+    const std::string digits(item.substr(equals + 1));
+    uint32_t value = 0;
+    const char* const end = digits.data() + digits.size();
+    const auto [last, error] = std::from_chars(digits.data(), end, value);
+    if (digits.empty() || error != std::errc{} || last != end) {
+      return std::unexpected(
+          std::format("timing parameter {} needs a number", name));
+    }
+    bool found = false;
+    for (const auto& [field, target] : fields) {
+      if (field == name) {
+        *target = value;
+        found = true;
+      }
+    }
+    if (!found) {
+      return std::unexpected(std::format("unknown timing parameter {}", name));
+    }
+  }
+  return p;
 }
 
 VecActivity FixedOperationActivity(const VecCommand& command) {

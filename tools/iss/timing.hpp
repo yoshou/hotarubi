@@ -3,6 +3,9 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
+#include <string>
+#include <string_view>
 
 #include "dma_engine.hpp"
 #include "gemm_array.hpp"
@@ -34,11 +37,11 @@ inline constexpr ScalarProgram kCountReciprocalProgram = {.arithmetic = 12,
 struct TimingParameters {
   uint32_t start_cycles = 55;
   uint32_t gemm_fixed_cycles = 51;
-  uint32_t dma_fixed_cycles = 60;
-  uint32_t dma_read_cycles_per_kilobeat = 927;
+  uint32_t dma_fixed_cycles = 45;
+  uint32_t dma_read_cycles_per_kilobeat = 936;
   uint32_t dma_read_burst_cycles = 3;
-  uint32_t dma_write_cycles_per_kilobeat = 1034;
-  uint32_t dma_write_burst_cycles = 5;
+  uint32_t dma_write_cycles_per_kilobeat = 958;
+  uint32_t dma_write_burst_cycles = 6;
   uint32_t dma_gather_entry_cycles = 1;
   uint32_t dma_gather_row_cycles = 8;
   uint32_t vec_fixed_cycles = 23;
@@ -55,6 +58,9 @@ struct TimingParameters {
   uint32_t vec_smem_cycles = 11;
   uint32_t vec_branch_cycles = 17;
 };
+
+std::expected<TimingParameters, std::string> ParseTiming(
+    std::string_view assignments, TimingParameters base = {});
 
 struct Cost {
   uint64_t cycles = 0;
@@ -80,8 +86,18 @@ class CostModel {
   TimingParameters parameters_;
 };
 
+struct DdrExtent {
+  uint64_t lo = 0;
+  uint64_t hi = 0;
+  bool whole = false;
+
+  friend constexpr bool operator==(const DdrExtent&,
+                                   const DdrExtent&) = default;
+};
+
 uint64_t GemmArrayCycles(const GemmCommand& command);
 DmaActivity EstimateDma(const DmaCommand& command);
+DdrExtent EstimateDdrExtent(const DmaCommand& command);
 VecActivity FixedOperationActivity(const VecCommand& command);
 
 }  // namespace hotarubi::iss

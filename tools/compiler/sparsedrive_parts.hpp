@@ -30,6 +30,7 @@ inline constexpr uint32_t kNull = 0xFFFFFFFFU;
 inline constexpr uint32_t kAbufWords = kMemDepth[0];
 inline constexpr uint32_t kWbufWords = kMemDepth[1];
 inline constexpr uint32_t kFbufWords = kMemDepth[2];
+inline constexpr uint32_t kTbufWords = kMemDepth[4];
 inline constexpr uint32_t kPbufWords = kMemDepth[3];
 using ::hotarubi::sparsedrive::kCameras;
 

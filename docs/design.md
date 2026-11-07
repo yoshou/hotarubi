@@ -377,7 +377,7 @@ An on-chip word is stored little-endian and padded with zeros to a multiple of 1
 | TBUF | 64 bits | 16 |
 | CBUF | 128 bits | 16 |
 
-`ddr_addr` and `ddr_stride` are multiples of 16 bytes. DMA_ST reads ABUF or FBUF and treats every mode as RAW. DMA writes to TBUF and CBUF wait until the VEC engine is idle.
+`ddr_addr` and `ddr_stride` are multiples of 16 bytes. DMA_ST reads ABUF or FBUF and treats every mode as RAW. DMA_ST reads ABUF through the write port of ABUF in the cycles without a write from VEC or DMA, so it does not wait for the GEMM engine. DMA writes to TBUF and CBUF wait until the VEC engine is idle.
 
 ### RAW (2D)
 
@@ -557,8 +557,8 @@ The NPU toolchain is written in C++23:
 
 | Component | Contents |
 |---|---|
-| Instruction-set simulator | The bit-exact arithmetic of each unit, execution of instruction streams, and a cycle model that assigns issue and completion cycles, writes trace records of both types and drives the cycle counters |
-| Compiler | Generation of instruction streams, the DDR image and the JSON listings |
+| Instruction-set simulator | The bit-exact arithmetic of each unit, execution of instruction streams, a cycle model that assigns issue and completion cycles, writes trace records of both types and drives the cycle counters, and the hazard check of the executed streams |
+| Compiler | Generation of instruction streams, their scheduling, the DDR image and the JSON listings |
 | Trace analyzer | Validation, reports, kernel tables, timelines, differences and calibration of execution traces; prediction of traces with the cycle model |
 | RTL testbenches | Verilator testbenches |
 | Runtime | Driver and runtime on the board, cross-compiled for aarch64 |
@@ -567,9 +567,13 @@ The NPU toolchain is written in C++23:
 
 The compiler writes a directory with `image.bin`, `meta.json` and one `<stream>.listing.json` per instruction stream. `meta.json` holds the base address, the main stream, the stream table, the listing file names, the parameters and the regions of the image; the `trace` region, allocated after the streams, holds 32 bytes per instruction of the longest stream. A listing holds the base address, the tag table and one entry per instruction with its index, engine, opcode, wait bits, flags, hexadecimal word, tag index, note, and the on-chip ranges it reads and writes. Tags are the scopes open when the instruction was emitted, joined with `/`.
 
+### Scheduling
+
+Kernels emit instructions in program order with the on-chip ranges each instruction reads and writes. Two instructions conflict when one writes a range the other reads or writes, when both are DMA transfers and at least one is a store whose DDR extent overlaps the other's extent (the extent of an index-list or GACC transfer is all of DDR), when both are GACC transfers, when both are VEC commands and one of them is RUN, or when one of them is SIGNAL, WAIT_HOST or HALT. The compiler reorders each stream so that conflicting instructions keep their program order, choosing at every step, among the first `schedule-window` unscheduled instructions in program order whose conflicting predecessors are all scheduled, the one with the earliest predicted issue cycle under the sequencer rules and the cycle model, with program order as the tie-break. The wait bits are then recomputed for the new order: an instruction waits for an engine when a conflicting instruction of that engine was issued after the last point at which that engine was known to be idle. `--schedule-window 0` keeps the program order; the window is recorded in `meta.json`.
+
 ### Cycle model
 
-The simulator assigns each instruction an issue cycle and a completion cycle with the sequencer rules: in-order issue one cycle after the previous issue at the earliest, an instruction waits for the completion of every engine named by its wait bits and of its own engine, a DMA load to TBUF or CBUF starts its data phase when the VEC engine is free, and a DMA store from ABUF reads ABUF only while the GEMM engine is idle, so its completion moves past every GEMM command issued before it completes and its record is written when that is known. The first instruction issues at `start_cycles`. The cost of a command is a linear function of the activity counted while the simulator executes it:
+The simulator assigns each instruction an issue cycle and a completion cycle with the sequencer rules: in-order issue one cycle after the previous issue at the earliest, an instruction waits for the completion of every engine named by its wait bits and of its own engine, and a DMA load to TBUF or CBUF starts its data phase when the VEC engine is free. The first instruction issues at `start_cycles`. The cost of a command is a linear function of the activity counted while the simulator executes it:
 
 | Engine | Cycles |
 |---|---|
@@ -588,7 +592,11 @@ For VEC, `issue = words · vec_word_cycles − passes · vec_issue_tail_cycles`,
 | SUM | 7 | 1 |
 | RN | 12 | 2 |
 
-The statistics of a predicted record are the read and write beats, the cycles of the ABUF port rule and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces with statistics records.
+The statistics of a predicted record are the read and write beats, the cycles between issue and the start of the data phase and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces with statistics records. `hotarubi_trace predict` and `hotarubi_run --device iss` take `--timing NAME=VALUE,...` to override any parameter. The scheduler estimates the cost of an instruction with the same model from the activity implied by its fields (the activity of a fixed VEC operation by executing its ROM program; a RUN command as one pass over its words).
+
+### Hazard check
+
+While executing a stream, the simulator records the on-chip words every command reads and writes and reports a hazard for each pair of commands on different engines whose accesses conflict (a write and a read or two writes of the same word) without an ordering between them. A command is ordered after an earlier command when a wait bit of it or of any command issued between them names the earlier command's engine after that command was issued, when the engines are in order and the earlier command's engine has issued a later command (a command issues only when its engine is free), or when the earlier command is a VEC command and the later one is a DMA write to TBUF or CBUF. `hotarubi_trace predict` and `hotarubi_run --device iss` fail on a stream with hazards and list them. `hotarubi_trace predict` also checks that the ranges listed for every instruction cover the words it actually reads and writes (the fetch of a fixed VEC operation from the ROM part of CBUF is implied) and fails otherwise; with `--accesses` it writes `<stream>.accesses.jsonl`, one line per instruction with the extent of its actual reads and writes in each memory.
 
 ## Build
 

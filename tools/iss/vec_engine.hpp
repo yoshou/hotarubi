@@ -61,11 +61,11 @@ class VecEngine {
   void RunWord(PassState& state, uint32_t w, Memories& memories);
   [[nodiscard]] const FbufWord& Operand(const PassState& state,
                                         uint32_t address,
-                                        const Memories& memories) const;
+                                        Memories& memories) const;
   void Store(PassState& state, uint32_t word, const FbufWord& out,
              Memories& memories) const;
   void RunSalu(const Word128& instruction);
-  void RunSmem(const Word128& instruction, const Memories& memories);
+  void RunSmem(const Word128& instruction, Memories& memories);
   [[nodiscard]] bool Taken(const Word128& instruction) const;
   void Drain();
   void Write(uint32_t index, uint32_t value);

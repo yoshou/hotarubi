@@ -205,7 +205,7 @@ module npu_top
   );
 
   logic [19:0]   g_abuf_addr, g_wbuf_addr, g_fbuf_raddr, g_fbuf_waddr;
-  logic [1055:0] abuf_qa, abuf_qb3;
+  logic [1055:0] abuf_qa, abuf_qb2;
   logic [1151:0] wbuf_q;
   logic [1023:0] fbuf_q2, g_fbuf_wdata;
   logic          g_fbuf_rd_req, g_fbuf_we;
@@ -390,27 +390,24 @@ module npu_top
     endcase
   end
 
-  assign d_rd_grant = d_rd_req && ((d_rd_mem == 3'd0) ? !gemm_busy :
+  assign d_rd_grant = d_rd_req && ((d_rd_mem == 3'd0) ? (!v_ab_wr_req && !d_wr_abuf) :
                                    (d_rd_mem == 3'd2) ? (!g_fbuf_rd_req && !v_fb_rd_req) : 1'b1);
-  assign d_rd_data  = (d_rd_mem == 3'd0) ? abuf_qb3 : {32'd0, fbuf_q2};
+  assign d_rd_data  = (d_rd_mem == 3'd0) ? abuf_qb2 : {32'd0, fbuf_q2};
 
   (* ram_style = "ultra" *) logic [1055:0] abuf [8192];
-  logic [1055:0] abuf_qa1, abuf_qa2, ab_wd;
-  logic [12:0]   ab_addr, aa_addr;
+  logic [1055:0] abuf_qa1, abuf_qa2, abuf_qb1, ab_wd;
+  logic [12:0]   ab_addr;
   logic          ab_we;
 
   always_ff @(posedge clk_i) begin
     ab_we   <= v_ab_wr_req | (d_wr_abuf & d_wr_grant);
-    ab_addr <= v_ab_wr_req ? v_ab_waddr : d_wr_addr[12:0];
+    ab_addr <= v_ab_wr_req ? v_ab_waddr : (d_wr_abuf & d_wr_grant) ? d_wr_addr[12:0] : d_rd_addr[12:0];
     ab_wd   <= v_ab_wr_req ? v_ab_wdata : d_wr_data[1055:0];
   end
 
-  assign aa_addr = gemm_busy ? g_abuf_addr[12:0] : d_rd_addr[12:0];
-
   always_ff @(posedge clk_i) begin
-    abuf_qa1 <= abuf[aa_addr];
+    abuf_qa1 <= abuf[g_abuf_addr[12:0]];
     abuf_qa2 <= abuf_qa1;
-    abuf_qb3 <= abuf_qa2;
   end
 
   assign abuf_qa = abuf_qa2;
@@ -418,7 +415,10 @@ module npu_top
   always_ff @(posedge clk_i) begin
     if (ab_we) begin
       abuf[ab_addr] <= ab_wd;
+    end else begin
+      abuf_qb1 <= abuf[ab_addr];
     end
+    abuf_qb2 <= abuf_qb1;
   end
 
   (* ram_style = "block" *) logic [1151:0] wbuf [2048];
@@ -459,11 +459,19 @@ module npu_top
   end
 
   (* ram_style = "block" *) logic [1023:0] pbuf [512];
-  logic [1023:0] pbuf_q1;
+  logic [1023:0] pbuf_q1, pb_wd;
+  logic [8:0]    pb_wa;
+  logic          pb_we;
 
   always_ff @(posedge clk_i) begin
-    if (d_wr_pbuf && d_wr_grant) begin
-      pbuf[d_wr_addr[8:0]] <= d_wr_data[1023:0];
+    pb_we <= d_wr_pbuf && d_wr_grant;
+    pb_wa <= d_wr_addr[8:0];
+    pb_wd <= d_wr_data[1023:0];
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (pb_we) begin
+      pbuf[pb_wa] <= pb_wd;
     end
     pbuf_q1 <= pbuf[v_pb_addr[8:0]];
     pbuf_q  <= pbuf_q1;

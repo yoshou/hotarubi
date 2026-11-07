@@ -11,6 +11,7 @@
 #include "isa.hpp"
 #include "output.hpp"
 #include "program.hpp"
+#include "schedule.hpp"
 #include "smolvla_parts.hpp"
 
 namespace hotarubi::compiler {
@@ -39,6 +40,9 @@ Compiled CompileSmolVla(const SmolVlaOptions& options, const SafeTensors& quant,
   smolvla::EmitLm(program, lm, dims);
   smolvla::EmitExpert(program, expert, lm, dims);
   program.Halt();
+  if (options.schedule_window > 0) {
+    Schedule(program, {.window = options.schedule_window});
+  }
   const std::vector<std::byte> bytes = program.Bytes();
   Require(bytes.size() <= kInstructionBytes,
           std::format("{} instructions exceed the instruction region",
@@ -53,7 +57,8 @@ Compiled CompileSmolVla(const SmolVlaOptions& options, const SafeTensors& quant,
           .image = std::move(image),
           .parameters = {{"cameras", options.cameras},
                          {"n_lang", options.lang_tokens},
-                         {"steps", options.steps}}};
+                         {"steps", options.steps},
+                         {"schedule_window", options.schedule_window}}};
 }
 
 }  // namespace hotarubi::compiler

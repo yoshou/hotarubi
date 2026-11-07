@@ -1,8 +1,12 @@
 #include "machine.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <format>
+#include <string>
+#include <vector>
 
 #include "dma_engine.hpp"
 #include "gemm_array.hpp"
@@ -18,7 +22,6 @@ namespace {
 constexpr uint32_t kOpNop = 0;
 constexpr uint32_t kOpDmaLoad = 1;
 constexpr uint32_t kOpDmaStore = 2;
-constexpr uint32_t kOpMove = 3;
 constexpr uint32_t kOpGemm = 4;
 constexpr uint32_t kOpVec = 5;
 constexpr uint32_t kOpSignal = 6;
@@ -61,13 +64,32 @@ constexpr uint32_t kStatusError = 0x4;
 constexpr uint32_t kStatusWaitingHost = 0x8;
 constexpr uint32_t kStatusIbufEmpty = 0x80;
 constexpr uint32_t kInstructionBytes = 16;
-constexpr uint32_t kMemAbuf = 0;
 constexpr uint32_t kMemTbuf = 4;
 constexpr uint32_t kMemCbuf = 5;
 
 uint32_t Low32(uint64_t value) { return static_cast<uint32_t>(value); }
 
+constexpr std::array<uint32_t, Timeline::kEngines> kWaitBits = {0x1, 0x4, 0x8};
+constexpr std::array<std::string_view, 6> kMemNames = {"ABUF", "WBUF", "FBUF",
+                                                       "PBUF", "TBUF", "CBUF"};
+
 }  // namespace
+
+std::string DescribeHazards(const std::vector<Hazard>& hazards, size_t limit) {
+  std::string text;
+  for (size_t i = 0; i < hazards.size() && i < limit; ++i) {
+    const Hazard& hazard = hazards[i];
+    text += std::format(
+        "instructions {} and {} access {} word {} without an ordering wait\n",
+        hazard.earlier, hazard.later,
+        kMemNames.at(static_cast<size_t>(hazard.conflict.mem)),
+        hazard.conflict.address);
+  }
+  if (hazards.size() > limit) {
+    text += std::format("... {} hazards in total\n", hazards.size());
+  }
+  return text;
+}
 
 DmaCommand DecodeDma(const Word128& instruction) {
   return {.store = instruction.Field(120, 8) == kOpDmaStore,
@@ -106,6 +128,29 @@ VecCommand DecodeVec(const Word128& instruction) {
           .p_base = instruction.Field(43, 10),
           .aux = instruction.Field(32, 11),
           .imm = instruction.Field(0, 32)};
+}
+
+uint64_t EstimateCycles(const Word128& instruction, const CostModel& model) {
+  switch (instruction.Field(120, 8)) {
+    case kOpDmaLoad:
+    case kOpDmaStore:
+      return model.Dma(EstimateDma(DecodeDma(instruction))).cycles;
+    case kOpGemm:
+      return model.Gemm(DecodeGemm(instruction)).cycles;
+    case kOpVec: {
+      const VecCommand command = DecodeVec(instruction);
+      if (command.op < kVecRun) {
+        return model.Vec(FixedOperationActivity(command)).cycles;
+      }
+      return model
+          .Vec({.passes = 1,
+                .words = uint64_t{command.rows_q} * command.n8,
+                .drains = 1})
+          .cycles;
+    }
+    default:
+      return 0;
+  }
 }
 
 uint32_t Machine::ReadRegister(uint32_t offset) const {
@@ -193,7 +238,6 @@ void Machine::WriteRegister(uint32_t offset, uint32_t value) {
 Stop Machine::Run() {
   while (running_) {
     if (next_ >= stream_count_) {
-      FlushPendingStore();
       return Stop::kStarved;
     }
     const Word128 instruction = Fetch(next_);
@@ -234,7 +278,13 @@ void Machine::Start() {
   issued_ = 0;
   trace_count_ = 0;
   host_go_ = 0;
-  pending_store_.reset();
+  for (auto& history : history_) {
+    history.clear();
+  }
+  last_.fill(0);
+  known_.fill(0);
+  hazards_.clear();
+  memories_.log.Clear();
   running_ = true;
   halted_ = false;
   error_ = false;
@@ -244,48 +294,60 @@ void Machine::Start() {
 void Machine::Issue(uint32_t opcode, const Word128& instruction) {
   uint64_t earliest_start = 0;
   const Source source = SourceOf(opcode);
-  const bool illegal = opcode == kOpMove || opcode > kOpWaitHost;
-  if (source == Source::kDma || opcode == kOpHalt || illegal) {
-    FlushPendingStore();
-  }
   const Cost cost = Execute(opcode, instruction, earliest_start);
+  CheckHazards(source, instruction.Field(116, 4), memories_.log);
+  if (observer_) {
+    observer_(issued_ - 1, memories_.log);
+  }
+  memories_.log.Clear();
   const Span span = timeline_.Issue(source, instruction.Field(116, 4),
                                     cost.cycles, earliest_start);
   Statistics statistics = cost.statistics;
   if (source == Source::kDma) {
     statistics.c = Low32(span.start - span.issue);
-    const DmaCommand command = DecodeDma(instruction);
-    if (command.store && command.mem == kMemAbuf) {
-      timeline_.HoldAbufPort(span);
-      pending_store_ = PendingStore{.instruction = instruction,
-                                    .span = span,
-                                    .statistics = statistics,
-                                    .index = issued_ - 1};
-      return;
-    }
   }
   if (trace_enable_) {
     Record(instruction, span, statistics);
   }
 }
 
-void Machine::FlushPendingStore() {
-  if (!pending_store_) {
+void Machine::CheckHazards(Source source, uint32_t wait, const AccessLog& log) {
+  for (int e = 0; e < Timeline::kEngines; ++e) {
+    if ((wait & kWaitBits.at(e)) != 0) {
+      known_.at(e) = std::max(known_.at(e), last_.at(e));
+    }
+  }
+  const auto engine = static_cast<size_t>(source);
+  if (engine >= Timeline::kEngines) {
     return;
   }
-  const std::optional<PortHold> hold = timeline_.TakeAbufHold();
-  PendingStore store = *pending_store_;
-  pending_store_.reset();
-  if (hold) {
-    store.span.completion = hold->completion;
-    store.statistics.c = Low32(hold->denied);
+  known_.at(engine) = std::max(known_.at(engine), last_.at(engine));
+  const uint32_t index = issued_ - 1;
+  for (size_t e = 0; e < Timeline::kEngines; ++e) {
+    std::vector<IssuedAccess>& history = history_.at(e);
+    std::erase_if(history, [&](const IssuedAccess& issued) {
+      return issued.index + 1 <= known_.at(e);
+    });
+    if (e == engine) {
+      continue;
+    }
+    const bool tables_ordered = e == static_cast<size_t>(Source::kVec) &&
+                                engine == static_cast<size_t>(Source::kDma);
+    for (const IssuedAccess& issued : history) {
+      AccessLog earlier = issued.log;
+      AccessLog later = log;
+      if (tables_ordered) {
+        earlier.reads.ClearTables();
+        later.writes.ClearTables();
+      }
+      if (const auto conflict = FindConflict(earlier, later)) {
+        hazards_.push_back(
+            {.earlier = issued.index, .later = index, .conflict = *conflict});
+      }
+    }
   }
-  if (trace_enable_) {
-    const uint32_t saved = issued_;
-    issued_ = store.index + 1;
-    Record(store.instruction, store.span, store.statistics);
-    issued_ = saved;
-  }
+  last_.at(engine) = index + 1;
+  history_.at(engine).push_back({.index = index, .log = log});
 }
 
 Cost Machine::Execute(uint32_t opcode, const Word128& instruction,
@@ -295,10 +357,8 @@ Cost Machine::Execute(uint32_t opcode, const Word128& instruction,
     case kOpDmaStore: {
       const DmaCommand command = DecodeDma(instruction);
       dma_.Execute(command, ddr_, memories_);
-      if (command.store && command.mem == kMemAbuf) {
-        earliest_start = timeline_.EngineFree(Source::kGemm);
-      } else if (!command.store &&
-                 (command.mem == kMemTbuf || command.mem == kMemCbuf)) {
+      if (!command.store &&
+          (command.mem == kMemTbuf || command.mem == kMemCbuf)) {
         earliest_start = timeline_.EngineFree(Source::kVec);
       }
       return model_.Dma(dma_.Activity());

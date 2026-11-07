@@ -1245,13 +1245,18 @@ void SparseHead::DeformableWeights(const HeadLayer& layer, const Keys& pb,
                        .aux = s},
                       std::format("{} softmax g{} q{}", note, g, q0));
       } else {
-        program_->Run({.pc = kp.Pc("ls"),
-                       .src = 0,
-                       .src2 = sd,
-                       .dst = sd,
-                       .rows_q = count,
-                       .imm = wq},
-                      std::format("{} softmax g{} q{}", note, g, q0));
+        program_->Run(
+            {.pc = kp.Pc("ls"),
+             .src = 0,
+             .src2 = sd,
+             .dst = sd,
+             .rows_q = count,
+             .imm = wq,
+             .reads = std::vector<Range>{{Mem::kFbuf, 0, count * wq},
+                                         {Mem::kFbuf, sd, sd + (count * wq)},
+                                         {Mem::kTbuf, 0, kTbufWords}},
+             .writes = std::vector<Range>{{Mem::kFbuf, sd, sd + (count * wq)}}},
+            std::format("{} softmax g{} q{}", note, g, q0));
       }
       program_->Store(Words(addr, Mem::kFbuf, sd, count * wq),
                       std::format("{} st w g{} q{}", note, g, q0));
@@ -1274,17 +1279,26 @@ void SparseHead::Keypoints(size_t index, const Keys& pb,
   const uint32_t pbv = pb.at(std::format("{} kplane", note));
   const uint32_t imm = kConst | (kWork << 12);
   const Rows& anchors = anc[cur_a];
+  const Range work = {
+      .mem = Mem::kFbuf, .lo = kWork, .hi = kWork + DetKeypointWork(kTq)};
+  const auto kplane_words = static_cast<uint32_t>(LaneConstantWords().size());
   const auto run = [&](std::string_view name, uint32_t n8, uint32_t rd,
                        const std::string& what) {
-    program_->Run({.pc = kp.Pc(std::string(name)),
-                   .src = kA,
-                   .src2 = kLf,
-                   .dst = rd,
-                   .rows_q = kTq,
-                   .n8 = n8,
-                   .p_base = pbv,
-                   .imm = imm},
-                  std::format("{} kp {}", note, what));
+    program_->Run(
+        {.pc = kp.Pc(std::string(name)),
+         .src = kA,
+         .src2 = kLf,
+         .dst = rd,
+         .rows_q = kTq,
+         .n8 = n8,
+         .p_base = pbv,
+         .imm = imm,
+         .reads = std::vector<Range>{{Mem::kFbuf, kA, kConst + 3},
+                                     work,
+                                     {Mem::kPbuf, pbv, pbv + kplane_words},
+                                     {Mem::kTbuf, 0, kTbufWords}},
+         .writes = std::vector<Range>{{Mem::kFbuf, rd, rd + kTq}, work}},
+        std::format("{} kp {}", note, what));
   };
   uint32_t t = 0;
   for (uint32_t q0 = 0; q0 < cf.nap / 4; q0 += kTq, ++t) {
@@ -1348,17 +1362,23 @@ void SparseHead::KeypointsMap(std::string_view note) {
   program_->Load(Words(kp_zh, Mem::kFbuf, cst + 2, 1),
                  std::format("{} kp ld z", note));
   const uint32_t imm0 = cst | (work << 12);
+  const Range scratch = {
+      .mem = Mem::kFbuf, .lo = work, .hi = work + MapKeypointWork(tq)};
   const auto run = [&](std::string_view name, uint32_t n8, uint32_t rd,
                        uint32_t imm, const std::string& what) {
-    program_->Run({.pc = kp.Pc(std::string(name)),
-                   .src = kA,
-                   .src2 = lfs,
-                   .dst = rd,
-                   .rows_q = tq,
-                   .n8 = n8,
-                   .p_base = 0,
-                   .imm = imm},
-                  std::format("{} kp {}", note, what));
+    program_->Run(
+        {.pc = kp.Pc(std::string(name)),
+         .src = kA,
+         .src2 = lfs,
+         .dst = rd,
+         .rows_q = tq,
+         .n8 = n8,
+         .p_base = 0,
+         .imm = imm,
+         .reads = std::vector<Range>{{Mem::kFbuf, kA, cst + 3}, scratch},
+         .writes =
+             std::vector<Range>{{Mem::kFbuf, rd, rd + (8 * tq)}, scratch}},
+        std::format("{} kp {}", note, what));
   };
   run("init", 0, out[0], imm0, "init");
   uint32_t k = 0;

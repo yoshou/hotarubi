@@ -39,16 +39,17 @@ constexpr std::string_view kUsage =
     "       hotarubi_trace diff     --program DIR --stream NAME --trace FILE "
     "--trace2 FILE [--program2 DIR] [--depth N] [--clock-hz N]\n"
     "       hotarubi_trace predict  --program DIR --stream NAME --out DIR "
-    "[--stats]\n"
+    "[--stats] [--accesses] [--timing NAME=VALUE,...]\n"
     "       hotarubi_trace calibrate --program DIR --stream NAME --trace FILE "
     "[--counters FILE] [--program2 DIR --stream2 NAME --trace2 FILE]";
 
 std::expected<Options, std::string> ParseOptions(
     std::span<const char* const> args) {
   static const std::set<std::string, std::less<>> kValued = {
-      "program",  "program2", "stream",   "stream2", "trace", "trace2",
-      "counters", "depth",    "clock-hz", "gaps",    "json",  "out"};
-  static const std::set<std::string, std::less<>> kSwitches = {"stats"};
+      "program", "program2", "stream", "stream2", "trace", "trace2", "counters",
+      "depth",   "clock-hz", "gaps",   "json",    "out",   "timing"};
+  static const std::set<std::string, std::less<>> kSwitches = {"stats",
+                                                               "accesses"};
   Options options;
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string_view flag = args[i];
@@ -251,7 +252,15 @@ std::expected<void, std::string> RunPredict(const Options& options) {
     return std::unexpected(loaded.error());
   }
   const bool statistics = options.contains("stats");
-  const auto prediction = Predict(*loaded, *stream, statistics);
+  const auto timing = options.contains("timing")
+                          ? iss::ParseTiming(options.at("timing"))
+                          : iss::TimingParameters{};
+  if (!timing) {
+    return std::unexpected(timing.error());
+  }
+  const bool accesses = options.contains("accesses");
+  const auto prediction =
+      Predict(*loaded, *stream, statistics, *timing, accesses);
   if (!prediction) {
     return std::unexpected(prediction.error());
   }
@@ -274,6 +283,13 @@ std::expected<void, std::string> RunPredict(const Options& options) {
           CountersJson(*stream, statistics, prediction->counters, "predicted"));
       !written) {
     return written;
+  }
+  if (accesses) {
+    if (auto written = WriteText(directory / (*stream + ".accesses.jsonl"),
+                                 prediction->accesses);
+        !written) {
+      return written;
+    }
   }
   std::println("{}: {} records, {} cycles", *stream,
                prediction->counters.trace_count, prediction->counters.cycles);

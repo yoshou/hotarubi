@@ -16,6 +16,7 @@
 #include "isa.hpp"
 #include "output.hpp"
 #include "program.hpp"
+#include "schedule.hpp"
 #include "sparsedrive_head.hpp"
 #include "sparsedrive_kernels.hpp"
 #include "sparsedrive_layers.hpp"
@@ -285,6 +286,9 @@ Compiled CompileSparseDrive(const SparseDriveOptions& options,
     }
   }
   for (Stream& stream : streams) {
+    if (options.schedule_window > 0) {
+      Schedule(stream.program, {.window = options.schedule_window});
+    }
     const std::vector<std::byte> bytes = stream.program.Bytes();
     stream.offset =
         image.Alloc(std::format("instr.{}", stream.name), bytes.size());
@@ -293,7 +297,8 @@ Compiled CompileSparseDrive(const SparseDriveOptions& options,
   ReserveTraceRegion(image, streams);
   return {.streams = std::move(streams),
           .image = std::move(image),
-          .parameters = {{"cameras", sd::kCameras}}};
+          .parameters = {{"cameras", sd::kCameras},
+                         {"schedule_window", options.schedule_window}}};
 }
 
 }  // namespace hotarubi::compiler

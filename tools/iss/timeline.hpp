@@ -3,7 +3,6 @@
 
 #include <array>
 #include <cstdint>
-#include <optional>
 
 #include "timing.hpp"
 #include "trace_record.hpp"
@@ -16,12 +15,6 @@ struct Span {
   uint64_t completion = 0;
 };
 
-struct PortHold {
-  uint64_t issue = 0;
-  uint64_t completion = 0;
-  uint64_t denied = 0;
-};
-
 class Timeline {
  public:
   static constexpr int kEngines = 3;
@@ -32,8 +25,6 @@ class Timeline {
   void Start();
   Span Issue(Source source, uint32_t wait, uint64_t cost,
              uint64_t earliest_start = 0);
-  void HoldAbufPort(const Span& store);
-  [[nodiscard]] std::optional<PortHold> TakeAbufHold();
 
   [[nodiscard]] uint64_t EngineFree(Source source) const {
     return free_.at(static_cast<size_t>(source));
@@ -52,7 +43,6 @@ class Timeline {
   uint64_t issued_ = 0;
   std::array<uint64_t, kEngines> free_{};
   std::array<uint64_t, kEngines> busy_{};
-  std::optional<PortHold> abuf_hold_;
 };
 
 }  // namespace hotarubi::iss

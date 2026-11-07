@@ -2,8 +2,10 @@
 #define HOTARUBI_TOOLS_ISS_MEMORIES_HPP_
 
 #include <array>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "word.hpp"
@@ -44,6 +46,50 @@ enum class Mem : uint8_t {
   kCbuf = 5,
 };
 
+struct AccessSet {
+  std::bitset<kAbufDepth> abuf;
+  std::bitset<kWbufDepth> wbuf;
+  std::bitset<kFbufDepth> fbuf;
+  std::bitset<kPbufDepth> pbuf;
+  std::bitset<kTbufDepth> tbuf;
+  std::bitset<kCbufDepth> cbuf;
+
+  void Add(Mem mem, uint32_t address);
+  void AddRange(Mem mem, uint32_t lo, uint32_t hi);
+  void AddTable(Mem mem);
+  void ClearTables();
+};
+
+struct Conflict {
+  Mem mem = Mem::kFbuf;
+  uint32_t address = 0;
+};
+
+struct Extent {
+  Mem mem = Mem::kFbuf;
+  uint32_t lo = 0;
+  uint32_t hi = 0;
+
+  friend constexpr bool operator==(const Extent&, const Extent&) = default;
+};
+
+std::vector<Extent> Extents(const AccessSet& set);
+std::optional<Conflict> FirstOutside(const AccessSet& inner,
+                                     const AccessSet& outer);
+
+struct AccessLog {
+  AccessSet reads;
+  AccessSet writes;
+
+  void Read(Mem mem, uint32_t address) { reads.Add(mem, address); }
+  void ReadTable(Mem mem) { reads.AddTable(mem); }
+  void Write(Mem mem, uint32_t address) { writes.Add(mem, address); }
+  void Clear();
+};
+
+std::optional<Conflict> FindConflict(const AccessLog& earlier,
+                                     const AccessLog& later);
+
 struct Memories {
   Memories();
 
@@ -53,6 +99,7 @@ struct Memories {
   std::vector<FbufWord> pbuf;
   std::vector<uint64_t> tbuf;
   std::vector<Word128> cbuf;
+  AccessLog log;
 };
 
 }  // namespace hotarubi::iss
