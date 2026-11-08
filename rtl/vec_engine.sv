@@ -159,9 +159,10 @@ module vec_engine
   assign ww_word = word_of(pd.wd, w);
 
   logic wf_afull, df_afull, af_afull;
+  logic pend_full, pend_clear;
   logic can_issue;
 
-  assign can_issue = !wf_afull & !df_afull & !af_afull;
+  assign can_issue = !wf_afull & !df_afull & !af_afull & !pend_full;
 
   logic        rd_v, rd_is_entry, rd_is_hold;
   logic [11:0] rd_addr;
@@ -177,7 +178,7 @@ module vec_engine
   always_comb begin
     rd_is_hold  = (slot_ph == 1'b0) & pd.x2_en;
     rd_is_entry = !rd_is_hold;
-    rd_v        = (st == StIssue) & can_issue & !(rd_is_entry & (gap != 2'd0));
+    rd_v        = (st == StIssue) & can_issue & !(rd_is_entry & (gap != 2'd0)) & pend_clear;
     if (slot_ph == 1'b0) begin
       rd_addr = rb_src + 12'(wa_word);
     end else begin
@@ -236,6 +237,13 @@ module vec_engine
 
   assign tr_mode  = (st == StTransposeWait);
   assign tr_start = (st == StTransposeStart) && drained;
+
+  logic next_is_pass, next_pa_pre, overlap_ok;
+
+  assign next_is_pass = (pf_cnt >= 3'(CbufLatency)) && (cbuf_rdata_i[127:124] == KindPass);
+  assign next_pa_pre  = (pa_e'(cbuf_rdata_i[71:70]) != PaNone) && !cbuf_rdata_i[69];
+  assign overlap_ok   = next_is_pass && (pd.sc == ScNone) && (pd.red == RedNone) &&
+                        (wr_eff != WrAbuf) && !(pd.pa_at_mul && next_pa_pre);
 
   vec_transpose #(
     .ReadLatency(MemLatency)
@@ -346,7 +354,7 @@ module vec_engine
       if (sm_rd_fire) begin
         sm_rd_v <= 1'b0;
       end
-      if (st == StDrain || st == StScalarWait || st == StNext) begin
+      if (st == StIssue || st == StDrain || st == StScalarWait || st == StNext) begin
         if (!pre_on && !pre_done && pf_cnt >= 3'(CbufLatency) &&
             cbuf_rdata_i[127:124] == KindPass) begin
           pre_on  <= 1'b1;
@@ -546,9 +554,7 @@ module vec_engine
               if (w == p_nw - 10'd1) begin
                 w <= 10'd0;
                 if (q == p_rq - 9'd1) begin
-                  st       <= pd.nodrain ? StNext : StDrain;
-                  pre_on   <= 1'b0;
-                  pre_done <= 1'b0;
+                  st <= (pd.nodrain || overlap_ok) ? StNext : StDrain;
                 end else begin
                   q       <= q + 9'd1;
                   rb_src  <= rb_src + (pd.x_s1 ? 12'd1 : 12'(p_n8));
@@ -1177,6 +1183,58 @@ module vec_engine
   assign fbuf_wr_req_o = tr_mode ? tr_wr : !wf_empty;
   assign fbuf_waddr_o  = tr_mode ? tr_wa : wf_dout[1035:1024];
   assign fbuf_wdata_o  = tr_mode ? tr_wd : wf_dout[1023:0];
+
+  localparam int PendDepth = 32;
+  localparam int PendAw    = $clog2(PendDepth);
+
+  logic [11:0]          pend_addr [PendDepth];
+  logic [PendDepth-1:0] pend_v;
+  logic [PendAw-1:0]    pend_wp, pend_rp;
+  logic [PendAw:0]      pend_count;
+  logic                 pend_push, pend_pop, pend_hit, pend_hit_r, pend_known, pend_empty_r;
+
+  assign pend_push  = rd_fire & rd_is_entry & (wr_eff == WrFbuf);
+  assign pend_pop   = wf_pop;
+  assign pend_full  = (pend_count == (PendAw + 1)'(PendDepth));
+  assign pend_clear = pend_empty_r | (pend_known & !pend_hit_r);
+
+  always_comb begin
+    pend_hit = 1'b0;
+    for (int i = 0; i < PendDepth; i++) begin
+      pend_hit |= pend_v[i] & (pend_addr[i] == rd_addr);
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pend_v       <= '0;
+      pend_wp      <= '0;
+      pend_rp      <= '0;
+      pend_count   <= '0;
+      pend_hit_r   <= 1'b0;
+      pend_known   <= 1'b0;
+      pend_empty_r <= 1'b1;
+    end else begin
+      pend_hit_r   <= pend_hit;
+      pend_known   <= (st == StIssue) & !rd_fire;
+      pend_empty_r <= (pend_count == '0) & !pend_push;
+      if (pend_push) begin
+        pend_v[pend_wp] <= 1'b1;
+        pend_wp         <= pend_wp + 1'b1;
+      end
+      if (pend_pop) begin
+        pend_v[pend_rp] <= 1'b0;
+        pend_rp         <= pend_rp + 1'b1;
+      end
+      pend_count <= pend_count + (PendAw + 1)'(pend_push) - (PendAw + 1)'(pend_pop);
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (pend_push) begin
+      pend_addr[pend_wp] <= rd_ctrl.waddr[11:0];
+    end
+  end
 
   logic       qv;
   logic       q1_v, q2_v;

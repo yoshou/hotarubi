@@ -80,6 +80,17 @@ uint32_t PbufAddress(PbufAccess access, uint32_t base, uint32_t tile_row,
   return 0;
 }
 
+bool Overlaps(const Pass& pass, WriteTarget target, const Word128& next) {
+  if (pass.nodrain || pass.sc != RowScalar::kNone ||
+      pass.red != Reduction::kNone || target == WriteTarget::kAbuf ||
+      next.Field(124, 4) != kKindPass) {
+    return false;
+  }
+  const bool next_pbuf_pre_adder =
+      next.Field(70, 2) != 0 && next.Field(69, 1) == 0;
+  return !(pass.pa_at_mul && next_pbuf_pre_adder);
+}
+
 void CheckPbufTiming(const Pass& pass) {
   if (pass.pa == PbufAccess::kNone) {
     return;
@@ -154,6 +165,8 @@ struct VecEngine::PassState {
 
 void VecEngine::Execute(const VecCommand& command, Memories& memories) {
   activity_ = {};
+  pending_.reset();
+  slot_ = 0;
   Initialize(command);
   uint32_t pc = command.op == kVecRun ? command.aux & kPcMask
                                       : kRomStart.at(command.op & 0xFU);
@@ -163,7 +176,7 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
     pc = (pc + 1) & kPcMask;
     switch (instruction.Field(124, 4)) {
       case kKindPass:
-        RunPass(instruction, memories);
+        RunPass(instruction, memories.cbuf.at(pc), memories);
         break;
       case kKindSalu:
         ++activity_.salu;
@@ -263,7 +276,8 @@ void VecEngine::Initialize(const VecCommand& command) {
   registers_.at(10) = command.quantize ? 1 : 0;
 }
 
-void VecEngine::RunPass(const Word128& instruction, Memories& memories) {
+void VecEngine::RunPass(const Word128& instruction, const Word128& next,
+                        Memories& memories) {
   PassState state;
   state.pass = DecodePass(instruction);
   const Pass& pass = state.pass;
@@ -308,12 +322,19 @@ void VecEngine::RunPass(const Word128& instruction, Memories& memories) {
     undrained_pbuf_at_mul_ = undrained_pbuf_at_mul_ || pass.pa_at_mul;
     return;
   }
+  WriteTarget target = pass.wr;
+  if (target == WriteTarget::kFinal) {
+    target = quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
+  }
+  if (Overlaps(pass, target, next)) {
+    ++activity_.overlaps;
+    return;
+  }
   ++activity_.drains;
   if (pass.red != Reduction::kNone) {
     ++activity_.drains_reduction;
   }
-  if (pass.wr == WriteTarget::kAbuf ||
-      (pass.wr == WriteTarget::kFinal && quantize_)) {
+  if (target == WriteTarget::kAbuf) {
     ++activity_.drains_quantized;
   }
   Drain();
@@ -359,10 +380,11 @@ void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
   }
   state.entry = (state.entry + 1) & 7U;
   Store(state, WordOf(pass.wd, w), result.out, memories);
+  ++slot_;
 }
 
 const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
-                                   Memories& memories) const {
+                                   Memories& memories) {
   if (state.written.test(address)) {
     Fail(std::format("a PASS reads FBUF word {} after writing it", address));
   }
@@ -371,12 +393,19 @@ const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
         "a PASS reads FBUF word {} written by an undrained nodrain PASS",
         address));
   }
+  if (pending_.test(address)) {
+    const uint64_t ready = pending_slot_.at(address) + kOverlapLatencyWords;
+    if (ready > slot_) {
+      activity_.overlap_stall_words += ready - slot_;
+      slot_ = ready;
+    }
+  }
   memories.log.Read(Mem::kFbuf, address);
   return memories.fbuf.at(address);
 }
 
 void VecEngine::Store(PassState& state, uint32_t word, const FbufWord& out,
-                      Memories& memories) const {
+                      Memories& memories) {
   WriteTarget target = state.pass.wr;
   if (target == WriteTarget::kFinal) {
     target = quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
@@ -386,6 +415,8 @@ void VecEngine::Store(PassState& state, uint32_t word, const FbufWord& out,
     memories.log.Write(Mem::kFbuf, address);
     memories.fbuf.at(address) = out;
     state.written.set(address);
+    pending_.set(address);
+    pending_slot_.at(address) = slot_;
   } else if (target == WriteTarget::kAbuf) {
     const uint32_t quarter = word & 3U;
     if (quarter != state.next_quarter) {
@@ -469,6 +500,7 @@ bool VecEngine::Taken(const Word128& instruction) const {
 
 void VecEngine::Drain() {
   in_flight_.reset();
+  pending_.reset();
   undrained_ = false;
   undrained_reduction_ = false;
   undrained_pbuf_at_mul_ = false;

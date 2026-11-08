@@ -220,8 +220,7 @@ struct ProgramRun {
   uint32_t out_words = 0;
 };
 
-std::vector<FbufWord> RunProgram(const ProgramRun& run, uint32_t seed) {
-  NpuBench bench(seed);
+std::vector<FbufWord> RunProgramOn(NpuBench& bench, const ProgramRun& run) {
   Ddr& ddr = bench.Memory();
   std::vector<Instruction> stream;
   for (uint32_t i = 0; i < run.program.size(); ++i) {
@@ -291,6 +290,11 @@ std::vector<FbufWord> RunProgram(const ProgramRun& run, uint32_t seed) {
     out.push_back(ReadFbuf(ddr, kOutArea + (i * kFbufWordBytes)));
   }
   return out;
+}
+
+std::vector<FbufWord> RunProgram(const ProgramRun& run, uint32_t seed) {
+  NpuBench bench(seed);
+  return RunProgramOn(bench, run);
 }
 
 FbufWord Splat(uint32_t value) {
@@ -1208,6 +1212,162 @@ TEST(VecProgramTest, Transpose8ChangesPackModeBetweenConsecutiveInstructions) {
        .out_words = 24},
       967);
   EXPECT_EQ(output, expected);
+}
+
+constexpr uint32_t kRegVecCycles = 0x2C;
+constexpr uint32_t kC0Pbuf = 2;
+constexpr uint32_t kBPbuf = 2;
+constexpr uint32_t kPaRowvec = 1;
+
+struct ChainProgram {
+  uint32_t words = 1;
+  uint32_t passes = 2;
+  bool reduce = false;
+  bool in_place = false;
+};
+
+constexpr uint32_t kChainA = 10;
+constexpr uint32_t kChainB = 100;
+constexpr uint32_t kChainC = 200;
+constexpr uint32_t kChainImm = 0x00030001U;
+constexpr uint32_t kRegChainA = 12;
+constexpr uint32_t kRegChainB = 13;
+constexpr uint32_t kRegChainC = 14;
+constexpr uint32_t kRegChainWords = 15;
+constexpr uint32_t kRegChainImm = 16;
+
+std::vector<Instruction> ChainPrologue(uint32_t words) {
+  return {SaluImm(kSaluMov, kRegOne, 0, 1),
+          SaluImm(kSaluMov, kRegChainA, 0, kChainA),
+          SaluImm(kSaluMov, kRegChainB, 0, kChainB),
+          SaluImm(kSaluMov, kRegChainC, 0, kChainC),
+          SaluImm(kSaluMov, kRegChainWords, 0, words),
+          SaluImm(kSaluMov, kRegChainImm, 0, kChainImm)};
+}
+
+std::vector<Instruction> Chain(const ChainProgram& chain) {
+  std::vector<Instruction> program = ChainPrologue(chain.words);
+  for (uint32_t k = 0; k < chain.passes; ++k) {
+    const bool even = k % 2 == 0;
+    program.push_back(
+        Encode(Pass{.rx = chain.in_place || even ? kRegChainA : kRegChainB,
+                    .rd = chain.in_place || !even ? kRegChainA : kRegChainB,
+                    .rq = kRegOne,
+                    .rnw = kRegChainWords,
+                    .rn8 = kRegChainWords,
+                    .rimm = kRegChainImm,
+                    .c0 = kC0Imm,
+                    .red = chain.reduce ? 1U : 0U,
+                    .ialu = 1}));
+  }
+  program.push_back(Ret());
+  return program;
+}
+
+std::vector<FbufWord> RandomWords(std::mt19937& rng, uint32_t words) {
+  std::vector<FbufWord> out(words);
+  for (FbufWord& word : out) {
+    for (uint32_t& element : word) {
+      element = RandomFp32(rng, -3, 3);
+    }
+  }
+  return out;
+}
+
+std::vector<FbufWord> Shifted(const std::vector<FbufWord>& words,
+                              uint32_t offset) {
+  std::vector<FbufWord> out = words;
+  for (FbufWord& word : out) {
+    for (uint32_t& element : word) {
+      element += offset;
+    }
+  }
+  return out;
+}
+
+TEST(VecProgramTest, DependentPassesOverlapTheDrain) {
+  std::mt19937 rng(91);
+  const std::vector<ChainProgram> chains = {
+      {.words = 1, .passes = 10},
+      {.words = 16, .passes = 8},
+      {.words = 5, .passes = 6, .in_place = true},
+      {.words = 3, .passes = 4, .in_place = true}};
+  for (const ChainProgram& chain : chains) {
+    const std::vector<FbufWord> x = RandomWords(rng, chain.words);
+    const std::vector<FbufWord> out = RunProgram({.program = Chain(chain),
+                                                  .args = {.rows_q = 1},
+                                                  .fbuf = {{kChainA, x}},
+                                                  .pbuf = {},
+                                                  .out_base = kChainA,
+                                                  .out_words = chain.words},
+                                                 1 + chain.words);
+    EXPECT_EQ(out, Shifted(x, chain.passes * kChainImm))
+        << "words " << chain.words << " passes " << chain.passes;
+  }
+  const std::vector<FbufWord> x = RandomWords(rng, 16);
+  std::array<uint32_t, 2> cycles{};
+  for (uint32_t reduce = 0; reduce < 2; ++reduce) {
+    NpuBench bench(55);
+    const std::vector<FbufWord> out = RunProgramOn(
+        bench,
+        {.program = Chain({.words = 16, .passes = 8, .reduce = reduce != 0}),
+         .args = {.rows_q = 1},
+         .fbuf = {{kChainA, x}},
+         .pbuf = {},
+         .out_base = kChainA,
+         .out_words = 16});
+    EXPECT_EQ(out, Shifted(x, 8 * kChainImm));
+    cycles.at(reduce) = bench.ReadReg(kRegVecCycles);
+  }
+  EXPECT_GE(cycles[1], cycles[0] + (8 * 30));
+}
+
+TEST(VecProgramTest, OverlappedPassesOrderPbufAndSecondOperandReads) {
+  std::mt19937 rng(92);
+  constexpr uint32_t kWords = 4;
+  constexpr uint32_t kOne = 0x3F800000U;
+  const std::vector<FbufWord> x = RandomWords(rng, kWords);
+  std::vector<Instruction> program = ChainPrologue(kWords);
+  program.push_back(Encode(Pass{.rx = kRegChainA,
+                                .rd = kRegChainB,
+                                .rq = kRegOne,
+                                .rnw = kRegChainWords,
+                                .rn8 = kRegChainWords,
+                                .pa = kPaRowvec,
+                                .pa_at_mul = true,
+                                .b = kBPbuf}));
+  program.push_back(Encode(Pass{.rx = kRegChainB,
+                                .rd = kRegChainA,
+                                .rq = kRegOne,
+                                .rnw = kRegChainWords,
+                                .rn8 = kRegChainWords,
+                                .pa = kPaRowvec,
+                                .c0 = kC0Pbuf,
+                                .ialu = 1}));
+  program.push_back(Encode(Pass{.rx = kRegChainA,
+                                .rx2 = kRegChainB,
+                                .rd = kRegChainC,
+                                .rq = kRegOne,
+                                .rnw = kRegChainWords,
+                                .rn8 = kRegChainWords,
+                                .x2_en = true,
+                                .c0 = kC0X2,
+                                .ialu = 1}));
+  program.push_back(Ret());
+  const std::vector<FbufWord> out = RunProgram({.program = program,
+                                                .args = {.rows_q = 1},
+                                                .fbuf = {{kChainA, x}},
+                                                .pbuf = {Splat(kOne)},
+                                                .out_base = kChainC,
+                                                .out_words = kWords},
+                                               93);
+  std::vector<FbufWord> expected = x;
+  for (FbufWord& word : expected) {
+    for (uint32_t& element : word) {
+      element = (2 * element) + kOne;
+    }
+  }
+  EXPECT_EQ(out, expected);
 }
 
 }  // namespace

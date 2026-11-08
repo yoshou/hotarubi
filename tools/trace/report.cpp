@@ -473,8 +473,11 @@ void CollectVec(const Event& event, const iss::Statistics& st,
   if (activity.passes == 0) {
     return;
   }
-  m.issue_tail.push_back((4.0 * static_cast<double>(activity.words) - st.a) /
-                         activity.passes);
+  m.issue_tail.push_back(
+      (4.0 *
+           static_cast<double>(activity.words + activity.overlap_stall_words) -
+       st.a) /
+      activity.passes);
   m.drains.Add({static_cast<double>(activity.drains),
                 static_cast<double>(activity.drains_reduction),
                 static_cast<double>(activity.drains_quantized)},

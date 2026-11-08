@@ -93,7 +93,8 @@ Cost CostModel::Gemm(const GemmCommand& command) const {
 }
 
 uint64_t CostModel::IssueCycles(const VecActivity& activity) const {
-  const uint64_t words = activity.words * parameters_.vec_word_cycles;
+  const uint64_t words = (activity.words + activity.overlap_stall_words) *
+                         parameters_.vec_word_cycles;
   const uint64_t tail =
       uint64_t{activity.passes} * parameters_.vec_issue_tail_cycles;
   const uint64_t transposes =

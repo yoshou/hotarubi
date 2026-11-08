@@ -47,7 +47,7 @@ struct TimingParameters {
   uint32_t vec_fixed_cycles = 23;
   uint32_t vec_pass_cycles = 2;
   uint32_t vec_word_cycles = 4;
-  uint32_t vec_issue_tail_cycles = 3;
+  uint32_t vec_issue_tail_cycles = 2;
   uint32_t vec_drain_cycles = 41;
   uint32_t vec_drain_reduction_cycles = 24;
   uint32_t vec_drain_quantized_cycles = 22;

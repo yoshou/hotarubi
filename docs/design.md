@@ -196,7 +196,7 @@ Pass structure (→ writes; the last write goes to ABUF with Q):
 | ROPE (per head; words g and g + 4 pair up) | 1: `x2 × sin →` scratch[g]; 2: `x1 × cos − scratch[g] →` dst[g]; 3: `x1 × sin →` scratch[g + 4]; 4: `x2 × cos + scratch[g + 4] →` dst[g + 4] |
 | RELU, MAX | `max(x, 0) →`; `max(x, x2) →` |
 
-LAYERNORM, RMSNORM and SOFTMAX run their passes quad by quad; the other operations run each pass over all quads. The pipeline drains between passes.
+LAYERNORM, RMSNORM and SOFTMAX run their passes quad by quad; the other operations run each pass over all quads. Passes follow the execution rules of VEC programs.
 
 ## VEC programs
 
@@ -336,7 +336,7 @@ RET and NOP have no operands.
 
 ### Execution rules
 
-- A PASS waits for the pipeline to drain at its end unless nodrain is set. With nodrain, sc has no effect.
+- A PASS waits for the pipeline to drain at its end unless nodrain is set, or unless it has no red and no sc, does not write ABUF, the next instruction is a PASS, and it does not read PBUF at the multiplier while the next PASS reads PBUF at the pre-adder. In the latter case the next PASS starts while the writes of this one complete, and a read of an FBUF word whose write is still pending waits for the write. With nodrain, sc has no effect.
 - SMEM waits for preceding passes to drain.
 - PASS, RSLD and SMOVR instructions that write RS0 or RS1 wait for the drain.
 - The rimm and rimm2 values are captured when a PASS is issued.
@@ -601,7 +601,7 @@ The simulator assigns each instruction an issue cycle and a completion cycle wit
 | DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles` |
 | VEC | `vec_fixed_cycles + passes · vec_pass_cycles + issue + drain + scalar + SALU · vec_salu_cycles + SMEM · vec_smem_cycles + branches · vec_branch_cycles` |
 
-For VEC, `issue = words · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles`, `drain = passes · vec_drain_cycles + reducing passes · vec_drain_reduction_cycles + quantizing passes · vec_drain_quantized_cycles`, and the scalar cost follows the scalar unit's programs: each arithmetic micro-operation costs `vec_scalar_arithmetic_cycles`, each immediate write `vec_scalar_immediate_cycles`, and each program start `vec_scalar_start_cycles`, with the micro-operation counts of the RTL:
+For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles`, where a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + reducing passes · vec_drain_reduction_cycles + quantizing passes · vec_drain_quantized_cycles`, and the scalar cost follows the scalar unit's programs: each arithmetic micro-operation costs `vec_scalar_arithmetic_cycles`, each immediate write `vec_scalar_immediate_cycles`, and each program start `vec_scalar_start_cycles`, with the micro-operation counts of the RTL:
 
 | Program | Arithmetic | Immediate |
 |---|---:|---:|

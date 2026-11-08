@@ -12,6 +12,7 @@
 namespace hotarubi::iss {
 
 inline constexpr uint32_t kVecRun = 16;
+inline constexpr uint64_t kOverlapLatencyWords = 10;
 
 struct VecActivity {
   uint32_t passes = 0;
@@ -19,6 +20,8 @@ struct VecActivity {
   uint32_t drains = 0;
   uint32_t drains_reduction = 0;
   uint32_t drains_quantized = 0;
+  uint32_t overlaps = 0;
+  uint64_t overlap_stall_words = 0;
   std::array<uint32_t, 8> scalars{};
   uint32_t rn = 0;
   uint32_t salu = 0;
@@ -59,13 +62,13 @@ class VecEngine {
   struct PassState;
 
   void Initialize(const VecCommand& command);
-  void RunPass(const Word128& instruction, Memories& memories);
+  void RunPass(const Word128& instruction, const Word128& next,
+               Memories& memories);
   void RunWord(PassState& state, uint32_t w, Memories& memories);
   [[nodiscard]] const FbufWord& Operand(const PassState& state,
-                                        uint32_t address,
-                                        Memories& memories) const;
+                                        uint32_t address, Memories& memories);
   void Store(PassState& state, uint32_t word, const FbufWord& out,
-             Memories& memories) const;
+             Memories& memories);
   void RunSalu(const Word128& instruction);
   void RunTranspose(const Word128& instruction, Memories& memories);
   void RunSmem(const Word128& instruction, Memories& memories);
@@ -79,6 +82,9 @@ class VecEngine {
   uint32_t rn_ = 0;
   bool quantize_ = false;
   std::bitset<kFbufDepth> in_flight_;
+  std::bitset<kFbufDepth> pending_;
+  std::array<uint64_t, kFbufDepth> pending_slot_{};
+  uint64_t slot_ = 0;
   bool undrained_ = false;
   bool undrained_reduction_ = false;
   bool undrained_pbuf_at_mul_ = false;

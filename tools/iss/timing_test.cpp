@@ -142,6 +142,8 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
   activity.drains = 3;
   activity.drains_reduction = 2;
   activity.drains_quantized = 1;
+  activity.overlaps = 1;
+  activity.overlap_stall_words = 5;
   activity.scalars.at(1) = 1;
   activity.scalars.at(4) = 1;
   activity.rn = 1;
@@ -149,7 +151,7 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
   activity.smem = 2;
   activity.branches = 1;
   const Cost cost = model.Vec(activity);
-  EXPECT_EQ(cost.statistics.a, 80U - 9);
+  EXPECT_EQ(cost.statistics.a, 100U - 9);
   EXPECT_EQ(cost.statistics.b, 30U + 10 + 6);
   EXPECT_EQ(cost.statistics.c,
             ((8U + 19 + 12) * 9) + ((1U + 2 + 2) * 2) + (3U * 2));
@@ -305,6 +307,7 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
   EXPECT_EQ(add.drains, 1U);
   EXPECT_EQ(add.drains_reduction, 0U);
   EXPECT_EQ(add.drains_quantized, 0U);
+  EXPECT_EQ(add.overlaps, 0U);
   const VecActivity softmax = FixedOperationActivity({.op = 11,
                                                       .quantize = true,
                                                       .src = 0,
@@ -319,6 +322,8 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
   EXPECT_EQ(softmax.words, 24U * 128);
   EXPECT_EQ(softmax.drains_reduction, 16U);
   EXPECT_EQ(softmax.drains_quantized, 8U);
+  EXPECT_EQ(softmax.drains, 24U);
+  EXPECT_EQ(softmax.overlaps, 0U);
   EXPECT_EQ(softmax.scalars.at(3), 8U);
   EXPECT_EQ(softmax.scalars.at(4), 8U);
   const VecActivity layernorm = FixedOperationActivity({.op = 6,
@@ -332,6 +337,9 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
                                                         .aux = 0,
                                                         .imm = 0x358637BD});
   EXPECT_EQ(layernorm.passes, 40U);
+  EXPECT_EQ(layernorm.drains, 32U);
+  EXPECT_EQ(layernorm.overlaps, 8U);
+  EXPECT_EQ(layernorm.overlap_stall_words, 0U);
   EXPECT_EQ(layernorm.scalars.at(1), 8U);
   EXPECT_EQ(layernorm.scalars.at(2), 8U);
   EXPECT_EQ(layernorm.rn, 1U);

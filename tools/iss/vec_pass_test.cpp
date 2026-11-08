@@ -731,5 +731,68 @@ TEST_F(VecPassTest, RejectsProgramsWithUndefinedResults) {
       "reduces after a nodrain");
 }
 
+TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
+  Fill(0, 16);
+  PassFields first = Copy();
+  PassFields second = Copy();
+  second.rx = kDst;
+  second.rd = kSrc2;
+  Run({encoding::Pass(first), encoding::Pass(second), encoding::Ret()}, {0, 50},
+      100, 1, 4);
+  EXPECT_EQ(engine_.Activity().passes, 2U);
+  EXPECT_EQ(engine_.Activity().drains, 1U);
+  EXPECT_EQ(engine_.Activity().overlaps, 1U);
+  EXPECT_EQ(engine_.Activity().overlap_stall_words, kOverlapLatencyWords - 4);
+  for (uint32_t w = 0; w < 4; ++w) {
+    for (uint32_t e = 0; e < kFbufElements; ++e) {
+      ASSERT_EQ(After(50 + w, e), reference::Add(Before(w, e), 0));
+    }
+  }
+  Run({encoding::Pass(first), encoding::Pass(second), encoding::Ret()}, {0, 50},
+      100, 1, 16);
+  EXPECT_EQ(engine_.Activity().overlaps, 1U);
+  EXPECT_EQ(engine_.Activity().overlap_stall_words, 0U);
+  Run({encoding::Pass(first), encoding::Pass(first), encoding::Ret()}, {0, 50},
+      100, 1, 4);
+  EXPECT_EQ(engine_.Activity().overlaps, 1U);
+  EXPECT_EQ(engine_.Activity().overlap_stall_words, 0U);
+  Run({encoding::Pass(first), encoding::SaluImm(0, kR11, 0, 1),
+       encoding::Pass(second), encoding::Ret()},
+      {0, 50}, 100, 1, 4);
+  EXPECT_EQ(engine_.Activity().drains, 2U);
+  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+  PassFields reduce = Copy();
+  reduce.red = 1;
+  Run({encoding::Pass(reduce), encoding::Pass(second), encoding::Ret()},
+      {0, 50}, 100, 1, 4);
+  EXPECT_EQ(engine_.Activity().drains, 2U);
+  EXPECT_EQ(engine_.Activity().drains_reduction, 1U);
+  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+  PassFields quantized = Copy();
+  quantized.wr = 2;
+  Run({encoding::Pass(quantized), encoding::Pass(first), encoding::Ret()},
+      {0, 50}, 100, 1, 4);
+  EXPECT_EQ(engine_.Activity().drains, 2U);
+  EXPECT_EQ(engine_.Activity().drains_quantized, 1U);
+  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+  PassFields multiplier = Copy();
+  multiplier.pa = 1;
+  multiplier.pa_at_mul = 1;
+  multiplier.b = 2;
+  PassFields pre_adder = Copy();
+  pre_adder.rx = kDst;
+  pre_adder.rd = kSrc2;
+  pre_adder.pa = 1;
+  pre_adder.c0 = 2;
+  Run({encoding::Pass(multiplier), encoding::Pass(pre_adder), encoding::Ret()},
+      {0, 50}, 100, 1, 4);
+  EXPECT_EQ(engine_.Activity().drains, 2U);
+  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+  Run({encoding::Pass(pre_adder), encoding::Pass(multiplier), encoding::Ret()},
+      {100, 50}, 100, 1, 4);
+  EXPECT_EQ(engine_.Activity().drains, 1U);
+  EXPECT_EQ(engine_.Activity().overlaps, 1U);
+}
+
 }  // namespace
 }  // namespace hotarubi::iss

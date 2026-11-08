@@ -334,7 +334,7 @@ TEST_F(MachineTest, WritesStatisticsRecordsForEngineInstructions) {
   const TraceRecord vec_statistics = Record(5);
   EXPECT_EQ(vec_statistics.type, RecordType::kStatistics);
   EXPECT_EQ(vec_statistics.source, Source::kVec);
-  EXPECT_EQ(vec_statistics.statistics.a, 13U);
+  EXPECT_EQ(vec_statistics.statistics.a, 14U);
   EXPECT_EQ(vec_statistics.statistics.d, 1U);
   const TraceRecord store_statistics = Record(7);
   EXPECT_EQ(store_statistics.statistics.a, 0U);
