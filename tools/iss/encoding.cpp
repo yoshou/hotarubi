@@ -70,7 +70,8 @@ Word128 Pass(const PassFields& f) {
   Set(w, 28, 1, f.dst_s1);
   Set(w, 27, 1, f.c0_pred);
   Set(w, 26, 1, f.nodrain);
-  return Set(w, 25, 1, f.x_s1);
+  Set(w, 25, 1, f.x_s1);
+  return Set(w, 23, 2, f.ctx);
 }
 
 Word128 Salu(uint32_t op, uint32_t rd, uint32_t ra, uint32_t rb) {
@@ -100,6 +101,7 @@ Word128 Smem(const SmemFields& f) {
   Set(w, 100, 5, f.col);
   Set(w, 99, 1, f.which);
   Set(w, 98, 1, f.neg);
+  Set(w, 96, 2, f.ctx);
   return Set(w, 0, 32, f.imm);
 }
 

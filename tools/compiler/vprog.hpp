@@ -141,6 +141,7 @@ struct Pass {
   bool c0_pred = false;
   bool nodrain = false;
   bool x_s1 = false;
+  uint32_t ctx = 0;
 };
 
 struct SmemArgs {
@@ -150,6 +151,7 @@ struct SmemArgs {
   std::optional<uint32_t> col = std::nullopt;
   bool which = false;
   bool neg = false;
+  uint32_t ctx = 0;
   uint32_t imm = 0;
 };
 

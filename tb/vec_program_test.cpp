@@ -82,6 +82,7 @@ struct Pass {
   bool c0_pred = false;
   bool nodrain = false;
   bool x_s1 = false;
+  uint32_t ctx = 0;
 };
 
 Instruction Encode(const Pass& p) {
@@ -121,7 +122,8 @@ Instruction Encode(const Pass& p) {
       .Set(28, 1, p.dst_s1 ? 1 : 0)
       .Set(27, 1, p.c0_pred ? 1 : 0)
       .Set(26, 1, p.nodrain ? 1 : 0)
-      .Set(25, 1, p.x_s1 ? 1 : 0);
+      .Set(25, 1, p.x_s1 ? 1 : 0)
+      .Set(23, 2, p.ctx);
   return word;
 }
 
@@ -155,6 +157,7 @@ struct Smem {
   uint32_t col = 0;
   uint32_t which = 0;
   bool neg = false;
+  uint32_t ctx = 0;
   uint32_t imm = 0;
 };
 
@@ -169,6 +172,7 @@ Instruction Encode(const Smem& s) {
       .Set(100, 5, s.col)
       .Set(99, 1, s.which)
       .Set(98, 1, s.neg ? 1 : 0)
+      .Set(96, 2, s.ctx)
       .Set(0, 32, s.imm);
   return word;
 }

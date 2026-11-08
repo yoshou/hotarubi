@@ -9,25 +9,39 @@ module fp32_mul (
 );
 
   logic        v1, s1, z1;
-  logic [23:0] ma1, mb1;
+  logic [23:0] ma1, ma2;
+  logic [16:0] mb1_lo;
+  logic [6:0]  mb1_hi, mb2_hi;
   logic [8:0]  esum1;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       v1 <= 1'b0;
     end else begin
-      v1    <= in_valid_i;
-      s1    <= a_i[31] ^ b_i[31];
-      z1    <= (a_i[30:23] == 8'd0) | (b_i[30:23] == 8'd0);
-      ma1   <= {1'b1, a_i[22:0]};
-      mb1   <= {1'b1, b_i[22:0]};
-      esum1 <= {1'b0, a_i[30:23]} + {1'b0, b_i[30:23]};
+      v1     <= in_valid_i;
+      s1     <= a_i[31] ^ b_i[31];
+      z1     <= (a_i[30:23] == 8'd0) | (b_i[30:23] == 8'd0);
+      ma1    <= {1'b1, a_i[22:0]};
+      mb1_lo <= b_i[16:0];
+      mb1_hi <= {1'b1, b_i[22:17]};
+      esum1  <= {1'b0, a_i[30:23]} + {1'b0, b_i[30:23]};
     end
   end
 
-  (* use_dsp = "yes" *) logic [47:0] p2, p3, p4;
+  (* use_dsp = "yes" *) logic [40:0] p2_lo, p3_lo;
+  (* use_dsp = "yes" *) logic [30:0] p3_hi;
+  (* use_dsp = "yes" *) logic [47:0] p4;
   logic       v2, s2, z2, v3, s3, z3, v4a, s4a, z4a;
   logic [8:0] esum2, esum3, esum4a;
+
+  always_ff @(posedge clk_i) begin
+    ma2    <= ma1;
+    mb2_hi <= mb1_hi;
+    p2_lo  <= ma1 * mb1_lo;
+    p3_lo  <= p2_lo;
+    p3_hi  <= ma2 * mb2_hi;
+    p4     <= {p3_hi, 17'd0} + {7'd0, p3_lo};
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -39,17 +53,14 @@ module fp32_mul (
       s2     <= s1;
       z2     <= z1;
       esum2  <= esum1;
-      p2     <= ma1 * mb1;
       v3     <= v2;
       s3     <= s2;
       z3     <= z2;
       esum3  <= esum2;
-      p3     <= p2;
       v4a    <= v3;
       s4a    <= s3;
       z4a    <= z3;
       esum4a <= esum3;
-      p4     <= p3;
     end
   end
 

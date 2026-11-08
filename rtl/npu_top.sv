@@ -207,7 +207,8 @@ module npu_top
   logic [19:0]   g_abuf_addr, g_wbuf_addr, g_fbuf_raddr, g_fbuf_waddr;
   logic [1055:0] abuf_qa, abuf_qb2;
   logic [1151:0] wbuf_q;
-  logic [1023:0] fbuf_q2, g_fbuf_wdata;
+  logic [1023:0] g_fbuf_wdata;
+  (* keep = "true" *) logic [1023:0] fbuf_q2;
   logic          g_fbuf_rd_req, g_fbuf_we;
 
   gemm_engine #(
@@ -433,13 +434,19 @@ module npu_top
   end
 
   (* ram_style = "ultra" *) logic [1023:0] fbuf [4096];
-  logic [1023:0] fbuf_q1, fb_wd;
-  logic [11:0]   fb_wa, fb_ra, g_ra_r, d_ra_r;
-  logic          fb_we, sel_g_r, sel_v_r;
+  logic [1023:0] fbuf_q1, fb_wd, fb_wd_r;
+  logic [11:0]   fb_wa, fb_wa_r, fb_ra, g_ra_r, d_ra_r;
+  logic          fb_we, fb_we_r, sel_g_r, sel_v_r;
 
   assign fb_we = g_fbuf_we | (v_fb_wr_req & v_fb_wr_grant) | (d_wr_fbuf & d_wr_grant);
   assign fb_wa = g_fbuf_we ? g_fbuf_waddr[11:0] : v_fb_wr_req ? v_fb_waddr : d_wr_addr[11:0];
   assign fb_wd = g_fbuf_we ? g_fbuf_wdata : v_fb_wr_req ? v_fb_wdata : d_wr_data[1023:0];
+
+  always_ff @(posedge clk_i) begin
+    fb_we_r <= fb_we;
+    fb_wa_r <= fb_wa;
+    fb_wd_r <= fb_wd;
+  end
 
   always_ff @(posedge clk_i) begin
     sel_g_r <= g_fbuf_rd_req;
@@ -451,8 +458,8 @@ module npu_top
   assign fb_ra = sel_g_r ? g_ra_r : sel_v_r ? v_fb_raddr : d_ra_r;
 
   always_ff @(posedge clk_i) begin
-    if (fb_we) begin
-      fbuf[fb_wa] <= fb_wd;
+    if (fb_we_r) begin
+      fbuf[fb_wa_r] <= fb_wd_r;
     end
     fbuf_q1 <= fbuf[fb_ra];
     fbuf_q2 <= fbuf_q1;

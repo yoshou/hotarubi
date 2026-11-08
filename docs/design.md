@@ -40,7 +40,7 @@ The PL clock is 250 MHz (pl_clk0, IOPLL 2,000 MHz / 8).
 - An FBUF word (4 tokens × 8 columns) passes through the 8 lanes in 4 cycles, one token per cycle.
 - The fixed operations (VEC op 0–15) are programs in CBUF [0, 256), present from configuration. VEC op 16 (RUN) starts a program loaded into CBUF.
 - Each lane has two FP32 adders, one FP32 multiplier and one 24 × 16-bit multiplier for table interpolation.
-- Row scalars RS0 and RS1 (one per token of a quad) are computed by a 4-way scalar unit after a pass has drained.
+- Row scalars RS0 and RS1 (one per token of a quad) are computed by a scalar unit from the reductions of a pass. Reductions and row scalars are held in 2 row contexts, so the scalar unit works on one context while the lanes process passes of the other.
 - With the Q flag, the final pass is quantized to MXINT8 per 4 FBUF words and written to ABUF instead of FBUF.
 
 ### DMA engine
@@ -196,7 +196,7 @@ Pass structure (→ writes; the last write goes to ABUF with Q):
 | ROPE (per head; words g and g + 4 pair up) | 1: `x2 × sin →` scratch[g]; 2: `x1 × cos − scratch[g] →` dst[g]; 3: `x1 × sin →` scratch[g + 4]; 4: `x2 × cos + scratch[g + 4] →` dst[g + 4] |
 | RELU, MAX | `max(x, 0) →`; `max(x, x2) →` |
 
-LAYERNORM, RMSNORM and SOFTMAX run their passes quad by quad; the other operations run each pass over all quads. Passes follow the execution rules of VEC programs.
+LAYERNORM, RMSNORM and SOFTMAX process the quads in groups of 2, one row context per quad of the group, with the passes of a group in pass-major order (pass 1 of every quad, then pass 2, …) and a remainder of quads processed one at a time in context 0; the other operations run each pass over all quads. Passes follow the execution rules of VEC programs.
 
 ## VEC programs
 
@@ -216,7 +216,7 @@ RUN loads its operand fields into scalar registers:
 | scratch (as in the Q-flag rule; dst without Q) | r9 |
 | Q flag | r10 |
 
-For op 0–15 the same registers are loaded, except `r7 = aux` and pc is the start of the operation's program in CBUF [0, 256). r0 is always 0. r11–r31, RS0, RS1 and rn are not initialized. Programs do not write r10. A program ends with RET, which clears the engine's busy state without waiting for the drain.
+For op 0–15 the same registers are loaded, except `r7 = aux` and pc is the start of the operation's program in CBUF [0, 256). r0 is always 0. r11–r31, RS0, RS1 and rn are not initialized. Programs do not write r10. A program ends with RET, which waits until every row context is idle and then clears the engine's busy state without waiting for the drain.
 
 Instruction word, `[127:124]` kind: 0 PASS, 1 SALU, 2 SMEM, 3 BR, 4 RET, 5 NOP, 7 TRANSPOSE8; 6 and 8–15 act as NOP.
 
@@ -260,6 +260,7 @@ A PASS streams `rq` quads × `rnw` words through the lanes, 4 cycles per word. R
 | [27] | c0_pred | c0 is 0 in lanes whose predicate is false |
 | [26] | nodrain | Do not wait for the pipeline to drain before the next instruction |
 | [25] | x_s1 | x and x2 read starts advance by 1 word per quad |
+| [24:23] | ctx | Row context of the reduction, the row scalar and the RS0/RS1 reads (0 or 1) |
 
 Lane operation (x, x2 after permutation):
 
@@ -312,16 +313,16 @@ TRANSPOSE8 waits for preceding vector operations to drain and completes all dest
 ### SMEM
 
 ```
-[123:121] op  [120:116] rd  [115:111] ra  [110:106] rb  [105] col_imm  [104:100] col  [99] which (0 RS1, 1 RS0)  [98] neg  [31:0] imm (signed word offset)
+[123:121] op  [120:116] rd  [115:111] ra  [110:106] rb  [105] col_imm  [104:100] col  [99] which (0 RS1, 1 RS0)  [98] neg  [97:96] ctx  [31:0] imm (signed word offset)
 ```
 
 | op | Name | Operation |
 |---|---|---|
 | 0 | SLD | `rd ← FBUF[ra + imm]` lane col (col_imm ? col : rb[4:0]) |
 | 1, 3, 7 | — | No operation |
-| 2 | RSLD | `RS[which][t] ← FBUF[ra + imm]` token t, column col[2:0], t = 0..3; negated if neg; a value with a zero exponent field becomes +0 |
-| 4 | RSMOV | `rd ← RS[which][col[1:0]]` |
-| 5 | SMOVR | `RS[which][t] ← ra` for all t |
+| 2 | RSLD | `RS[which][t] ← FBUF[ra + imm]` token t, column col[2:0], t = 0..3, in row context ctx; negated if neg; a value with a zero exponent field becomes +0 |
+| 4 | RSMOV | `rd ← RS[which][col[1:0]]` of row context ctx |
+| 5 | SMOVR | `RS[which][t] ← ra` for all t, in row context ctx |
 | 6 | RN | `rn ← 1 / float(ra)`, ra < 2^14; ra = 0 counts as 1 |
 
 The FBUF address `ra + imm` wraps at 4,096 words.
@@ -336,14 +337,15 @@ RET and NOP have no operands.
 
 ### Execution rules
 
-- A PASS waits for the pipeline to drain at its end unless nodrain is set, or unless it has no red and no sc, does not write ABUF, the next instruction is a PASS, and it does not read PBUF at the multiplier while the next PASS reads PBUF at the pre-adder. In the latter case the next PASS starts while the writes of this one complete, and a read of an FBUF word whose write is still pending waits for the write. With nodrain, sc has no effect.
-- SMEM waits for preceding passes to drain.
-- PASS, RSLD and SMOVR instructions that write RS0 or RS1 wait for the drain.
+- A PASS waits for the pipeline to drain at its end unless nodrain is set, or unless the next instruction is a PASS and this PASS does not read PBUF at the multiplier while the next one reads PBUF at the pre-adder. In the latter case the next PASS starts while the writes of this one complete, and a read of an FBUF word whose write is still pending waits for the write.
+- A row context is reducing from the start of a PASS with red in that context until every word of the PASS has been reduced; if the PASS has sc, the context then holds the scalar program until its result is written to RS0 or RS1 of the context. The scalar unit runs one program at a time, in the order the reductions complete.
+- A PASS with red waits at its start until its context is neither reducing nor holding a scalar program, then clears the context's accumulators.
+- A PASS that reads RS0 or RS1 (c0 = RS0, b = RS1, sel = RS0 or RS1) waits at its start while a scalar program of its context is outstanding.
+- SMEM waits for preceding passes to drain; RSLD, RSMOV and SMOVR also wait for an outstanding scalar program of their context, and RN waits for the scalar unit to be idle.
 - The rimm and rimm2 values are captured when a PASS is issued.
 - A PASS must not have rq = 0 or rnw = 0.
 - sel = X2 and c1 = SIGNFIX are not used in the same pass.
 - pa = TILE is used with pa_at_mul = 1.
-- A PASS that follows a nodrain PASS with red does not use red.
 - A PASS that follows a nodrain PASS reading PBUF at the multiplier does not read PBUF at the pre-adder.
 - The last PASS before RET does not set nodrain.
 
@@ -505,7 +507,7 @@ A, B and C are 24-bit counters and D an 8-bit counter; all saturate, are cleared
 |---|---|---|---|---|
 | DMA | AXI read beats | AXI write beats | cycles with an on-chip read or write request not granted | null index-list and gather entries |
 | GEMM | cycles with the array fed | 0 | 0 | 0 |
-| VEC | cycles in the issue state and in TRANSPOSE8 | cycles in the drain states | cycles waiting for the scalar unit | PASS instructions started |
+| VEC | cycles in the issue state and in TRANSPOSE8 | cycles in the drain states | cycles a PASS, an SMEM or RET waits for a row context or the scalar unit | PASS instructions started |
 
 Each source holds one pending completion record with its statistics record. One record per cycle moves into the 64-entry record FIFO: the completion record of the selected source, then its statistics record when enabled; when several sources are pending, the order is DMA, GEMM, VEC, sequencer. Issue is held while the source's record slot is occupied or the record FIFO holds 56 or more records. TRACE_COUNT counts the records of both types.
 
@@ -601,7 +603,7 @@ The simulator assigns each instruction an issue cycle and a completion cycle wit
 | DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles` |
 | VEC | `vec_fixed_cycles + passes · vec_pass_cycles + issue + drain + scalar + SALU · vec_salu_cycles + SMEM · vec_smem_cycles + branches · vec_branch_cycles` |
 
-For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles`, where a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + reducing passes · vec_drain_reduction_cycles + quantizing passes · vec_drain_quantized_cycles`, and the scalar cost follows the scalar unit's programs: each arithmetic micro-operation costs `vec_scalar_arithmetic_cycles`, each immediate write `vec_scalar_immediate_cycles`, and each program start `vec_scalar_start_cycles`, with the micro-operation counts of the RTL:
+For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles`, where a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit, with the micro-operation counts of the RTL; a PASS or SMEM that needs the context waits the remaining words:
 
 | Program | Arithmetic | Immediate |
 |---|---:|---:|

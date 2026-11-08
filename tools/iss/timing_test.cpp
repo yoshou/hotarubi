@@ -127,11 +127,7 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
   parameters.vec_word_cycles = 4;
   parameters.vec_issue_tail_cycles = 3;
   parameters.vec_drain_cycles = 10;
-  parameters.vec_drain_reduction_cycles = 5;
   parameters.vec_drain_quantized_cycles = 6;
-  parameters.vec_scalar_arithmetic_cycles = 9;
-  parameters.vec_scalar_immediate_cycles = 2;
-  parameters.vec_scalar_start_cycles = 2;
   parameters.vec_salu_cycles = 3;
   parameters.vec_smem_cycles = 5;
   parameters.vec_branch_cycles = 7;
@@ -140,10 +136,10 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
   activity.passes = 3;
   activity.words = 20;
   activity.drains = 3;
-  activity.drains_reduction = 2;
   activity.drains_quantized = 1;
   activity.overlaps = 1;
   activity.overlap_stall_words = 5;
+  activity.context_stall_words = 7;
   activity.scalars.at(1) = 1;
   activity.scalars.at(4) = 1;
   activity.rn = 1;
@@ -152,29 +148,19 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
   activity.branches = 1;
   const Cost cost = model.Vec(activity);
   EXPECT_EQ(cost.statistics.a, 100U - 9);
-  EXPECT_EQ(cost.statistics.b, 30U + 10 + 6);
-  EXPECT_EQ(cost.statistics.c,
-            ((8U + 19 + 12) * 9) + ((1U + 2 + 2) * 2) + (3U * 2));
+  EXPECT_EQ(cost.statistics.b, 30U + 6);
+  EXPECT_EQ(cost.statistics.c, (7U * 4) + (12U * 11) + (2U * 2) + 2);
   EXPECT_EQ(cost.statistics.d, 3U);
   EXPECT_EQ(cost.cycles, 1U + 6 + cost.statistics.a + cost.statistics.b +
                              cost.statistics.c + 12 + 10 + 7);
 }
 
-TEST(CostModelTest, ScalarProgramsMatchTheBoard) {
-  const CostModel model;
-  VecActivity layernorm;
-  layernorm.scalars.at(1) = 8;
-  layernorm.scalars.at(2) = 8;
-  layernorm.rn = 1;
-  EXPECT_EQ(model.ScalarCycles(layernorm), 2858U);
-  VecActivity softmax;
-  softmax.scalars.at(3) = 8;
-  softmax.scalars.at(4) = 8;
-  EXPECT_EQ(model.ScalarCycles(softmax), 1448U);
-  VecActivity rmsnorm;
-  rmsnorm.scalars.at(2) = 8;
-  rmsnorm.rn = 1;
-  EXPECT_EQ(model.ScalarCycles(rmsnorm), 2250U);
+TEST(CostModelTest, ScalarProgramsMatchTheRtl) {
+  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(1)), 92U);
+  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(2)), 325U);
+  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(3)), 4U);
+  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(4)), 215U);
+  EXPECT_EQ(ScalarProgramCycles(kCountReciprocalProgram), 138U);
 }
 
 TEST(EstimateTest, RawLoadsCountBeatsPerWord) {
@@ -305,7 +291,6 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
   EXPECT_EQ(add.passes, 1U);
   EXPECT_EQ(add.words, 1024U);
   EXPECT_EQ(add.drains, 1U);
-  EXPECT_EQ(add.drains_reduction, 0U);
   EXPECT_EQ(add.drains_quantized, 0U);
   EXPECT_EQ(add.overlaps, 0U);
   const VecActivity softmax = FixedOperationActivity({.op = 11,
@@ -320,10 +305,9 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
                                                       .imm = 2048});
   EXPECT_EQ(softmax.passes, 24U);
   EXPECT_EQ(softmax.words, 24U * 128);
-  EXPECT_EQ(softmax.drains_reduction, 16U);
-  EXPECT_EQ(softmax.drains_quantized, 8U);
-  EXPECT_EQ(softmax.drains, 24U);
-  EXPECT_EQ(softmax.overlaps, 0U);
+  EXPECT_EQ(softmax.drains_quantized, 4U);
+  EXPECT_EQ(softmax.drains, 4U);
+  EXPECT_EQ(softmax.overlaps, 20U);
   EXPECT_EQ(softmax.scalars.at(3), 8U);
   EXPECT_EQ(softmax.scalars.at(4), 8U);
   const VecActivity layernorm = FixedOperationActivity({.op = 6,
@@ -337,8 +321,8 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
                                                         .aux = 0,
                                                         .imm = 0x358637BD});
   EXPECT_EQ(layernorm.passes, 40U);
-  EXPECT_EQ(layernorm.drains, 32U);
-  EXPECT_EQ(layernorm.overlaps, 8U);
+  EXPECT_EQ(layernorm.drains, 8U);
+  EXPECT_EQ(layernorm.overlaps, 32U);
   EXPECT_EQ(layernorm.overlap_stall_words, 0U);
   EXPECT_EQ(layernorm.scalars.at(1), 8U);
   EXPECT_EQ(layernorm.scalars.at(2), 8U);

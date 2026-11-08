@@ -237,6 +237,7 @@ Pass DecodePass(const Word128& instruction) {
       .c0_pred = Flag(w, 27),
       .nodrain = Flag(w, 26),
       .x_s1 = Flag(w, 25),
+      .ctx = w.Field(23, 2),
   };
 }
 

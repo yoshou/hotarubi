@@ -14,25 +14,7 @@
 
 namespace hotarubi::iss {
 
-inline constexpr uint32_t kRowScalarKinds = 8;
 inline constexpr uint32_t kBeatsPerKilobeat = 1024;
-
-struct ScalarProgram {
-  uint32_t arithmetic = 0;
-  uint32_t immediate = 0;
-};
-
-inline constexpr std::array<ScalarProgram, kRowScalarKinds> kScalarPrograms = {
-    {{.arithmetic = 0, .immediate = 0},
-     {.arithmetic = 8, .immediate = 1},
-     {.arithmetic = 29, .immediate = 2},
-     {.arithmetic = 0, .immediate = 1},
-     {.arithmetic = 19, .immediate = 2},
-     {.arithmetic = 7, .immediate = 1},
-     {.arithmetic = 0, .immediate = 1},
-     {.arithmetic = 19, .immediate = 2}}};
-inline constexpr ScalarProgram kCountReciprocalProgram = {.arithmetic = 12,
-                                                          .immediate = 2};
 
 struct TimingParameters {
   uint32_t start_cycles = 55;
@@ -40,23 +22,19 @@ struct TimingParameters {
   uint32_t dma_fixed_cycles = 45;
   uint32_t dma_read_cycles_per_kilobeat = 936;
   uint32_t dma_read_burst_cycles = 3;
-  uint32_t dma_write_cycles_per_kilobeat = 958;
+  uint32_t dma_write_cycles_per_kilobeat = 957;
   uint32_t dma_write_burst_cycles = 6;
   uint32_t dma_gather_entry_cycles = 1;
   uint32_t dma_gather_row_cycles = 8;
-  uint32_t vec_fixed_cycles = 23;
+  uint32_t vec_fixed_cycles = 22;
   uint32_t vec_pass_cycles = 2;
   uint32_t vec_word_cycles = 4;
   uint32_t vec_issue_tail_cycles = 2;
   uint32_t vec_drain_cycles = 41;
-  uint32_t vec_drain_reduction_cycles = 24;
   uint32_t vec_drain_quantized_cycles = 22;
-  uint32_t vec_scalar_arithmetic_cycles = 9;
-  uint32_t vec_scalar_immediate_cycles = 2;
-  uint32_t vec_scalar_start_cycles = 2;
-  uint32_t vec_salu_cycles = 3;
-  uint32_t vec_smem_cycles = 11;
-  uint32_t vec_branch_cycles = 17;
+  uint32_t vec_salu_cycles = 5;
+  uint32_t vec_smem_cycles = 0;
+  uint32_t vec_branch_cycles = 2;
   uint32_t vec_transpose_cycles = 26;
   uint32_t vec_transpose_tile_cycles = 10;
 };

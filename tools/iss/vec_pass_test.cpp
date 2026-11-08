@@ -525,8 +525,8 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
          encoding::Smem({.op = 6, .ra = kR13}), encoding::Pass(pass),
          encoding::Ret()},
         {0, 0}, 100, 1, kWords);
-    rs0.at(sc) = engine_.Rows().rs0;
-    rs1.at(sc) = engine_.Rows().rs1;
+    rs0.at(sc) = engine_.Rows(0).rs0;
+    rs1.at(sc) = engine_.Rows(0).rs1;
     CheckMasked(sc, kWords, kValid);
   }
   const uint32_t rn = reference::Reciprocal(reference::FromInt(70));
@@ -637,13 +637,13 @@ TEST_F(VecPassTest, ScalarMemoryInstructions) {
   for (uint32_t t = 0; t < kTokens; ++t) {
     const uint32_t value = Before(1, (t * 8) + 6);
     const bool zero = ((value >> 23) & 0xFFU) == 0;
-    EXPECT_EQ(engine_.Rows().rs0.at(t), zero ? 0 : value ^ 0x80000000U);
+    EXPECT_EQ(engine_.Rows(0).rs0.at(t), zero ? 0 : value ^ 0x80000000U);
     const uint32_t other = Before(1, (t * 8) + 6);
-    EXPECT_EQ(engine_.Rows().rs1.at(t), zero ? 0 : other);
+    EXPECT_EQ(engine_.Rows(0).rs1.at(t), zero ? 0 : other);
   }
-  EXPECT_EQ(engine_.Register(22), engine_.Rows().rs0.at(3));
-  EXPECT_EQ(engine_.Register(23), engine_.Rows().rs1.at(3));
-  EXPECT_EQ(engine_.Register(24), engine_.Rows().rs1.at(0));
+  EXPECT_EQ(engine_.Register(22), engine_.Rows(0).rs0.at(3));
+  EXPECT_EQ(engine_.Register(23), engine_.Rows(0).rs1.at(3));
+  EXPECT_EQ(engine_.Register(24), engine_.Rows(0).rs1.at(0));
   EXPECT_EQ(engine_.Rn(), reference::Reciprocal(0x3F800000));
   EXPECT_EQ(engine_.Register(25), 0U);
 }
@@ -722,13 +722,6 @@ TEST_F(VecPassTest, RejectsProgramsWithUndefinedResults) {
   EXPECT_DEATH(
       Run({encoding::Pass(empty), encoding::Ret()}, {10, 50}, 30, 1, 4),
       "0 quads");
-  PassFields reduce = Copy();
-  reduce.red = 1;
-  reduce.nodrain = 1;
-  EXPECT_DEATH(
-      Run({encoding::Pass(reduce), encoding::Pass(reduce), encoding::Ret()},
-          {10, 50}, 30, 1, 4),
-      "reduces after a nodrain");
 }
 
 TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
@@ -763,18 +756,27 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().overlaps, 0U);
   PassFields reduce = Copy();
   reduce.red = 1;
-  Run({encoding::Pass(reduce), encoding::Pass(second), encoding::Ret()},
+  reduce.sc = 5;
+  PassFields scaled = second;
+  scaled.b = 3;
+  Run({encoding::Pass(reduce), encoding::Pass(scaled), encoding::Ret()},
       {0, 50}, 100, 1, 4);
-  EXPECT_EQ(engine_.Activity().drains, 2U);
-  EXPECT_EQ(engine_.Activity().drains_reduction, 1U);
-  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+  EXPECT_EQ(engine_.Activity().drains, 1U);
+  EXPECT_EQ(engine_.Activity().overlaps, 1U);
+  EXPECT_EQ(engine_.Activity().context_stall_words,
+            kReductionLatencyWords +
+                ((ScalarProgramCycles(kScalarPrograms.at(5)) + 3) / 4));
+  scaled.ctx = 1;
+  Run({encoding::Pass(reduce), encoding::Pass(scaled), encoding::Ret()},
+      {0, 50}, 100, 1, 4);
+  EXPECT_EQ(engine_.Activity().context_stall_words, 0U);
   PassFields quantized = Copy();
   quantized.wr = 2;
   Run({encoding::Pass(quantized), encoding::Pass(first), encoding::Ret()},
       {0, 50}, 100, 1, 4);
-  EXPECT_EQ(engine_.Activity().drains, 2U);
-  EXPECT_EQ(engine_.Activity().drains_quantized, 1U);
-  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+  EXPECT_EQ(engine_.Activity().drains, 1U);
+  EXPECT_EQ(engine_.Activity().drains_quantized, 0U);
+  EXPECT_EQ(engine_.Activity().overlaps, 1U);
   PassFields multiplier = Copy();
   multiplier.pa = 1;
   multiplier.pa_at_mul = 1;

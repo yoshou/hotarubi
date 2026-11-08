@@ -18,6 +18,10 @@ package vec_pkg;
   localparam int StageY        = StageC1 + PostLatency + FinLatency;
   localparam int MemLatency    = 3;
   localparam int CbufLatency   = 2;
+  localparam int NumContexts   = 2;
+  localparam int CtxW          = 2;
+  localparam int CtxIdxW       = (NumContexts > 1) ? $clog2(NumContexts) : 1;
+  localparam int AccAw         = CtxIdxW + 5;
 
   typedef enum logic [4:0] {
     OpAdd       = 5'd0,
@@ -180,12 +184,13 @@ package vec_pkg;
     logic       x_s1;
     logic       c0_pred;
     logic       nodrain;
+    logic [CtxW-1:0] ctx;
   } pass_t;
 
   function automatic pass_t dec_pass(input logic [127:0] w);
     pass_t d;
     logic  unused_w;
-    unused_w = ^{w[127:124], w[46:44], w[24:0]};
+    unused_w = ^{w[127:124], w[46:44], w[22:0]};
     d.rx        = w[123:119];
     d.rx2       = w[118:114];
     d.rd        = w[113:109];
@@ -221,6 +226,7 @@ package vec_pkg;
     d.c0_pred   = w[27];
     d.nodrain   = w[26];
     d.x_s1      = w[25];
+    d.ctx       = w[24:23];
     return d;
   endfunction
 
@@ -253,6 +259,7 @@ package vec_pkg;
   typedef struct packed {
     logic        valid;
     logic [1:0]  ph;
+    logic [CtxW-1:0] ctx;
     c0_e         c0;
     b_e          b;
     nl_e         nl;

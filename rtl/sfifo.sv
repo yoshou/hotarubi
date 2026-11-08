@@ -19,6 +19,9 @@ module sfifo #(
 
   (* ram_style = "distributed" *) logic [Width-1:0] mem [Depth];
   logic [AddrWidth-1:0] wptr, rptr;
+  logic [AddrWidth:0]   count_d;
+
+  assign count_d = count_o + (AddrWidth+1)'(push_i) - (AddrWidth+1)'(pop_i);
 
   always_ff @(posedge clk_i) begin
     if (push_i) begin
@@ -31,10 +34,14 @@ module sfifo #(
       wptr    <= '0;
       rptr    <= '0;
       count_o <= '0;
+      empty_o <= 1'b1;
+      afull_o <= 1'b0;
     end else if (clear_i) begin
       wptr    <= '0;
       rptr    <= '0;
       count_o <= '0;
+      empty_o <= 1'b1;
+      afull_o <= 1'b0;
     end else begin
       if (push_i) begin
         wptr <= wptr + 1'b1;
@@ -42,12 +49,12 @@ module sfifo #(
       if (pop_i) begin
         rptr <= rptr + 1'b1;
       end
-      count_o <= count_o + (AddrWidth+1)'(push_i) - (AddrWidth+1)'(pop_i);
+      count_o <= count_d;
+      empty_o <= (count_d == '0);
+      afull_o <= (count_d >= (AddrWidth+1)'(Depth - AfullMargin));
     end
   end
 
-  assign dout_o  = mem[rptr];
-  assign empty_o = (count_o == '0);
-  assign afull_o = (count_o >= (AddrWidth+1)'(Depth - AfullMargin));
+  assign dout_o = mem[rptr];
 
 endmodule

@@ -403,8 +403,7 @@ struct Mechanisms {
   LeastSquares writes{2};
   LeastSquares gather{2};
   std::vector<double> issue_tail;
-  LeastSquares drains{3};
-  LeastSquares scalars{3};
+  LeastSquares drains{2};
   LeastSquares remainder{5};
   std::map<std::string, std::array<double, 2>> residual;
 };
@@ -479,21 +478,8 @@ void CollectVec(const Event& event, const iss::Statistics& st,
        st.a) /
       activity.passes);
   m.drains.Add({static_cast<double>(activity.drains),
-                static_cast<double>(activity.drains_reduction),
                 static_cast<double>(activity.drains_quantized)},
                st.b);
-  double arithmetic = activity.rn * iss::kCountReciprocalProgram.arithmetic;
-  double immediate = activity.rn * iss::kCountReciprocalProgram.immediate;
-  double starts = activity.rn;
-  for (size_t i = 0; i < iss::kRowScalarKinds; ++i) {
-    arithmetic +=
-        activity.scalars.at(i) * iss::kScalarPrograms.at(i).arithmetic;
-    immediate += activity.scalars.at(i) * iss::kScalarPrograms.at(i).immediate;
-    starts += activity.scalars.at(i);
-  }
-  if (starts > 0.0) {
-    m.scalars.Add({arithmetic, immediate, starts}, st.c);
-  }
   m.remainder.Add({1.0, static_cast<double>(activity.passes),
                    static_cast<double>(activity.salu),
                    static_cast<double>(activity.branches),
@@ -558,27 +544,14 @@ std::string FitVec(const Mechanisms& m, iss::TimingParameters& p) {
         "words - tail x passes)\n",
         p.vec_issue_tail_cycles, m.issue_tail.size());
   }
-  if (m.drains.rows >= 3) {
+  if (m.drains.rows >= 2) {
     const std::vector<double> fit = m.drains.Solve();
     p.vec_drain_cycles = Round(fit[0]);
-    p.vec_drain_reduction_cycles = Round(fit[1]);
-    p.vec_drain_quantized_cycles = Round(fit[2]);
+    p.vec_drain_quantized_cycles = Round(fit[1]);
     report += std::format(
-        "vec_drain_cycles = {}, vec_drain_reduction_cycles = {}, "
-        "vec_drain_quantized_cycles = {} ({} commands)\n",
-        p.vec_drain_cycles, p.vec_drain_reduction_cycles,
-        p.vec_drain_quantized_cycles, m.drains.rows);
-  }
-  if (m.scalars.rows >= 3) {
-    const std::vector<double> fit = m.scalars.Solve();
-    p.vec_scalar_arithmetic_cycles = Round(fit[0]);
-    p.vec_scalar_immediate_cycles = Round(fit[1]);
-    p.vec_scalar_start_cycles = Round(fit[2]);
-    report += std::format(
-        "vec_scalar_arithmetic_cycles = {}, vec_scalar_immediate_cycles = {}, "
-        "vec_scalar_start_cycles = {} ({} commands)\n",
-        p.vec_scalar_arithmetic_cycles, p.vec_scalar_immediate_cycles,
-        p.vec_scalar_start_cycles, m.scalars.rows);
+        "vec_drain_cycles = {}, vec_drain_quantized_cycles = {} ({} "
+        "commands)\n",
+        p.vec_drain_cycles, p.vec_drain_quantized_cycles, m.drains.rows);
   }
   if (m.remainder.rows >= 5) {
     const std::vector<double> fit = m.remainder.Solve();

@@ -55,7 +55,6 @@ module vec_engine
     StSegSetup,
     StIssue,
     StDrain,
-    StScalarWait,
     StSrd,
     StSex,
     StMulw,
@@ -63,6 +62,7 @@ module vec_engine
     StMrd,
     StMwait,
     StMex,
+    StMrs,
     StRnwait,
     StBex,
     StNext,
@@ -100,8 +100,9 @@ module vec_engine
   assign busy_o        = (st != StIdle);
   assign stat_issue_o  = (st == StIssue) || (st == StTransposeWait);
   assign stat_drain_o  = (st == StDrain) || (st == StMdrain);
-  assign stat_scalar_o = (st == StScalarWait) || (st == StRnwait);
-  assign stat_pass_o   = (st == StSegSetup);
+  assign stat_scalar_o = ((st == StSegSetup) && pass_wait) || (st == StRnwait) ||
+                         ((st == StDecode) && (kind == KindRet) && !ret_ok);
+  assign stat_pass_o   = (st == StSegSetup) && !pass_wait;
 
   (* ram_style = "distributed" *) logic [31:0] rf [32];
   logic        rf_we;
@@ -186,6 +187,7 @@ module vec_engine
     end
     rd_ctrl           = '0;
     rd_ctrl.valid     = 1'b1;
+    rd_ctrl.ctx       = pd.ctx;
     rd_ctrl.c0        = pd.c0;
     rd_ctrl.b         = pd.b;
     rd_ctrl.nl        = pd.nl;
@@ -229,21 +231,29 @@ module vec_engine
   assign sm_rd_fire = sm_rd_v & fbuf_rd_grant_i;
 
   logic lane_busy, red_busy, sc_busy, quant_busy, wf_empty, af_empty, phs_v;
+  logic pass_wait, ret_ok;
   logic rdpipe_busy;
-  logic drained;
+  logic drained, drained_r;
 
   assign drained = !rdpipe_busy & !phs_v & !lane_busy & !red_busy & wf_empty & !quant_busy &
                    af_empty;
 
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      drained_r <= 1'b0;
+    end else begin
+      drained_r <= drained;
+    end
+  end
+
   assign tr_mode  = (st == StTransposeWait);
-  assign tr_start = (st == StTransposeStart) && drained;
+  assign tr_start = (st == StTransposeStart) && drained_r;
 
   logic next_is_pass, next_pa_pre, overlap_ok;
 
   assign next_is_pass = (pf_cnt >= 3'(CbufLatency)) && (cbuf_rdata_i[127:124] == KindPass);
   assign next_pa_pre  = (pa_e'(cbuf_rdata_i[71:70]) != PaNone) && !cbuf_rdata_i[69];
-  assign overlap_ok   = next_is_pass && (pd.sc == ScNone) && (pd.red == RedNone) &&
-                        (wr_eff != WrAbuf) && !(pd.pa_at_mul && next_pa_pre);
+  assign overlap_ok   = next_is_pass && !(pd.pa_at_mul && next_pa_pre);
 
   vec_transpose #(
     .ReadLatency(MemLatency)
@@ -270,12 +280,146 @@ module vec_engine
     .wr_data_o        (tr_wd)
   );
 
-  logic          sc_start, sc_recip_n;
-  sc_e           sc_prog;
-  logic [13:0]   sc_nelem;
-  logic          rs_we0, rs_we1;
-  logic [31:0]   rs_val [4];
-  logic [31:0]   c0s [4], bs [4], rn;
+  logic               sc_start, sc_recip_n, sc_running;
+  sc_e                sc_prog;
+  logic [13:0]        sc_nelem;
+  logic [CtxIdxW-1:0] sc_ctx;
+  logic               sc_rs_we, sc_rs_sel;
+  logic [31:0]        sc_rs_val [4];
+  logic               rs_we0, rs_we1;
+  logic [31:0]        rs_val [4];
+  logic [31:0]        rs_pick [4];
+  logic [31:0]        rn;
+  logic [31:0]        rs0 [NumContexts][4];
+  logic [31:0]        rs1 [NumContexts][4];
+  logic [CtxW-1:0]    sm_ctx_field;
+  logic [CtxIdxW-1:0] sm_ctx, pd_ctx;
+
+  assign sm_ctx_field = ins[97:96];
+  assign sm_ctx       = sm_ctx_field[CtxIdxW-1:0];
+  assign pd_ctx       = pd.ctx[CtxIdxW-1:0];
+
+  logic [NumContexts-1:0] ctx_reducing, ctx_issued, ctx_sc_pending, ctx_idle, sc_outstanding,
+                          ctx_done;
+  logic [8:0]             ctx_pending [NumContexts];
+  sc_e                    ctx_prog [NumContexts];
+  logic [31:0]            ctx_eps [NumContexts];
+  logic                   pass_reads_rs, pass_last_fire, ctx_all_idle, sm_ready;
+  logic                   sum_done, max_done;
+  logic [CtxIdxW-1:0]     sum_done_ctx, max_done_ctx;
+  logic [CtxIdxW-1:0]     rq_mem [NumContexts];
+  logic [CtxIdxW-1:0]     rq_wp, rq_rp;
+  logic [CtxIdxW:0]       rq_count;
+  logic                   rq_empty, rq_push, rq_pop, done_any;
+  logic [CtxIdxW-1:0]     done_ctx;
+
+  assign pass_reads_rs  = (pd.c0 == C0Rs0) | (pd.b == BRs1) | (pd.sel == SelRs0) |
+                          (pd.sel == SelRs1);
+  assign pass_last_fire = rd_fire & rd_is_entry & (w == p_nw - 10'd1) & (q == p_rq - 9'd1);
+  assign rq_empty       = (rq_count == '0);
+  assign ctx_all_idle   = &ctx_idle;
+  assign ret_ok         = ctx_all_idle & !sc_busy & !sc_start & !sc_running & rq_empty;
+
+  always_comb begin
+    for (int k = 0; k < NumContexts; k++) begin
+      sc_outstanding[k] = (ctx_reducing[k] & (ctx_prog[k] != ScNone)) | ctx_sc_pending[k];
+      ctx_idle[k]       = !ctx_reducing[k] & !ctx_sc_pending[k];
+      ctx_done[k]       = ctx_reducing[k] & ctx_issued[k] & (ctx_pending[k] == 9'd0);
+    end
+    pass_wait = (pass_reads_rs & sc_outstanding[pd_ctx]) |
+                ((pd.red != RedNone) & !ctx_idle[pd_ctx]);
+    done_any = 1'b0;
+    done_ctx = '0;
+    for (int k = NumContexts - 1; k >= 0; k--) begin
+      if (ctx_done[k]) begin
+        done_any = 1'b1;
+        done_ctx = CtxIdxW'(k);
+      end
+    end
+    rq_push = done_any & (ctx_prog[done_ctx] != ScNone);
+    case (sm_op)
+      SmemRn:  sm_ready = rq_empty & !sc_busy & !sc_start & !sc_running;
+      SmemSld: sm_ready = 1'b1;
+      default: sm_ready = !sc_outstanding[sm_ctx];
+    endcase
+  end
+
+  assign rq_pop = !sc_busy & !sc_start & !sc_running & !rq_empty;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ctx_reducing   <= '0;
+      ctx_issued     <= '0;
+      ctx_sc_pending <= '0;
+      rq_wp          <= '0;
+      rq_rp          <= '0;
+      rq_count       <= '0;
+      sc_running     <= 1'b0;
+      for (int k = 0; k < NumContexts; k++) begin
+        ctx_pending[k] <= 9'd0;
+        ctx_prog[k]    <= ScNone;
+      end
+    end else begin
+      for (int k = 0; k < NumContexts; k++) begin
+        ctx_pending[k] <= ctx_pending[k] +
+                          ((rd_fire & rd_is_entry & (pd.red != RedNone) & (pd_ctx == CtxIdxW'(k)))
+                           ? 9'd4 : 9'd0) -
+                          ((sum_done & (sum_done_ctx == CtxIdxW'(k))) ? 9'd1 : 9'd0) -
+                          ((max_done & (max_done_ctx == CtxIdxW'(k))) ? 9'd1 : 9'd0);
+        if (red_clear & (pd_ctx == CtxIdxW'(k))) begin
+          ctx_reducing[k] <= 1'b1;
+          ctx_issued[k]   <= 1'b0;
+          ctx_prog[k]     <= pd.sc;
+          ctx_eps[k]      <= p_imm;
+        end
+        if (pass_last_fire & (pd.red != RedNone) & (pd_ctx == CtxIdxW'(k))) begin
+          ctx_issued[k] <= 1'b1;
+        end
+        if (done_any & (done_ctx == CtxIdxW'(k))) begin
+          ctx_reducing[k]   <= 1'b0;
+          ctx_sc_pending[k] <= (ctx_prog[k] != ScNone);
+        end
+        if (sc_rs_we & sc_running & (sc_ctx == CtxIdxW'(k))) begin
+          ctx_sc_pending[k] <= 1'b0;
+        end
+      end
+      if (rq_push) begin
+        rq_mem[rq_wp] <= done_ctx;
+        rq_wp         <= rq_wp + 1'b1;
+      end
+      if (rq_pop) begin
+        rq_rp      <= rq_rp + 1'b1;
+        sc_ctx     <= rq_mem[rq_rp];
+        sc_running <= 1'b1;
+      end
+      if (sc_rs_we & sc_running) begin
+        sc_running <= 1'b0;
+      end
+      rq_count <= rq_count + (CtxIdxW + 1)'(rq_push) - (CtxIdxW + 1)'(rq_pop);
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (sc_rs_we & sc_running) begin
+      for (int r = 0; r < 4; r++) begin
+        if (sc_rs_sel) begin
+          rs1[sc_ctx][r] <= sc_rs_val[r];
+        end else begin
+          rs0[sc_ctx][r] <= sc_rs_val[r];
+        end
+      end
+    end
+    if (rs_we0) begin
+      for (int t = 0; t < 4; t++) begin
+        rs0[sm_ctx][t] <= rs_val[t];
+      end
+    end
+    if (rs_we1) begin
+      for (int t = 0; t < 4; t++) begin
+        rs1[sm_ctx][t] <= rs_val[t];
+      end
+    end
+  end
   logic [31:0]   op_a, op_b;
   logic [31:0]   mul_p1, mul_p2, mul_p3;
   logic [1023:0] mword;
@@ -348,13 +492,18 @@ module vec_engine
       rs_we0   <= 1'b0;
       rs_we1   <= 1'b0;
       gap      <= (rd_fire & rd_is_entry) ? 2'd3 : (gap != 2'd0) ? gap - 2'd1 : 2'd0;
+      if (rq_pop) begin
+        sc_start   <= 1'b1;
+        sc_recip_n <= 1'b0;
+        sc_prog    <= ctx_prog[rq_mem[rq_rp]];
+      end
       if (pf_cnt != 3'd7) begin
         pf_cnt <= pf_cnt + 3'd1;
       end
       if (sm_rd_fire) begin
         sm_rd_v <= 1'b0;
       end
-      if (st == StIssue || st == StDrain || st == StScalarWait || st == StNext) begin
+      if (st == StIssue || st == StDrain || st == StNext) begin
         if (!pre_on && !pre_done && pf_cnt >= 3'(CbufLatency) &&
             cbuf_rdata_i[127:124] == KindPass) begin
           pre_on  <= 1'b1;
@@ -476,7 +625,11 @@ module vec_engine
               rb_q <= ins_rb;
               st   <= StSrd;
             end
-            KindRet: st <= StIdle;
+            KindRet: begin
+              if (ret_ok) begin
+                st <= StIdle;
+              end
+            end
             default: st <= StNext;
           endcase
         end
@@ -523,7 +676,7 @@ module vec_engine
           end
         end
         StTransposeStart: begin
-          if (drained) begin
+          if (drained_r) begin
             st <= StTransposeWait;
           end
         end
@@ -533,16 +686,18 @@ module vec_engine
           end
         end
         StSegSetup: begin
-          w       <= 10'd0;
-          slot_ph <= 1'b0;
-          slot_j  <= 3'd0;
-          q       <= 9'd0;
-          rb_src  <= p_x;
-          rb_src2 <= p_x2;
-          rb_dst  <= p_d[11:0];
-          rb_abuf <= p_d;
-          pt_row  <= 10'd0;
-          st      <= StIssue;
+          if (!pass_wait) begin
+            w       <= 10'd0;
+            slot_ph <= 1'b0;
+            slot_j  <= 3'd0;
+            q       <= 9'd0;
+            rb_src  <= p_x;
+            rb_src2 <= p_x2;
+            rb_dst  <= p_d[11:0];
+            rb_abuf <= p_d;
+            pt_row  <= 10'd0;
+            st      <= StIssue;
+          end
         end
         StIssue: begin
           if (rd_fire) begin
@@ -571,18 +726,6 @@ module vec_engine
         end
         StDrain: begin
           if (drained) begin
-            if (pd.sc != ScNone) begin
-              sc_start   <= 1'b1;
-              sc_recip_n <= 1'b0;
-              sc_prog    <= pd.sc;
-              st         <= StScalarWait;
-            end else begin
-              st <= StNext;
-            end
-          end
-        end
-        StScalarWait: begin
-          if (!sc_start && !sc_busy) begin
             st <= StNext;
           end
         end
@@ -629,7 +772,7 @@ module vec_engine
         end
         StMdrain: begin
           sm_addr <= op_a[11:0] + ins_imm[11:0];
-          if (drained) begin
+          if (drained && sm_ready) begin
             case (sm_op)
               SmemSld, SmemRsld: begin
                 sm_rd_v <= 1'b1;
@@ -666,20 +809,14 @@ module vec_engine
               rf_wd <= mword[sm_col*32 +: 32];
             end
             SmemRsld: begin
-              if (sm_which) begin
-                rs_we0 <= 1'b1;
-              end else begin
-                rs_we1 <= 1'b1;
-              end
               for (int t = 0; t < 4; t++) begin
-                rs_val[t] <= sm_neg ? fneg32(mword[(t*8 + 32'(sm_col[2:0]))*32 +: 32]) :
-                                      ftz32(mword[(t*8 + 32'(sm_col[2:0]))*32 +: 32]);
+                rs_pick[t] <= mword[(t*8 + 32'(sm_col[2:0]))*32 +: 32];
               end
             end
             SmemRsmov: begin
               rf_we <= (ins_rd != 5'd0);
               rf_wa <= ins_rd;
-              rf_wd <= sm_which ? c0s[sm_col[1:0]] : bs[sm_col[1:0]];
+              rf_wd <= sm_which ? rs0[sm_ctx][sm_col[1:0]] : rs1[sm_ctx][sm_col[1:0]];
             end
             SmemSmovr: begin
               if (sm_which) begin
@@ -694,6 +831,17 @@ module vec_engine
             default: begin
             end
           endcase
+          st <= (sm_op == SmemRsld) ? StMrs : StNext;
+        end
+        StMrs: begin
+          if (sm_which) begin
+            rs_we0 <= 1'b1;
+          end else begin
+            rs_we1 <= 1'b1;
+          end
+          for (int t = 0; t < 4; t++) begin
+            rs_val[t] <= sm_neg ? fneg32(rs_pick[t]) : ftz32(rs_pick[t]);
+          end
           st <= StNext;
         end
         StRnwait: begin
@@ -744,7 +892,7 @@ module vec_engine
 
   logic red_clear;
 
-  assign red_clear = (st == StSegSetup);
+  assign red_clear = (st == StSegSetup) & !pass_wait & (pd.red != RedNone);
 
   typedef struct packed {
     logic  v;
@@ -810,18 +958,21 @@ module vec_engine
   logic [255:0]  wq_pa;
   ctrl_t         wq_c;
   logic          ph0_v, ph1_v, ph2_v, ph3_v;
+  logic [1:0]    ph_code;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      ph0_v <= 1'b0;
-      ph1_v <= 1'b0;
-      ph2_v <= 1'b0;
-      ph3_v <= 1'b0;
+      ph0_v   <= 1'b0;
+      ph1_v   <= 1'b0;
+      ph2_v   <= 1'b0;
+      ph3_v   <= 1'b0;
+      ph_code <= 2'd3;
     end else begin
-      ph0_v <= ent_v0;
-      ph1_v <= ph0_v;
-      ph2_v <= ph1_v;
-      ph3_v <= ph2_v;
+      ph0_v   <= ent_v0;
+      ph1_v   <= ph0_v;
+      ph2_v   <= ph1_v;
+      ph3_v   <= ph2_v;
+      ph_code <= ent_v0 ? 2'd0 : ph0_v ? 2'd1 : ph1_v ? 2'd2 : 2'd3;
     end
   end
 
@@ -848,7 +999,7 @@ module vec_engine
     ent_xw   = wq_x;
     ent_x2w  = wq_x2;
     ent_pa   = wq_pa;
-    ent_c.ph = ph0_v ? 2'd0 : ph1_v ? 2'd1 : ph2_v ? 2'd2 : 2'd3;
+    ent_c.ph = ph_code;
   end
 
   logic [Hw-1:0] ent_x, ent_x2;
@@ -936,7 +1087,7 @@ module vec_engine
       case (e0_c.c0)
         C0X2:    c0v = x2l;
         C0Pbuf:  c0v = e0_pa[l*32 +: 32];
-        C0Rs0:   c0v = c0s[e0_c.ph];
+        C0Rs0:   c0v = rs0[e0_c.ctx[CtxIdxW-1:0]][e0_c.ph];
         C0Imm:   c0v = e0_c.imm;
         default: c0v = 32'd0;
       endcase
@@ -996,7 +1147,20 @@ module vec_engine
     end
   end
 
-  logic [31:0]      acc_sum [4][8], acc_max [4];
+  logic [31:0]      acc_max [NumContexts][4];
+  logic [31:0]      sc_acc_max [4];
+  logic [4:0]       sc_acc_addr [2];
+  logic [AccAw-1:0] acc_rd_addr [2];
+  logic [31:0]      acc_rd_data [2];
+
+  always_comb begin
+    for (int r = 0; r < 4; r++) begin
+      sc_acc_max[r] = acc_max[sc_ctx][r];
+    end
+    for (int p = 0; p < 2; p++) begin
+      acc_rd_addr[p] = {sc_ctx, sc_acc_addr[p]};
+    end
+  end
   logic [Lanes-1:0] pred_d [StageY];
   logic [Hw-1:0]    yint_d [StageY];
 
@@ -1036,16 +1200,18 @@ module vec_engine
 
   ctrl_t         c_b;
   logic [Hw-1:0] b_ext, pa_mul;
+  logic [31:0]   rs1_b;
 
   assign c_b    = cd[StageB - 1];
   assign pa_mul = expand(pbuf_a_rdata_i, c_b.pa_tile, c_b.ph, c_b.pa_slice);
+  assign rs1_b  = rs1[c_b.ctx[CtxIdxW-1:0]][c_b.ph];
 
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
       case (c_b.b)
         BX2:     b_ext[l*32 +: 32] = d1[StageB-1][l*32 +: 32];
         BPbuf:   b_ext[l*32 +: 32] = pa_mul[l*32 +: 32];
-        BRs1:    b_ext[l*32 +: 32] = bs[c_b.ph];
+        BRs1:    b_ext[l*32 +: 32] = rs1_b;
         BImm:    b_ext[l*32 +: 32] = c_b.imm;
         BLog2e:  b_ext[l*32 +: 32] = FpLog2e;
         default: b_ext[l*32 +: 32] = FpOne;
@@ -1093,8 +1259,8 @@ module vec_engine
         SelX2:   alt = d2[StageY-1][l*32 +: 32];
         SelImm:  alt = c_y.imm;
         SelNull: alt = NullEntry;
-        SelRs0:  alt = c0s[c_y.ph];
-        SelRs1:  alt = bs[c_y.ph];
+        SelRs0:  alt = rs0[c_y.ctx[CtxIdxW-1:0]][c_y.ph];
+        SelRs1:  alt = rs1[c_y.ctx[CtxIdxW-1:0]][c_y.ph];
         default: alt = 32'd0;
       endcase
       y_sel[l*32 +: 32] = (c_y.sel != SelNone && !pred_d[StageY-1][l]) ? alt : y0;
@@ -1111,15 +1277,22 @@ module vec_engine
   vec_reduce u_red (
     .clk_i,
     .rst_ni,
-    .clear_i   (red_clear),
-    .in_valid_i(c_y.valid),
-    .ph_i      (c_y.ph),
-    .red_i     (c_y.red),
-    .j_i       (c_y.j),
-    .y_i       (y_red),
-    .acc_sum_o (acc_sum),
-    .acc_max_o (acc_max),
-    .busy_o    (red_busy)
+    .clear_i       (red_clear),
+    .clear_ctx_i   (pd_ctx),
+    .in_valid_i    (c_y.valid),
+    .ctx_i         (c_y.ctx[CtxIdxW-1:0]),
+    .ph_i          (c_y.ph),
+    .red_i         (c_y.red),
+    .j_i           (c_y.j),
+    .y_i           (y_red),
+    .acc_rd_addr_i (acc_rd_addr),
+    .acc_rd_data_o (acc_rd_data),
+    .acc_max_o     (acc_max),
+    .sum_done_o    (sum_done),
+    .sum_done_ctx_o(sum_done_ctx),
+    .max_done_o    (max_done),
+    .max_done_ctx_o(max_done_ctx),
+    .busy_o        (red_busy)
   );
 
   vec_scalar u_sc (
@@ -1129,14 +1302,13 @@ module vec_engine
     .prog_i       (sc_prog),
     .recip_count_i(sc_recip_n),
     .nelem_i      (sc_nelem),
-    .eps_i        (p_imm),
-    .acc_sum_i    (acc_sum),
-    .acc_max_i    (acc_max),
-    .ext_we0_i    (rs_we0),
-    .ext_we1_i    (rs_we1),
-    .ext_val_i    (rs_val),
-    .c0s_o        (c0s),
-    .bs_o         (bs),
+    .eps_i        (ctx_eps[sc_ctx]),
+    .acc_rd_addr_o(sc_acc_addr),
+    .acc_rd_data_i(acc_rd_data),
+    .acc_max_i    (sc_acc_max),
+    .rs_we_o      (sc_rs_we),
+    .rs_sel_o     (sc_rs_sel),
+    .rs_val_o     (sc_rs_val),
     .rn_o         (rn),
     .busy_o       (sc_busy)
   );
@@ -1510,6 +1682,6 @@ module vec_engine
   logic unused_engine;
 
   assign unused_engine = ^{c_y, c_ny, c_nl, c_c1, c_b, c_pa, rn, wf_count, ef_count, ef_afull,
-                           df_count, af_count};
+                           df_count, af_count, sm_ctx_field, pd.ctx};
 
 endmodule

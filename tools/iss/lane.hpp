@@ -125,6 +125,7 @@ struct Pass {
   bool c0_pred = false;
   bool nodrain = false;
   bool x_s1 = false;
+  uint32_t ctx = 0;
 };
 
 Pass DecodePass(const Word128& instruction);

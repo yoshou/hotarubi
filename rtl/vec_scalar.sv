@@ -8,42 +8,40 @@ module vec_scalar
   input  logic        recip_count_i,
   input  logic [13:0] nelem_i,
   input  logic [31:0] eps_i,
-  input  logic [31:0] acc_sum_i [4][8],
+  output logic [4:0]  acc_rd_addr_o [2],
+  input  logic [31:0] acc_rd_data_i [2],
   input  logic [31:0] acc_max_i [4],
-  input  logic        ext_we0_i,
-  input  logic        ext_we1_i,
-  input  logic [31:0] ext_val_i [4],
-  output logic [31:0] c0s_o [4],
-  output logic [31:0] bs_o [4],
+  output logic        rs_we_o,
+  output logic        rs_sel_o,
+  output logic [31:0] rs_val_o [4],
   output logic [31:0] rn_o,
   output logic        busy_o
 );
 
   localparam int Step = 7;
 
-  logic [31:0] ma [4], mb [4], my [4], aa [4], ab [4], ay [4];
-  logic [3:0]  m_valid, a_valid;
+  logic [31:0] ma, mb, my, aa, ab, ay;
+  logic        m_valid, a_valid;
 
-  for (genvar r = 0; r < 4; r++) begin : g_u
-    fp32_mul u_m (
-      .clk_i,
-      .rst_ni,
-      .in_valid_i (1'b1),
-      .a_i        (ma[r]),
-      .b_i        (mb[r]),
-      .out_valid_o(m_valid[r]),
-      .y_o        (my[r])
-    );
-    fp32_add u_a (
-      .clk_i,
-      .rst_ni,
-      .in_valid_i (1'b1),
-      .a_i        (aa[r]),
-      .b_i        (ab[r]),
-      .out_valid_o(a_valid[r]),
-      .y_o        (ay[r])
-    );
-  end
+  fp32_mul u_m (
+    .clk_i,
+    .rst_ni,
+    .in_valid_i (1'b1),
+    .a_i        (ma),
+    .b_i        (mb),
+    .out_valid_o(m_valid),
+    .y_o        (my)
+  );
+
+  fp32_add u_a (
+    .clk_i,
+    .rst_ni,
+    .in_valid_i (1'b1),
+    .a_i        (aa),
+    .b_i        (ab),
+    .out_valid_o(a_valid),
+    .y_o        (ay)
+  );
 
   function automatic logic [31:0] fneg(input logic [31:0] f);
     return (f[30:0] == 31'd0) ? 32'd0 : {~f[31], f[30:0]};
@@ -83,6 +81,7 @@ module vec_scalar
   ph_e        ph;
   logic [5:0] step;
   logic [2:0] wait_cnt;
+  logic [1:0] tok;
   sc_e        cur;
   logic       cur_rn;
   logic [2:0] ns;
@@ -102,20 +101,23 @@ module vec_scalar
 
   logic [1:0]  opk;
   dst_e        dst;
-  logic [31:0] oa [4], ob [4], imm [4];
+  logic [31:0] oa, ob, imm [4];
   logic        last;
 
   function automatic logic tree_step(input logic [5:0] s);
     return (s <= 6'd6);
   endfunction
 
+  assign acc_rd_addr_o[0] = {tok, step[1:0], 1'b0};
+  assign acc_rd_addr_o[1] = {tok, step[1:0], 1'b1};
+
   always_comb begin
     opk  = 2'd0;
     dst  = DstT0;
     last = 1'b0;
+    oa   = 32'd0;
+    ob   = 32'd0;
     for (int r = 0; r < 4; r++) begin
-      oa[r]  = 32'd0;
-      ob[r]  = 32'd0;
       imm[r] = 32'd0;
     end
     if (cur_rn) begin
@@ -130,26 +132,20 @@ module vec_scalar
           3'd0: begin
             opk = 2'd2;
             dst = DstT1;
-            for (int r = 0; r < 4; r++) begin
-              oa[r] = av[r];
-              ob[r] = yv[r];
-            end
+            oa  = av[tok];
+            ob  = yv[tok];
           end
           3'd1: begin
             opk = 2'd1;
             dst = DstT1;
-            for (int r = 0; r < 4; r++) begin
-              oa[r] = FpTwo;
-              ob[r] = fneg(t1[r]);
-            end
+            oa  = FpTwo;
+            ob  = fneg(t1[tok]);
           end
           default: begin
             opk = 2'd2;
             dst = DstY;
-            for (int r = 0; r < 4; r++) begin
-              oa[r] = yv[r];
-              ob[r] = t1[r];
-            end
+            oa  = yv[tok];
+            ob  = t1[tok];
           end
         endcase
       end else begin
@@ -179,52 +175,38 @@ module vec_scalar
       case (step)
         6'd0: begin
           dst = DstT0;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = acc_sum_i[r][0];
-            ob[r] = acc_sum_i[r][1];
-          end
+          oa  = acc_rd_data_i[0];
+          ob  = acc_rd_data_i[1];
         end
         6'd1: begin
           dst = DstT1;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = acc_sum_i[r][2];
-            ob[r] = acc_sum_i[r][3];
-          end
+          oa  = acc_rd_data_i[0];
+          ob  = acc_rd_data_i[1];
         end
         6'd2: begin
           dst = DstT2;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = acc_sum_i[r][4];
-            ob[r] = acc_sum_i[r][5];
-          end
+          oa  = acc_rd_data_i[0];
+          ob  = acc_rd_data_i[1];
         end
         6'd3: begin
           dst = DstT3;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = acc_sum_i[r][6];
-            ob[r] = acc_sum_i[r][7];
-          end
+          oa  = acc_rd_data_i[0];
+          ob  = acc_rd_data_i[1];
         end
         6'd4: begin
           dst = DstT0;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = t0[r];
-            ob[r] = t1[r];
-          end
+          oa  = t0[tok];
+          ob  = t1[tok];
         end
         6'd5: begin
           dst = DstT1;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = t2[r];
-            ob[r] = t3[r];
-          end
+          oa  = t2[tok];
+          ob  = t3[tok];
         end
         default: begin
           dst = DstT0;
-          for (int r = 0; r < 4; r++) begin
-            oa[r] = t0[r];
-            ob[r] = t1[r];
-          end
+          oa  = t0[tok];
+          ob  = t1[tok];
         end
       endcase
     end else begin
@@ -233,10 +215,8 @@ module vec_scalar
           if (step == 6'd7) begin
             opk = 2'd2;
             dst = DstT0;
-            for (int r = 0; r < 4; r++) begin
-              oa[r] = t0[r];
-              ob[r] = rn_o;
-            end
+            oa  = t0[tok];
+            ob  = rn_o;
           end else begin
             opk = 2'd3;
             dst = DstC0s;
@@ -258,17 +238,13 @@ module vec_scalar
           if (step == 6'd7) begin
             opk = 2'd2;
             dst = DstT0;
-            for (int r = 0; r < 4; r++) begin
-              oa[r] = t0[r];
-              ob[r] = rn_o;
-            end
+            oa  = t0[tok];
+            ob  = rn_o;
           end else if (step == 6'd8) begin
             opk = 2'd1;
             dst = DstT0;
-            for (int r = 0; r < 4; r++) begin
-              oa[r] = t0[r];
-              ob[r] = eps_i;
-            end
+            oa  = t0[tok];
+            ob  = eps_i;
           end else if (step == 6'd9) begin
             opk = 2'd3;
             dst = DstY;
@@ -280,42 +256,32 @@ module vec_scalar
               3'd0: begin
                 opk = 2'd2;
                 dst = DstT1;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = t0[r];
-                  ob[r] = yv[r];
-                end
+                oa  = t0[tok];
+                ob  = yv[tok];
               end
               3'd1: begin
                 opk = 2'd2;
                 dst = DstT1;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = t1[r];
-                  ob[r] = yv[r];
-                end
+                oa  = t1[tok];
+                ob  = yv[tok];
               end
               3'd2: begin
                 opk = 2'd2;
                 dst = DstT1;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = t1[r];
-                  ob[r] = FpHalf;
-                end
+                oa  = t1[tok];
+                ob  = FpHalf;
               end
               3'd3: begin
                 opk = 2'd1;
                 dst = DstT1;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = FpOnePointFive;
-                  ob[r] = fneg(t1[r]);
-                end
+                oa  = FpOnePointFive;
+                ob  = fneg(t1[tok]);
               end
               default: begin
                 opk = 2'd2;
                 dst = DstY;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = yv[r];
-                  ob[r] = t1[r];
-                end
+                oa  = yv[tok];
+                ob  = t1[tok];
               end
             endcase
           end else begin
@@ -339,26 +305,20 @@ module vec_scalar
               3'd0: begin
                 opk = 2'd2;
                 dst = DstT1;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = t0[r];
-                  ob[r] = yv[r];
-                end
+                oa  = t0[tok];
+                ob  = yv[tok];
               end
               3'd1: begin
                 opk = 2'd1;
                 dst = DstT1;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = FpTwo;
-                  ob[r] = fneg(t1[r]);
-                end
+                oa  = FpTwo;
+                ob  = fneg(t1[tok]);
               end
               default: begin
                 opk = 2'd2;
                 dst = DstY;
-                for (int r = 0; r < 4; r++) begin
-                  oa[r] = yv[r];
-                  ob[r] = t1[r];
-                end
+                oa  = yv[tok];
+                ob  = t1[tok];
               end
             endcase
           end else begin
@@ -374,64 +334,48 @@ module vec_scalar
     end
   end
 
-  logic [31:0] oa_r [4], ob_r [4], imm_r [4];
+  logic [31:0] imm_r [4];
   logic [1:0]  opk_r;
   dst_e        dst_r;
   logic        last_r;
 
   always_ff @(posedge clk_i) begin
     if (ph == PhIssue) begin
-      for (int r = 0; r < 4; r++) begin
-        oa_r[r]  <= oa[r];
-        ob_r[r]  <= ob[r];
-        imm_r[r] <= imm[r];
+      ma <= oa;
+      mb <= ob;
+      aa <= oa;
+      ab <= ob;
+      if (tok == 2'd0) begin
+        for (int r = 0; r < 4; r++) begin
+          imm_r[r] <= imm[r];
+        end
+        opk_r  <= opk;
+        dst_r  <= dst;
+        last_r <= last;
       end
-      opk_r  <= opk;
-      dst_r  <= dst;
-      last_r <= last;
     end
   end
 
-  always_comb begin
-    for (int r = 0; r < 4; r++) begin
-      ma[r] = oa_r[r];
-      mb[r] = ob_r[r];
-      aa[r] = oa_r[r];
-      ab[r] = ob_r[r];
-    end
-  end
+  logic [31:0] res;
+  logic        step_done, write_rs;
 
-  logic [31:0] res [4];
-
-  always_comb begin
-    for (int r = 0; r < 4; r++) begin
-      res[r] = (opk_r == 2'd1) ? ay[r] : (opk_r == 2'd2) ? my[r] : imm_r[r];
-    end
-  end
-
-  assign busy_o = (ph != PhIdle);
+  assign res       = (opk_r == 2'd1) ? ay : my;
+  assign step_done = (ph == PhWrite) && ((opk_r == 2'd3) || (tok == 2'd3));
+  assign write_rs  = (dst_r == DstC0s) || (dst_r == DstBs);
+  assign busy_o    = (ph != PhIdle);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       ph   <= PhIdle;
       step <= 6'd0;
+      tok  <= 2'd0;
     end else begin
       case (ph)
         PhIdle: begin
-          if (!start_i) begin
-            if (ext_we0_i) begin
-              for (int r = 0; r < 4; r++) begin
-                c0s_o[r] <= ext_val_i[r];
-              end
-            end
-            if (ext_we1_i) begin
-              for (int r = 0; r < 4; r++) begin
-                bs_o[r] <= ext_val_i[r];
-              end
-            end
-          end else begin
+          if (start_i) begin
             ph     <= PhIssue;
             step   <= 6'd0;
+            tok    <= 2'd0;
             cur    <= prog_i;
             cur_rn <= recip_count_i;
             ns     <= 3'd0;
@@ -447,9 +391,12 @@ module vec_scalar
         PhIssue: begin
           if (opk == 2'd3) begin
             ph <= PhWrite;
-          end else begin
+          end else if (tok == 2'd3) begin
+            tok      <= 2'd0;
             ph       <= PhWait;
-            wait_cnt <= 3'(Step - 1);
+            wait_cnt <= 3'(Step - 5);
+          end else begin
+            tok <= tok + 2'd1;
           end
         end
         PhWait: begin
@@ -460,27 +407,67 @@ module vec_scalar
           end
         end
         PhWrite: begin
-          for (int r = 0; r < 4; r++) begin
+          if (opk_r == 2'd3) begin
+            for (int r = 0; r < 4; r++) begin
+              case (dst_r)
+                DstT0:   t0[r] <= imm_r[r];
+                DstT1:   t1[r] <= imm_r[r];
+                DstT2:   t2[r] <= imm_r[r];
+                DstT3:   t3[r] <= imm_r[r];
+                DstY:    yv[r] <= imm_r[r];
+                DstRn:   rn_o  <= imm_r[r];
+                default: begin
+                end
+              endcase
+            end
+          end else begin
             case (dst_r)
-              DstT0:   t0[r]    <= res[r];
-              DstT1:   t1[r]    <= res[r];
-              DstT2:   t2[r]    <= res[r];
-              DstT3:   t3[r]    <= res[r];
-              DstY:    yv[r]    <= res[r];
-              DstC0s:  c0s_o[r] <= res[r];
-              DstBs:   bs_o[r]  <= res[r];
-              default: rn_o     <= res[r];
+              DstT0:   t0[tok] <= res;
+              DstT1:   t1[tok] <= res;
+              DstT2:   t2[tok] <= res;
+              DstT3:   t3[tok] <= res;
+              DstY:    yv[tok] <= res;
+              DstRn:   rn_o    <= res;
+              default: begin
+              end
             endcase
           end
-          step <= step + 6'd1;
-          if (step + 6'd1 == nstart) begin
-            ns <= 3'd0;
+          if (step_done) begin
+            tok  <= 2'd0;
+            step <= step + 6'd1;
+            if (step + 6'd1 == nstart) begin
+              ns <= 3'd0;
+            end else begin
+              ns <= (ns == nlen - 3'd1) ? 3'd0 : ns + 3'd1;
+            end
+            ph <= last_r ? PhIdle : PhIssue;
           end else begin
-            ns <= (ns == nlen - 3'd1) ? 3'd0 : ns + 3'd1;
+            tok <= tok + 2'd1;
           end
-          ph <= last_r ? PhIdle : PhIssue;
         end
+        default: ph <= PhIdle;
       endcase
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      rs_we_o <= 1'b0;
+    end else begin
+      rs_we_o <= step_done && write_rs;
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    rs_sel_o <= (dst_r == DstBs);
+    if (ph == PhWrite && write_rs) begin
+      if (opk_r == 2'd3) begin
+        for (int r = 0; r < 4; r++) begin
+          rs_val_o[r] <= imm_r[r];
+        end
+      end else begin
+        rs_val_o[tok] <= res;
+      end
     end
   end
 

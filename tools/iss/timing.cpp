@@ -107,27 +107,12 @@ uint64_t CostModel::IssueCycles(const VecActivity& activity) const {
 uint64_t CostModel::DrainCycles(const VecActivity& activity) const {
   const TimingParameters& p = parameters_;
   return (uint64_t{activity.drains} * p.vec_drain_cycles) +
-         (uint64_t{activity.drains_reduction} * p.vec_drain_reduction_cycles) +
          (uint64_t{activity.drains_quantized} * p.vec_drain_quantized_cycles);
 }
 
 uint64_t CostModel::ScalarCycles(const VecActivity& activity) const {
-  const TimingParameters& p = parameters_;
-  uint64_t arithmetic = 0;
-  uint64_t immediate = 0;
-  uint64_t starts = 0;
-  for (size_t i = 0; i < kRowScalarKinds; ++i) {
-    const uint64_t count = activity.scalars.at(i);
-    arithmetic += count * kScalarPrograms.at(i).arithmetic;
-    immediate += count * kScalarPrograms.at(i).immediate;
-    starts += count;
-  }
-  arithmetic += uint64_t{activity.rn} * kCountReciprocalProgram.arithmetic;
-  immediate += uint64_t{activity.rn} * kCountReciprocalProgram.immediate;
-  starts += activity.rn;
-  return (arithmetic * p.vec_scalar_arithmetic_cycles) +
-         (immediate * p.vec_scalar_immediate_cycles) +
-         (starts * p.vec_scalar_start_cycles);
+  return (activity.context_stall_words * parameters_.vec_word_cycles) +
+         (uint64_t{activity.rn} * ScalarProgramCycles(kCountReciprocalProgram));
 }
 
 Cost CostModel::Vec(const VecActivity& activity) const {
@@ -233,11 +218,7 @@ std::expected<TimingParameters, std::string> ParseTiming(
        {"vec_word_cycles", &p.vec_word_cycles},
        {"vec_issue_tail_cycles", &p.vec_issue_tail_cycles},
        {"vec_drain_cycles", &p.vec_drain_cycles},
-       {"vec_drain_reduction_cycles", &p.vec_drain_reduction_cycles},
        {"vec_drain_quantized_cycles", &p.vec_drain_quantized_cycles},
-       {"vec_scalar_arithmetic_cycles", &p.vec_scalar_arithmetic_cycles},
-       {"vec_scalar_immediate_cycles", &p.vec_scalar_immediate_cycles},
-       {"vec_scalar_start_cycles", &p.vec_scalar_start_cycles},
        {"vec_salu_cycles", &p.vec_salu_cycles},
        {"vec_smem_cycles", &p.vec_smem_cycles},
        {"vec_branch_cycles", &p.vec_branch_cycles},

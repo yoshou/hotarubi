@@ -80,10 +80,8 @@ uint32_t PbufAddress(PbufAccess access, uint32_t base, uint32_t tile_row,
   return 0;
 }
 
-bool Overlaps(const Pass& pass, WriteTarget target, const Word128& next) {
-  if (pass.nodrain || pass.sc != RowScalar::kNone ||
-      pass.red != Reduction::kNone || target == WriteTarget::kAbuf ||
-      next.Field(124, 4) != kKindPass) {
+bool Overlaps(const Pass& pass, const Word128& next) {
+  if (pass.nodrain || next.Field(124, 4) != kKindPass) {
     return false;
   }
   const bool next_pbuf_pre_adder =
@@ -167,6 +165,8 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
   activity_ = {};
   pending_.reset();
   slot_ = 0;
+  ready_slot_.fill(0);
+  scalar_free_slot_ = 0;
   Initialize(command);
   uint32_t pc = command.op == kVecRun ? command.aux & kPcMask
                                       : kRomStart.at(command.op & 0xFU);
@@ -286,8 +286,8 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   Require(quads != 0 && words != 0,
           std::format("a PASS has {} quads and {} words", quads, words));
   CheckPbufTiming(pass);
-  Require(!undrained_reduction_ || pass.red == Reduction::kNone,
-          "a PASS reduces after a nodrain PASS that reduces");
+  Require(pass.ctx < kContexts,
+          std::format("a PASS uses row context {}", pass.ctx));
   Require(!undrained_pbuf_at_mul_ || pass.c0 != C0Source::kPbuf,
           "a PASS adds PBUF after a nodrain PASS that reads PBUF at the "
           "multiplier");
@@ -302,6 +302,12 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   state.imm2 = Register(pass.rimm2);
   ++activity_.passes;
   activity_.words += uint64_t{quads} * words;
+  const bool reads_rows = pass.c0 == C0Source::kRs0 ||
+                          pass.b == BSource::kRs1 || pass.sel == Select::kRs0 ||
+                          pass.sel == Select::kRs1;
+  if (reads_rows || pass.red != Reduction::kNone) {
+    AwaitContext(pass.ctx);
+  }
   for (uint32_t q = 0; q < quads; ++q) {
     for (uint32_t w = 0; w < words; ++w) {
       RunWord(state, w, memories);
@@ -315,33 +321,48 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   }
   Require(state.next_quarter == 0,
           "a PASS ends inside a block of 4 quantized words");
+  if (pass.red != Reduction::kNone) {
+    const uint64_t complete = slot_ + kReductionLatencyWords;
+    if (pass.sc != RowScalar::kNone) {
+      ++activity_.scalars.at(static_cast<size_t>(pass.sc));
+      const uint64_t start = std::max(complete, scalar_free_slot_);
+      const uint32_t cycles =
+          ScalarProgramCycles(kScalarPrograms.at(static_cast<size_t>(pass.sc)));
+      scalar_free_slot_ = start + ((cycles + 3) / 4);
+      ready_slot_.at(pass.ctx) = scalar_free_slot_;
+      ApplyRowScalar(pass.sc, state.reductions, state.imm, rn_,
+                     rows_.at(pass.ctx));
+    } else {
+      ready_slot_.at(pass.ctx) = complete;
+    }
+  }
   if (pass.nodrain) {
     in_flight_ |= state.written;
     undrained_ = true;
-    undrained_reduction_ = undrained_reduction_ || pass.red != Reduction::kNone;
     undrained_pbuf_at_mul_ = undrained_pbuf_at_mul_ || pass.pa_at_mul;
     return;
   }
-  WriteTarget target = pass.wr;
-  if (target == WriteTarget::kFinal) {
-    target = quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
-  }
-  if (Overlaps(pass, target, next)) {
+  if (Overlaps(pass, next)) {
     ++activity_.overlaps;
     return;
   }
   ++activity_.drains;
-  if (pass.red != Reduction::kNone) {
-    ++activity_.drains_reduction;
+  WriteTarget target = pass.wr;
+  if (target == WriteTarget::kFinal) {
+    target = quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
   }
   if (target == WriteTarget::kAbuf) {
     ++activity_.drains_quantized;
   }
   Drain();
-  if (pass.sc != RowScalar::kNone) {
-    ++activity_.scalars.at(static_cast<size_t>(pass.sc));
+}
+
+void VecEngine::AwaitContext(uint32_t ctx) {
+  const uint64_t ready = ready_slot_.at(ctx);
+  if (ready > slot_) {
+    activity_.context_stall_words += ready - slot_;
+    slot_ = ready;
   }
-  ApplyRowScalar(pass.sc, state.reductions, state.imm, rn_, rows_);
 }
 
 void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
@@ -368,7 +389,7 @@ void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
                                          .w = w,
                                          .imm = state.imm,
                                          .imm2 = state.imm2},
-                                        rows_, memories.tbuf);
+                                        rows_.at(pass.ctx), memories.tbuf);
   for (uint32_t t = 0; t < kTokens; ++t) {
     if (pass.red == Reduction::kSum) {
       uint32_t& sum = state.reductions.sum.at(t).at(state.entry);
@@ -446,10 +467,16 @@ void VecEngine::RunSmem(const Word128& instruction, Memories& memories) {
   const uint32_t column = instruction.Field(105, 1) != 0
                               ? instruction.Field(100, 5)
                               : Register(instruction.Field(106, 5)) & 31U;
+  const uint32_t ctx = instruction.Field(96, 2);
+  Require(ctx < kContexts, std::format("an SMEM uses row context {}", ctx));
   std::array<uint32_t, kTokens>& scalars =
-      instruction.Field(99, 1) != 0 ? rows_.rs0 : rows_.rs1;
+      instruction.Field(99, 1) != 0 ? rows_.at(ctx).rs0 : rows_.at(ctx).rs1;
   const uint32_t word_address = (a + instruction.Field(0, 32)) & kFbufMask;
   const uint32_t smem_op = instruction.Field(121, 3);
+  if (smem_op == kSmemRowLoad || smem_op == kSmemRowMove ||
+      smem_op == kSmemMoveRow) {
+    AwaitContext(ctx);
+  }
   if (smem_op == kSmemLoad || smem_op == kSmemRowLoad) {
     memories.log.Read(Mem::kFbuf, word_address);
   }
@@ -502,7 +529,6 @@ void VecEngine::Drain() {
   in_flight_.reset();
   pending_.reset();
   undrained_ = false;
-  undrained_reduction_ = false;
   undrained_pbuf_at_mul_ = false;
 }
 

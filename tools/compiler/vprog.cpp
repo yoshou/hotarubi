@@ -79,6 +79,7 @@ Instruction EncodePass(const Pass& pass) {
   Field(instruction, 27, 1, U(pass.c0_pred));
   Field(instruction, 26, 1, U(pass.nodrain));
   Field(instruction, 25, 1, U(pass.x_s1));
+  Field(instruction, 24, 2, pass.ctx);
   return instruction;
 }
 
@@ -110,6 +111,7 @@ Instruction EncodeSmem(Smem op, const SmemArgs& args) {
   }
   Field(instruction, 99, 1, U(args.which));
   Field(instruction, 98, 1, U(args.neg));
+  Field(instruction, 97, 2, args.ctx);
   Field(instruction, 31, 32, args.imm);
   return instruction;
 }
