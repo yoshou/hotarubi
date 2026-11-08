@@ -748,13 +748,11 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
          .sel = vp::Sel::kZero});
   };
   select(26, 13, 11, 16);
-  k.P({.rx = 26, .rd = 12, .rimm = 17, .c0 = vp::C0::kImm});
-  k.P({.rx = 12, .rd = 12, .rimm = 17, .b = vp::B::kImm});
+  k.P({.rx = 26, .rd = 12, .rimm = 17, .c0 = vp::C0::kImm, .b = vp::B::kImm});
   select(12, 13, 12, 31);
   k.P({.rx = 11, .rx2 = 12, .rd = 11, .c0 = vp::C0::kX2});
   select(27, 25, 12, 16);
-  k.P({.rx = 27, .rd = 30, .rimm = 17, .c0 = vp::C0::kImm});
-  k.P({.rx = 30, .rd = 30, .rimm = 17, .b = vp::B::kImm});
+  k.P({.rx = 27, .rd = 30, .rimm = 17, .c0 = vp::C0::kImm, .b = vp::B::kImm});
   select(30, 25, 30, 31);
   k.P({.rx = 12, .rx2 = 30, .rd = 12, .c0 = vp::C0::kX2});
   k.P({.rx = 11, .rx2 = 12, .rd = 30, .b = vp::B::kX2});
@@ -947,43 +945,6 @@ void MapKeypointCorner(vp::Assembler& a, Keypoint& k, uint32_t n) {
        .sel = vp::Sel::kZero});
 }
 
-void MapKeypointPack(vp::Assembler& a, Keypoint& k, uint32_t tq) {
-  for (uint32_t i = 0; i < 8; ++i) {
-    k.Pl(11, std::format("O{}", i));
-    a.Alu(vp::Salu::kAdd, 12, 3, 0, i * tq);
-    for (uint32_t n = 0; n < 4; ++n) {
-      for (uint32_t typ = 0; typ < 2; ++typ) {
-        k.Pl(13, std::format("{}{}", typ == 0 ? 'A' : 'B', n));
-        a.LoadImmediate(15, (2 * n) + typ);
-        const bool last = n == 3 && typ == 1;
-        if (n == 0 && typ == 0) {
-          k.P({.rx = 13,
-               .rd = 11,
-               .rimm2 = 15,
-               .px = vp::Perm::kBcast,
-               .pcol = i,
-               .cmp = vp::Cmp::kEq,
-               .cmp_src = vp::CmpSrc::kLane,
-               .sel = vp::Sel::kZero});
-        } else {
-          k.P({.rx = 13,
-               .rx2 = 11,
-               .rd = last ? 12U : 11U,
-               .rimm2 = 15,
-               .c0 = vp::C0::kX2,
-               .px = vp::Perm::kBcast,
-               .pcol = i,
-               .cmp = vp::Cmp::kEq,
-               .cmp_src = vp::CmpSrc::kLane,
-               .sel = vp::Sel::kX2,
-               .ialu = vp::Ialu::kOr,
-               .dst_s1 = last});
-        }
-      }
-    }
-  }
-}
-
 }  // namespace
 
 vp::Assembler MapKeypointLevel(uint32_t tq) {
@@ -1011,17 +972,17 @@ vp::Assembler MapKeypointLevel(uint32_t tq) {
   k.P({.rx = 12, .rx2 = 24, .rd = 31, .c1 = vp::C1::kX2, .neg_c1 = true});
   k.Pl(11, "LH1");
   k.Pl(12, "LW1");
-  k.P({.rx = 13, .rd = 11, .rimm = 30, .c0 = vp::C0::kImm});
-  k.P({.rx = 11, .rd = 11, .rimm = 30, .b = vp::B::kImm});
-  k.P({.rx = 31, .rd = 12, .rimm = 30, .c0 = vp::C0::kImm});
-  k.P({.rx = 12, .rd = 12, .rimm = 30, .b = vp::B::kImm});
+  k.P({.rx = 13, .rd = 11, .rimm = 30, .c0 = vp::C0::kImm, .b = vp::B::kImm});
+  k.P({.rx = 31, .rd = 12, .rimm = 30, .c0 = vp::C0::kImm, .b = vp::B::kImm});
   k.Ld(16, kConstOne);
   k.Ld(17, kConstI2f0);
   k.Ld(30, kConstCf);
   for (uint32_t n = 0; n < 4; ++n) {
     MapKeypointCorner(a, k, n);
   }
-  MapKeypointPack(a, k, tq);
+  k.Pl(11, "A0");
+  a.LoadImmediate(12, 1);
+  a.Transpose8(11, 3, 4, 5, 12, 12, 4, vp::TransposePack::kZip4);
   a.Ret();
   return a;
 }

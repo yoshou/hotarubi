@@ -15,6 +15,7 @@ endfunction()
 hotarubi_add_rtl_model(rtl_fp32_add fp32_add)
 hotarubi_add_rtl_model(rtl_fp32_mul fp32_mul)
 hotarubi_add_rtl_model(rtl_npu_top npu_top)
+hotarubi_add_rtl_model(rtl_vec_transpose vec_transpose)
 
 add_library(tb_fp32_ref STATIC fp32_ref.cpp)
 target_include_directories(tb_fp32_ref PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -37,6 +38,9 @@ foreach(test vec_test vec_program_test)
   hotarubi_add_test(${test} ${test}.cpp)
   target_link_libraries(${test} PRIVATE tb_npu_bench tb_vec_ref)
 endforeach()
+
+hotarubi_add_test(vec_transpose_test vec_transpose_test.cpp)
+target_link_libraries(vec_transpose_test PRIVATE rtl_vec_transpose)
 
 add_library(tb_kernel_bench STATIC kernel_bench.cpp)
 target_link_libraries(tb_kernel_bench PUBLIC tb_npu_bench hotarubi_trace_lib)

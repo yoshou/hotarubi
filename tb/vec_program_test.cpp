@@ -1066,5 +1066,149 @@ TEST(VecProgramTest, FractionTable) {
   }
 }
 
+void CheckTransposeProgram(uint32_t rows, bool zip4) {
+  std::mt19937 rng(913 + rows);
+  std::vector<FbufWord> input(size_t{8} * rows);
+  for (auto& word : input) {
+    for (auto& value : word) {
+      value = static_cast<uint32_t>(rng());
+    }
+  }
+  Instruction transpose;
+  transpose.Set(124, 4, 7)
+      .Set(119, 5, kRegSrc)
+      .Set(114, 5, 11)
+      .Set(109, 5, kRegDst)
+      .Set(104, 5, kRegRowsQ)
+      .Set(99, 5, 11)
+      .Set(94, 5, kRegN8)
+      .Set(89, 5, kRegRowsQ)
+      .Set(88, 1, zip4 ? 1 : 0);
+  const auto output =
+      RunProgram({.program = {SaluImm(kSaluMov, 11, 0, 1), transpose, Ret()},
+                  .args = {.src = 0, .dst = 2048, .rows_q = rows, .n8 = 8},
+                  .fbuf = {{0, input}},
+                  .pbuf = {},
+                  .out_base = 2048,
+                  .out_words = 8 * rows},
+                 913 + rows);
+  ASSERT_EQ(output.size(), 8 * rows);
+  for (uint32_t sample = 0; sample < 8; ++sample) {
+    for (uint32_t q = 0; q < rows; ++q) {
+      for (uint32_t t = 0; t < 4; ++t) {
+        for (uint32_t field = 0; field < 8; ++field) {
+          const uint32_t row = zip4 ? (field / 2) + (4 * (field % 2)) : field;
+          EXPECT_EQ(output[(sample * rows) + q][(t * 8) + field],
+                    input[(q * 8) + row][(t * 8) + sample]);
+        }
+      }
+    }
+  }
+}
+
+TEST(VecProgramTest, Transpose8PreservesEveryBitInBothPackModes) {
+  for (const bool zip4 : {false, true}) {
+    for (const uint32_t rows : {1U, 3U, 32U}) {
+      CheckTransposeProgram(rows, zip4);
+    }
+  }
+}
+
+void CheckStridedTransposeProgram(bool zip4) {
+  std::mt19937 rng(947);
+  std::vector<FbufWord> input(377);
+  for (auto& word : input) {
+    for (auto& value : word) {
+      value = static_cast<uint32_t>(rng());
+    }
+  }
+  std::vector<FbufWord> expected(393);
+  for (auto& word : expected) {
+    word.fill(0xDADADADAU);
+  }
+  const auto initial = expected;
+  for (uint32_t q = 0; q < 2; ++q) {
+    for (uint32_t row = 0; row < 8; ++row) {
+      for (uint32_t t = 0; t < 4; ++t) {
+        for (uint32_t column = 0; column < 8; ++column) {
+          const uint32_t source_row =
+              zip4 ? (column / 2) + (4 * (column % 2)) : column;
+          expected.at((q * 259) + (row * 19)).at((t * 8) + column) =
+              input.at((q * 257) + (source_row * 17)).at((t * 8) + row);
+        }
+      }
+    }
+  }
+  Instruction transpose;
+  transpose.Set(124, 4, 7)
+      .Set(119, 5, 1)
+      .Set(114, 5, 11)
+      .Set(109, 5, 3)
+      .Set(104, 5, 4)
+      .Set(99, 5, 12)
+      .Set(94, 5, 14)
+      .Set(89, 5, 13)
+      .Set(88, 1, zip4 ? 1 : 0);
+  const auto output = RunProgram(
+      {.program = {SaluImm(kSaluMov, 11, 0, 17), SaluImm(kSaluMov, 12, 0, 259),
+                   SaluImm(kSaluMov, 13, 0, 19), SaluImm(kSaluMov, 14, 0, 257),
+                   transpose, Ret()},
+       .args = {.src = 0, .dst = 2048, .rows_q = 2},
+       .fbuf = {{0, input}, {2048, initial}},
+       .pbuf = {},
+       .out_base = 2048,
+       .out_words = 393},
+      947);
+  EXPECT_EQ(output, expected);
+}
+
+TEST(VecProgramTest, Transpose8UsesIndependentTwelveBitStrides) {
+  CheckStridedTransposeProgram(false);
+  CheckStridedTransposeProgram(true);
+}
+
+TEST(VecProgramTest, Transpose8ChangesPackModeBetweenConsecutiveInstructions) {
+  std::mt19937 generator(967);
+  std::vector<FbufWord> input(24);
+  for (auto& word : input) {
+    for (auto& value : word) {
+      value = static_cast<uint32_t>(generator());
+    }
+  }
+  auto expected = input;
+  for (uint32_t word = 0; word < 24; ++word) {
+    for (uint32_t t = 0; t < 4; ++t) {
+      for (uint32_t column = 0; column < 8; ++column) {
+        expected[word][(t * 8) + column] =
+            input[word][(t * 8) + (column / 2) + (4 * (column % 2))];
+      }
+    }
+  }
+  const auto transpose = [](uint32_t src, uint32_t dst, bool zip4) {
+    Instruction instruction;
+    instruction.Set(124, 4, 7)
+        .Set(119, 5, src)
+        .Set(114, 5, 11)
+        .Set(109, 5, dst)
+        .Set(104, 5, 4)
+        .Set(99, 5, 12)
+        .Set(94, 5, 12)
+        .Set(89, 5, 11)
+        .Set(88, 1, zip4 ? 1 : 0);
+    return instruction;
+  };
+  const auto output = RunProgram(
+      {.program = {SaluImm(kSaluMov, 11, 0, 1), SaluImm(kSaluMov, 12, 0, 8),
+                   SaluImm(kSaluMov, 13, 0, 1024), transpose(1, 13, false),
+                   transpose(13, 3, true), Ret()},
+       .args = {.src = 0, .dst = 2048, .rows_q = 3},
+       .fbuf = {{0, input}},
+       .pbuf = {},
+       .out_base = 2048,
+       .out_words = 24},
+      967);
+  EXPECT_EQ(output, expected);
+}
+
 }  // namespace
 }  // namespace hotarubi::tb

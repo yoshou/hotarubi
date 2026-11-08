@@ -186,6 +186,26 @@ Assembler& Assembler::Nop() {
   return *this;
 }
 
+Assembler& Assembler::Transpose8(uint32_t src, uint32_t dst, uint32_t tiles,
+                                 uint32_t src_tile_stride,
+                                 uint32_t src_word_stride,
+                                 uint32_t dst_tile_stride,
+                                 uint32_t dst_word_stride, TransposePack pack) {
+  Instruction word;
+  word.Set(124, 4, 7)
+      .Set(119, 5, src)
+      .Set(114, 5, src_word_stride)
+      .Set(109, 5, dst)
+      .Set(104, 5, tiles)
+      .Set(99, 5, dst_tile_stride)
+      .Set(94, 5, src_tile_stride)
+      .Set(89, 5, dst_word_stride)
+      .Set(88, 1, static_cast<uint32_t>(pack));
+  items_.emplace_back(word);
+  ++size_;
+  return *this;
+}
+
 Assembler& Assembler::StoreScalar(uint32_t rw, uint32_t rlane, uint32_t rcol,
                                   uint32_t rval, uint32_t r_one) {
   return Emit({.rx = rw,

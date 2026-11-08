@@ -96,7 +96,11 @@ uint64_t CostModel::IssueCycles(const VecActivity& activity) const {
   const uint64_t words = activity.words * parameters_.vec_word_cycles;
   const uint64_t tail =
       uint64_t{activity.passes} * parameters_.vec_issue_tail_cycles;
-  return words > tail ? words - tail : 0;
+  const uint64_t transposes =
+      (uint64_t{activity.transposes} * parameters_.vec_transpose_cycles) +
+      (uint64_t{activity.transpose_tiles} *
+       parameters_.vec_transpose_tile_cycles);
+  return (words > tail ? words - tail : 0) + transposes;
 }
 
 uint64_t CostModel::DrainCycles(const VecActivity& activity) const {
@@ -213,7 +217,7 @@ DdrExtent EstimateDdrExtent(const DmaCommand& command) {
 std::expected<TimingParameters, std::string> ParseTiming(
     std::string_view assignments, TimingParameters base) {
   TimingParameters p = base;
-  const std::array<std::pair<std::string_view, uint32_t*>, 22> fields = {
+  const std::array<std::pair<std::string_view, uint32_t*>, 24> fields = {
       {{"start_cycles", &p.start_cycles},
        {"gemm_fixed_cycles", &p.gemm_fixed_cycles},
        {"dma_fixed_cycles", &p.dma_fixed_cycles},
@@ -235,7 +239,9 @@ std::expected<TimingParameters, std::string> ParseTiming(
        {"vec_scalar_start_cycles", &p.vec_scalar_start_cycles},
        {"vec_salu_cycles", &p.vec_salu_cycles},
        {"vec_smem_cycles", &p.vec_smem_cycles},
-       {"vec_branch_cycles", &p.vec_branch_cycles}}};
+       {"vec_branch_cycles", &p.vec_branch_cycles},
+       {"vec_transpose_cycles", &p.vec_transpose_cycles},
+       {"vec_transpose_tile_cycles", &p.vec_transpose_tile_cycles}}};
   while (!assignments.empty()) {
     const size_t comma = assignments.find(',');
     const std::string_view item = assignments.substr(0, comma);

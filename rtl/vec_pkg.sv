@@ -229,6 +229,7 @@ package vec_pkg;
   localparam logic [3:0] KindSmem   = 4'd2;
   localparam logic [3:0] KindBranch = 4'd3;
   localparam logic [3:0] KindRet    = 4'd4;
+  localparam logic [3:0] KindTranspose = 4'd7;
 
   localparam logic [4:0] SaluAdd  = 5'd0;
   localparam logic [4:0] SaluSub  = 5'd1;

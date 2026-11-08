@@ -11,6 +11,7 @@ set(rtl_sources
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_lane.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_reduce.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_scalar.sv
+  ${CMAKE_CURRENT_SOURCE_DIR}/vec_transpose.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_engine.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/dma_burst.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/dma_rowfmt.sv

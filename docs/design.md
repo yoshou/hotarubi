@@ -218,7 +218,7 @@ RUN loads its operand fields into scalar registers:
 
 For op 0–15 the same registers are loaded, except `r7 = aux` and pc is the start of the operation's program in CBUF [0, 256). r0 is always 0. r11–r31, RS0, RS1 and rn are not initialized. Programs do not write r10. A program ends with RET, which clears the engine's busy state without waiting for the drain.
 
-Instruction word, `[127:124]` kind: 0 PASS, 1 SALU, 2 SMEM, 3 BR, 4 RET, 5 NOP; 6–15 act as NOP.
+Instruction word, `[127:124]` kind: 0 PASS, 1 SALU, 2 SMEM, 3 BR, 4 RET, 5 NOP, 7 TRANSPOSE8; 6 and 8–15 act as NOP.
 
 ### PASS
 
@@ -280,6 +280,26 @@ y    = mask_en && invalid column ? 0 : y2
 - Row scalars after the pass (rn set by SMEM RN, ε = rimm value): MEAN `RS0 = −(Σ × rn)`; RSTD `RS1 = 1/√(Σ × rn + ε)`; NEGMAX `RS0 = −max`; RECIPSUM `RS1 = 1/Σ`; SUM `RS1 = Σ`; MAX `RS1 = max`. The negation flips the sign bit and gives +0 for ±0.
 - NaN and the value 0xFFFFFFFF must not enter the FP32 path or an FP32 comparison; integer and NULL entries go through the integer path and sel only.
 - Integer–FP32 conversion uses magic constants: `float(i) = bits(0x4B400000 + i) − 12582912.0` for |i| < 2^22; `rint(x) = bits(x + 12582912.0) − 0x4B400000`; `floor(x) = rint(x) − (rint(x) > x)`.
+
+### TRANSPOSE8
+
+| Bits | Field | Meaning |
+|---|---|---|
+| [123:119] | rx | Register: source FBUF base |
+| [118:114] | rsw | Register: source word stride |
+| [113:109] | rd | Register: destination FBUF base |
+| [108:104] | rt | Register: tile count |
+| [103:99] | rdt | Register: destination tile stride |
+| [98:94] | rst | Register: source tile stride |
+| [93:89] | rdw | Register: destination word stride |
+| [88] | pack | 0 NONE; 1 ZIP4 |
+| [87:0] | — | Reserved |
+
+Bases and strides use the low 12 bits of their registers and are measured in FBUF words. The tile count uses the low 9 bits. Each tile contains four independent 8×8 matrices of 32-bit elements. For tile q, source row r is read from `rx + q·rst + r·rsw`, and destination row c is written to `rd + q·rdt + c·rdw`. All word addresses wrap at 4,096 words. Element `(t, c)` of source row r is at bits `32·(8·t + c) +: 32`, where t selects one of the four matrices.
+
+With pack = NONE, destination row c, element `(t, r)` receives source row r, element `(t, c)`. With pack = ZIP4, the destination columns are selected in the order 0, 4, 1, 5, 2, 6, 3, 7 from the transposed row. Every 32-bit element is copied unchanged. The source and destination word sets are disjoint, and destination word addresses are distinct. A zero tile count performs no reads or writes.
+
+TRANSPOSE8 waits for preceding vector operations to drain and completes all destination writes before advancing to the next instruction. The two tile buffers hold 8,192 bits each in eight skewed distributed-RAM banks. A registered output word and address remain stable during a denied FBUF write. A tile is released after its final word is written. RS0, RS1 and the scalar register file are unchanged.
 
 ### SALU
 
@@ -485,7 +505,7 @@ A, B and C are 24-bit counters and D an 8-bit counter; all saturate, are cleared
 |---|---|---|---|---|
 | DMA | AXI read beats | AXI write beats | cycles with an on-chip read or write request not granted | null index-list and gather entries |
 | GEMM | cycles with the array fed | 0 | 0 | 0 |
-| VEC | cycles in the issue state | cycles in the drain states | cycles waiting for the scalar unit | PASS instructions started |
+| VEC | cycles in the issue state and in TRANSPOSE8 | cycles in the drain states | cycles waiting for the scalar unit | PASS instructions started |
 
 Each source holds one pending completion record with its statistics record. One record per cycle moves into the 64-entry record FIFO: the completion record of the selected source, then its statistics record when enabled; when several sources are pending, the order is DMA, GEMM, VEC, sequencer. Issue is held while the source's record slot is occupied or the record FIFO holds 56 or more records. TRACE_COUNT counts the records of both types.
 
@@ -581,7 +601,7 @@ The simulator assigns each instruction an issue cycle and a completion cycle wit
 | DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles` |
 | VEC | `vec_fixed_cycles + passes · vec_pass_cycles + issue + drain + scalar + SALU · vec_salu_cycles + SMEM · vec_smem_cycles + branches · vec_branch_cycles` |
 
-For VEC, `issue = words · vec_word_cycles − passes · vec_issue_tail_cycles`, `drain = passes · vec_drain_cycles + reducing passes · vec_drain_reduction_cycles + quantizing passes · vec_drain_quantized_cycles`, and the scalar cost follows the scalar unit's programs: each arithmetic micro-operation costs `vec_scalar_arithmetic_cycles`, each immediate write `vec_scalar_immediate_cycles`, and each program start `vec_scalar_start_cycles`, with the micro-operation counts of the RTL:
+For VEC, `issue = words · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles`, `drain = passes · vec_drain_cycles + reducing passes · vec_drain_reduction_cycles + quantizing passes · vec_drain_quantized_cycles`, and the scalar cost follows the scalar unit's programs: each arithmetic micro-operation costs `vec_scalar_arithmetic_cycles`, each immediate write `vec_scalar_immediate_cycles`, and each program start `vec_scalar_start_cycles`, with the micro-operation counts of the RTL:
 
 | Program | Arithmetic | Immediate |
 |---|---:|---:|

@@ -22,6 +22,7 @@ constexpr uint32_t kKindSalu = 1;
 constexpr uint32_t kKindSmem = 2;
 constexpr uint32_t kKindBranch = 3;
 constexpr uint32_t kKindRet = 4;
+constexpr uint32_t kKindTranspose = 7;
 
 constexpr uint32_t kSmemLoad = 0;
 constexpr uint32_t kSmemRowLoad = 2;
@@ -185,8 +186,55 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
       case kKindRet:
         Require(!undrained_, "a VEC program returns after a nodrain PASS");
         return;
+      case kKindTranspose:
+        if (undrained_) {
+          ++activity_.drains;
+        }
+        Drain();
+        RunTranspose(instruction, memories);
+        break;
       default:
         break;
+    }
+  }
+}
+
+void VecEngine::RunTranspose(const Word128& instruction, Memories& memories) {
+  const uint32_t src = Register(instruction.Field(119, 5)) & kFbufMask;
+  const uint32_t src_word_stride =
+      Register(instruction.Field(114, 5)) & kFbufMask;
+  const uint32_t dst = Register(instruction.Field(109, 5)) & kFbufMask;
+  const uint32_t tiles = Register(instruction.Field(104, 5)) & 0x1FFU;
+  const uint32_t dst_tile_stride =
+      Register(instruction.Field(99, 5)) & kFbufMask;
+  const uint32_t src_tile_stride =
+      Register(instruction.Field(94, 5)) & kFbufMask;
+  const uint32_t dst_word_stride =
+      Register(instruction.Field(89, 5)) & kFbufMask;
+  const bool zip4 = instruction.Field(88, 1) != 0;
+  ++activity_.transposes;
+  activity_.transpose_tiles += tiles;
+  for (uint32_t q = 0; q < tiles; ++q) {
+    std::array<FbufWord, 8> tile;
+    for (uint32_t row = 0; row < 8; ++row) {
+      const uint32_t address =
+          (src + (q * src_tile_stride) + (row * src_word_stride)) & kFbufMask;
+      memories.log.Read(Mem::kFbuf, address);
+      tile.at(row) = memories.fbuf.at(address);
+    }
+    for (uint32_t row = 0; row < 8; ++row) {
+      FbufWord output;
+      for (uint32_t t = 0; t < 4; ++t) {
+        for (uint32_t column = 0; column < 8; ++column) {
+          const uint32_t source_row =
+              zip4 ? (column / 2) + (4 * (column % 2)) : column;
+          output.at((t * 8) + column) = tile.at(source_row).at((t * 8) + row);
+        }
+      }
+      const uint32_t address =
+          (dst + (q * dst_tile_stride) + (row * dst_word_stride)) & kFbufMask;
+      memories.log.Write(Mem::kFbuf, address);
+      memories.fbuf.at(address) = output;
     }
   }
 }

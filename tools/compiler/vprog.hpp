@@ -18,6 +18,7 @@ inline constexpr uint32_t kCbufWords = 1024;
 inline constexpr uint32_t kRomWords = 256;
 inline constexpr uint32_t kNull = 0xFFFFFFFFU;
 
+enum class TransposePack : uint8_t { kNone = 0, kZip4 = 1 };
 enum class WordMap : uint8_t { kNorm = 0, kX1 = 1, kX2 = 2, kS4 = 3 };
 enum class Pbuf : uint8_t { kNone = 0, kRowVec = 1, kTile = 2 };
 enum class C0 : uint8_t { kZero = 0, kX2 = 1, kPbuf = 2, kRs0 = 3, kImm = 4 };
@@ -175,6 +176,10 @@ class Assembler {
   Assembler& Branch(Cond cond, uint32_t ra, std::string_view label);
   Assembler& Ret();
   Assembler& Nop();
+  Assembler& Transpose8(uint32_t src, uint32_t dst, uint32_t tiles,
+                        uint32_t src_tile_stride, uint32_t src_word_stride,
+                        uint32_t dst_tile_stride, uint32_t dst_word_stride,
+                        TransposePack pack = TransposePack::kNone);
 
   Assembler& StoreScalar(uint32_t rw, uint32_t rlane, uint32_t rcol,
                          uint32_t rval, uint32_t r_one);

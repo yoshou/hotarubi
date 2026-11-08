@@ -65,7 +65,9 @@ module vec_engine
     StMex,
     StRnwait,
     StBex,
-    StNext
+    StNext,
+    StTransposeStart,
+    StTransposeWait
   } st_e;
 
   st_e          st;
@@ -96,7 +98,7 @@ module vec_engine
 
   assign cmd_ready_o   = (st == StIdle);
   assign busy_o        = (st != StIdle);
-  assign stat_issue_o  = (st == StIssue);
+  assign stat_issue_o  = (st == StIssue) || (st == StTransposeWait);
   assign stat_drain_o  = (st == StDrain) || (st == StMdrain);
   assign stat_scalar_o = (st == StScalarWait) || (st == StRnwait);
   assign stat_pass_o   = (st == StSegSetup);
@@ -124,6 +126,10 @@ module vec_engine
   logic [7:0]  p_n8;
   logic [9:0]  p_pb;
   logic [31:0] p_imm, p_imm2;
+  logic [11:0] tr_src_tile_stride, tr_dst_tile_stride, tr_dst_word_stride;
+  logic        tr_start, tr_busy, tr_rd, tr_wr, tr_mode;
+  logic [11:0] tr_ra, tr_wa;
+  logic [1023:0] tr_wd;
   wr_e         wr_eff;
 
   assign wr_eff = (pd.wr == WrFinal) ? (qf ? WrAbuf : WrFbuf) : pd.wr;
@@ -214,7 +220,7 @@ module vec_engine
   logic        sm_rd_v;
   logic [11:0] sm_addr;
 
-  assign fbuf_rd_req_o = rd_v | sm_rd_v;
+  assign fbuf_rd_req_o = rd_v | sm_rd_v | tr_rd;
 
   logic rd_fire, sm_rd_fire;
 
@@ -227,6 +233,34 @@ module vec_engine
 
   assign drained = !rdpipe_busy & !phs_v & !lane_busy & !red_busy & wf_empty & !quant_busy &
                    af_empty;
+
+  assign tr_mode  = (st == StTransposeWait);
+  assign tr_start = (st == StTransposeStart) && drained;
+
+  vec_transpose #(
+    .ReadLatency(MemLatency)
+  ) u_transpose (
+    .clk_i,
+    .rst_ni,
+    .start_i          (tr_start),
+    .src_i            (p_x),
+    .dst_i            (p_d[11:0]),
+    .tiles_i          (p_rq),
+    .src_tile_stride_i(tr_src_tile_stride),
+    .src_word_stride_i(p_x2),
+    .dst_tile_stride_i(tr_dst_tile_stride),
+    .dst_word_stride_i(tr_dst_word_stride),
+    .pack_zip4_i      (ins[88]),
+    .busy_o           (tr_busy),
+    .rd_req_o         (tr_rd),
+    .rd_grant_i       (fbuf_rd_grant_i),
+    .rd_addr_o        (tr_ra),
+    .rd_data_i        (fbuf_rdata_i),
+    .wr_req_o         (tr_wr),
+    .wr_grant_i       (fbuf_wr_grant_i),
+    .wr_addr_o        (tr_wa),
+    .wr_data_o        (tr_wd)
+  );
 
   logic          sc_start, sc_recip_n;
   sc_e           sc_prog;
@@ -419,7 +453,7 @@ module vec_engine
           pre_done    <= 1'b0;
           pre_on      <= 1'b0;
           case (kind)
-            KindPass: begin
+            KindPass, KindTranspose: begin
               pd  <= dec_pass(ins);
               cnt <= 4'd0;
               st  <= StPrd;
@@ -461,12 +495,15 @@ module vec_engine
               rb_q <= pd.rimm;
               p_nw <= rf_a[9:0];
               p_n8 <= rf_b[7:0];
+              tr_dst_tile_stride <= rf_a[11:0];
+              tr_src_tile_stride <= rf_b[11:0];
             end
             4'd4: begin
               ra_q  <= pd.rimm2;
               rb_q  <= 5'd0;
               p_pb  <= rf_a[9:0];
               p_imm <= rf_b;
+              tr_dst_word_stride <= rf_a[11:0];
             end
             default: begin
               p_imm2 <= rf_a;
@@ -474,7 +511,17 @@ module vec_engine
           endcase
           cnt <= cnt + 4'd1;
           if (cnt == 4'd5) begin
-            st <= StSegSetup;
+            st <= (kind == KindTranspose) ? StTransposeStart : StSegSetup;
+          end
+        end
+        StTransposeStart: begin
+          if (drained) begin
+            st <= StTransposeWait;
+          end
+        end
+        StTransposeWait: begin
+          if (!tr_busy) begin
+            st <= StNext;
           end
         end
         StSegSetup: begin
@@ -721,7 +768,7 @@ module vec_engine
   end
 
   always_ff @(posedge clk_i) begin
-    fbuf_raddr_o <= sm_rd_v ? sm_addr : rd_addr;
+    fbuf_raddr_o <= tr_mode ? tr_ra : sm_rd_v ? sm_addr : rd_addr;
   end
 
   always_comb begin
@@ -1108,7 +1155,7 @@ module vec_engine
 
   assign wf_push = word_v & (c_y.wr == WrFbuf);
   assign wf_din  = {c_y.waddr[11:0], y_word};
-  assign wf_pop  = fbuf_wr_req_o & fbuf_wr_grant_i;
+  assign wf_pop  = fbuf_wr_req_o & fbuf_wr_grant_i & !tr_mode;
 
   sfifo #(
     .Width      (12 + 1024),
@@ -1127,9 +1174,9 @@ module vec_engine
     .count_o(wf_count)
   );
 
-  assign fbuf_wr_req_o = !wf_empty;
-  assign fbuf_waddr_o  = wf_dout[1035:1024];
-  assign fbuf_wdata_o  = wf_dout[1023:0];
+  assign fbuf_wr_req_o = tr_mode ? tr_wr : !wf_empty;
+  assign fbuf_waddr_o  = tr_mode ? tr_wa : wf_dout[1035:1024];
+  assign fbuf_wdata_o  = tr_mode ? tr_wd : wf_dout[1023:0];
 
   logic       qv;
   logic       q1_v, q2_v;

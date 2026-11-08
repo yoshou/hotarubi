@@ -150,6 +150,26 @@ TEST(VprogTest, AssemblerEnablesX2AndRawCopies) {
   EXPECT_EQ(plain.Words()[0].Get(29, 3), 0U);
 }
 
+TEST(VprogTest, Transpose8PlacesItsRegistersAndPackBit) {
+  Assembler a(true);
+  a.Transpose8(11, 3, 4, 5, 12, 13, 4, TransposePack::kZip4);
+  a.Transpose8(1, 2, 3, 4, 5, 6, 7);
+  const auto words = a.Words(0);
+  ASSERT_EQ(words.size(), 2U);
+  EXPECT_EQ(words[0].Get(124, 4), 7U);
+  EXPECT_EQ(words[0].Get(119, 5), 11U);
+  EXPECT_EQ(words[0].Get(114, 5), 12U);
+  EXPECT_EQ(words[0].Get(109, 5), 3U);
+  EXPECT_EQ(words[0].Get(104, 5), 4U);
+  EXPECT_EQ(words[0].Get(99, 5), 13U);
+  EXPECT_EQ(words[0].Get(94, 5), 5U);
+  EXPECT_EQ(words[0].Get(89, 5), 4U);
+  EXPECT_EQ(words[0].Get(88, 1), 1U);
+  EXPECT_EQ(words[1].Get(88, 1), 0U);
+  EXPECT_EQ(words[1].Get(0, 64), 0U);
+  EXPECT_EQ(words[1].Get(64, 24), 0U);
+}
+
 TEST(VprogDeathTest, RejectsAnUndefinedLabel) {
   Assembler program;
   program.Branch(Cond::kAlways, 0, "missing");

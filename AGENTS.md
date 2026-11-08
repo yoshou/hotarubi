@@ -64,6 +64,12 @@ ctest --preset gcc-debug
 
 CI (`.github/workflows/ci.yml`) builds and tests with `gcc-release`, `clang-release` and `sanitize`, reports coverage, checks formatting and runs clang-tidy. Coverage is reported only; it has no threshold.
 
+## Long-running jobs
+
+- Vivado runs, simulator runs and other jobs longer than a few minutes are started so that their completion is observed: either as a tracked background task that reports when it exits, or with a completion check that the agent runs itself. A job started with `nohup` or `&` alone is never waited for by expecting a notification.
+- While a job runs, the agent works on the items that do not depend on it. It does not idle, and it does not poll in a tight loop.
+- The agent checks a job's result from its log or report before acting on it, and stops a job that is no longer needed.
+
 ## Commits
 
 Commit only when the owner asks, on `main`. The message is one line, with no trailers such as Co-Authored-By.

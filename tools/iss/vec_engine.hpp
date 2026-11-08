@@ -24,6 +24,8 @@ struct VecActivity {
   uint32_t salu = 0;
   uint32_t smem = 0;
   uint32_t branches = 0;
+  uint32_t transposes = 0;
+  uint32_t transpose_tiles = 0;
 
   friend constexpr bool operator==(const VecActivity&,
                                    const VecActivity&) = default;
@@ -65,6 +67,7 @@ class VecEngine {
   void Store(PassState& state, uint32_t word, const FbufWord& out,
              Memories& memories) const;
   void RunSalu(const Word128& instruction);
+  void RunTranspose(const Word128& instruction, Memories& memories);
   void RunSmem(const Word128& instruction, Memories& memories);
   [[nodiscard]] bool Taken(const Word128& instruction) const;
   void Drain();

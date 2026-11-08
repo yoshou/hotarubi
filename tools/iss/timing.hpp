@@ -57,6 +57,8 @@ struct TimingParameters {
   uint32_t vec_salu_cycles = 3;
   uint32_t vec_smem_cycles = 11;
   uint32_t vec_branch_cycles = 17;
+  uint32_t vec_transpose_cycles = 26;
+  uint32_t vec_transpose_tile_cycles = 10;
 };
 
 std::expected<TimingParameters, std::string> ParseTiming(
