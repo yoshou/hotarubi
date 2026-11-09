@@ -81,6 +81,7 @@ enum class Ialu : uint8_t {
   kShr1 = 6,
   kRsub = 7
 };
+enum class RowMask : uint8_t { kNone = 0, kSkip = 1, kSet = 2 };
 enum class Salu : uint8_t {
   kAdd = 0,
   kSub = 1,
@@ -142,6 +143,7 @@ struct Pass {
   bool nodrain = false;
   bool x_s1 = false;
   uint32_t ctx = 0;
+  RowMask rm = RowMask::kNone;
 };
 
 struct SmemArgs {
@@ -169,6 +171,7 @@ class Assembler {
 
   [[nodiscard]] size_t Size() const { return size_; }
   void Label(std::string_view name);
+  void SkipMaskedRows(bool skip) { skip_masked_rows_ = skip; }
   Assembler& Emit(const Pass& pass);
   Assembler& Alu(Salu op, uint32_t rd, uint32_t ra, uint32_t rb = 0,
                  std::optional<uint32_t> imm = std::nullopt);
@@ -211,6 +214,7 @@ class Assembler {
   using Item = std::variant<Instruction, Pass, BranchItem>;
 
   bool raw_copy_;
+  bool skip_masked_rows_ = false;
   std::vector<Item> items_;
   std::map<std::string, size_t, std::less<>> labels_;
   size_t size_ = 0;

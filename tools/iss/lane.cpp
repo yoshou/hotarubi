@@ -238,6 +238,7 @@ Pass DecodePass(const Word128& instruction) {
       .nodrain = Flag(w, 26),
       .x_s1 = Flag(w, 25),
       .ctx = w.Field(23, 2),
+      .rm = Decode(w.Field(21, 2), RowMask::kSet, RowMask::kNone),
   };
 }
 

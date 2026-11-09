@@ -61,7 +61,7 @@ The PL clock is 250 MHz (pl_clk0, IOPLL 2,000 MHz / 8).
 | CBUF | BRAM | 128 bits | 1,024 | VEC programs: [0, 256) fixed operations (initial contents), [256, 1024) loaded by DMA; DMA can write every word |
 | IBUF | FIFO | 128 bits | 64 | Instruction prefetch |
 
-The VEC scalar register file has 32 registers of 32 bits.
+The VEC scalar register file has 32 registers of 32 bits. The row mask RM has 512 bits, one per quad index of a PASS.
 
 ## Number formats
 
@@ -261,6 +261,7 @@ A PASS streams `rq` quads × `rnw` words through the lanes, 4 cycles per word. R
 | [26] | nodrain | Do not wait for the pipeline to drain before the next instruction |
 | [25] | x_s1 | x and x2 read starts advance by 1 word per quad |
 | [24:23] | ctx | Row context of the reduction, the row scalar and the RS0/RS1 reads (0 or 1) |
+| [22:21] | rm | Row mask: 0 NONE, 1 SKIP (quads whose RM bit is 0 are skipped), 2 SET (RM bit q is written for each quad q of the pass); 3 as NONE |
 
 Lane operation (x, x2 after permutation):
 
@@ -338,6 +339,8 @@ RET and NOP have no operands.
 ### Execution rules
 
 - A PASS waits for the pipeline to drain at its end unless nodrain is set, or unless the next instruction is a PASS and this PASS does not read PBUF at the multiplier while the next one reads PBUF at the pre-adder. In the latter case the next PASS starts while the writes of this one complete, and a read of an FBUF word whose write is still pending waits for the write.
+- A PASS with rm = SET writes RM bit q, for each quad q < rq, with 1 when any element of the words that quad q produces is nonzero and 0 otherwise; the other RM bits are unchanged. It always waits for the pipeline to drain at its end, regardless of nodrain.
+- A PASS with rm = SKIP does nothing for a quad q whose RM bit is 0: no reads, no writes, no reduction; the read and write starts advance as usual. The reduction accumulator index counts the words that are issued. RM is unchanged until the next PASS with rm = SET, and its bits are undefined before the first one.
 - A row context is reducing from the start of a PASS with red in that context until every word of the PASS has been reduced; if the PASS has sc, the context then holds the scalar program until its result is written to RS0 or RS1 of the context. The scalar unit runs one program at a time, in the order the reductions complete.
 - A PASS with red waits at its start until its context is neither reducing nor holding a scalar program, then clears the context's accumulators.
 - A PASS that reads RS0 or RS1 (c0 = RS0, b = RS1, sel = RS0 or RS1) waits at its start while a scalar program of its context is outstanding.
@@ -604,7 +607,7 @@ The simulator assigns each instruction an issue cycle and a completion cycle wit
 | DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles` |
 | VEC | `vec_fixed_cycles + passes · vec_pass_cycles + issue + drain + scalar + SALU · vec_salu_cycles + SMEM · vec_smem_cycles + branches · vec_branch_cycles` |
 
-For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles`, where a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit, with the micro-operation counts of the RTL; a PASS or SMEM that needs the context waits the remaining words:
+For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles + skip cycles`, where words counts the issued words, a run of k skipped quads costs k cycles at the start of a PASS, max(0, k + c − 4) cycles between two issued words, where c is the number of FBUF reads of a word (2 with a second operand), doubled when the PASS writes FBUF, and at the end of a PASS k cycles when the PASS does not drain and max(0, k − 40) cycles when it drains, a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit, with the micro-operation counts of the RTL; a PASS or SMEM that needs the context waits the remaining words:
 
 | Program | Arithmetic | Immediate |
 |---|---:|---:|

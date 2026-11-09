@@ -44,6 +44,7 @@ struct PassFields {
   uint32_t nodrain = 0;
   uint32_t x_s1 = 0;
   uint32_t ctx = 0;
+  uint32_t rm = 0;
 };
 
 struct SmemFields {

@@ -1,5 +1,6 @@
 #include "vec_engine.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bitset>
 #include <cstdint>
@@ -81,7 +82,8 @@ uint32_t PbufAddress(PbufAccess access, uint32_t base, uint32_t tile_row,
 }
 
 bool Overlaps(const Pass& pass, const Word128& next) {
-  if (pass.nodrain || next.Field(124, 4) != kKindPass) {
+  if (pass.nodrain || pass.rm == RowMask::kSet ||
+      next.Field(124, 4) != kKindPass) {
     return false;
   }
   const bool next_pbuf_pre_adder =
@@ -301,24 +303,15 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   state.imm = Register(pass.rimm);
   state.imm2 = Register(pass.rimm2);
   ++activity_.passes;
-  activity_.words += uint64_t{quads} * words;
   const bool reads_rows = pass.c0 == C0Source::kRs0 ||
                           pass.b == BSource::kRs1 || pass.sel == Select::kRs0 ||
                           pass.sel == Select::kRs1;
   if (reads_rows || pass.red != Reduction::kNone) {
     AwaitContext(pass.ctx);
   }
-  for (uint32_t q = 0; q < quads; ++q) {
-    for (uint32_t w = 0; w < words; ++w) {
-      RunWord(state, w, memories);
-    }
-    const uint32_t step = pass.x_s1 ? 1 : n8;
-    state.src = (state.src + step) & kFbufMask;
-    state.src2 = (state.src2 + step) & kFbufMask;
-    state.dst = (state.dst + (pass.dst_s1 ? 1 : n8)) & kFbufMask;
-    state.abuf = (state.abuf + (n8 >> 2)) & kAbufMask;
-    state.tile_row = (state.tile_row + 4) & kPbufAddressMask;
-  }
+  const bool keeps_writes = pass.nodrain && pass.rm != RowMask::kSet;
+  const bool overlaps = !keeps_writes && Overlaps(pass, next);
+  RunQuads(state, quads, words, n8, !keeps_writes && !overlaps, memories);
   Require(state.next_quarter == 0,
           "a PASS ends inside a block of 4 quantized words");
   if (pass.red != Reduction::kNone) {
@@ -336,25 +329,70 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
       ready_slot_.at(pass.ctx) = complete;
     }
   }
-  if (pass.nodrain) {
+  if (keeps_writes) {
     in_flight_ |= state.written;
     undrained_ = true;
     undrained_pbuf_at_mul_ = undrained_pbuf_at_mul_ || pass.pa_at_mul;
     return;
   }
-  if (Overlaps(pass, next)) {
+  if (overlaps) {
     ++activity_.overlaps;
     return;
   }
   ++activity_.drains;
-  WriteTarget target = pass.wr;
-  if (target == WriteTarget::kFinal) {
-    target = quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
-  }
-  if (target == WriteTarget::kAbuf) {
+  if (Target(pass.wr) == WriteTarget::kAbuf) {
     ++activity_.drains_quantized;
   }
   Drain();
+}
+
+void VecEngine::RunQuads(PassState& state, uint32_t quads, uint32_t words,
+                         uint32_t n8, bool drains, Memories& memories) {
+  const Pass& pass = state.pass;
+  const uint32_t reads = pass.x2_en ? 2 : 1;
+  const uint32_t restart =
+      Target(pass.wr) == WriteTarget::kFbuf ? 2 * reads : reads;
+  uint64_t skip_cycles = 0;
+  uint32_t run = 0;
+  bool issued = false;
+  for (uint32_t q = 0; q < quads; ++q) {
+    if (pass.rm == RowMask::kSkip && !row_mask_.test(q)) {
+      ++run;
+      ++activity_.skipped_rows;
+    } else {
+      skip_cycles +=
+          issued ? std::max(run + restart, kWordCycles) - kWordCycles : run;
+      run = 0;
+      issued = true;
+      activity_.words += words;
+      bool nonzero = false;
+      for (uint32_t w = 0; w < words; ++w) {
+        nonzero = RunWord(state, w, memories) || nonzero;
+      }
+      if (pass.rm == RowMask::kSet) {
+        row_mask_.set(q, nonzero);
+      }
+    }
+    const uint32_t step = pass.x_s1 ? 1 : n8;
+    state.src = (state.src + step) & kFbufMask;
+    state.src2 = (state.src2 + step) & kFbufMask;
+    state.dst = (state.dst + (pass.dst_s1 ? 1 : n8)) & kFbufMask;
+    state.abuf = (state.abuf + (n8 >> 2)) & kAbufMask;
+    state.tile_row = (state.tile_row + 4) & kPbufAddressMask;
+  }
+  constexpr auto kDrainHidden =
+      static_cast<uint32_t>(kOverlapLatencyWords * kWordCycles);
+  skip_cycles +=
+      issued && drains ? std::max(run, kDrainHidden) - kDrainHidden : run;
+  activity_.skip_cycles += skip_cycles;
+  slot_ += (skip_cycles + kWordCycles - 1) / kWordCycles;
+}
+
+WriteTarget VecEngine::Target(WriteTarget target) const {
+  if (target == WriteTarget::kFinal) {
+    return quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
+  }
+  return target;
 }
 
 void VecEngine::AwaitContext(uint32_t ctx) {
@@ -365,7 +403,7 @@ void VecEngine::AwaitContext(uint32_t ctx) {
   }
 }
 
-void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
+bool VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
   const Pass& pass = state.pass;
   const FbufWord x =
       Operand(state, (state.src + WordOf(pass.wx, w)) & kFbufMask, memories);
@@ -402,6 +440,7 @@ void VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
   state.entry = (state.entry + 1) & 7U;
   Store(state, WordOf(pass.wd, w), result.out, memories);
   ++slot_;
+  return std::ranges::any_of(result.out, [](uint32_t v) { return v != 0; });
 }
 
 const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
@@ -427,10 +466,7 @@ const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
 
 void VecEngine::Store(PassState& state, uint32_t word, const FbufWord& out,
                       Memories& memories) {
-  WriteTarget target = state.pass.wr;
-  if (target == WriteTarget::kFinal) {
-    target = quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
-  }
+  const WriteTarget target = Target(state.pass.wr);
   if (target == WriteTarget::kFbuf) {
     const uint32_t address = (state.dst + word) & kFbufMask;
     memories.log.Write(Mem::kFbuf, address);

@@ -101,7 +101,7 @@ uint64_t CostModel::IssueCycles(const VecActivity& activity) const {
       (uint64_t{activity.transposes} * parameters_.vec_transpose_cycles) +
       (uint64_t{activity.transpose_tiles} *
        parameters_.vec_transpose_tile_cycles);
-  return (words > tail ? words - tail : 0) + transposes;
+  return (words > tail ? words - tail : 0) + transposes + activity.skip_cycles;
 }
 
 uint64_t CostModel::DrainCycles(const VecActivity& activity) const {

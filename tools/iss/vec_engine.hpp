@@ -19,6 +19,8 @@ inline constexpr uint32_t kRowScalarKinds = 8;
 inline constexpr uint32_t kScalarArithmeticCycles = 11;
 inline constexpr uint32_t kScalarImmediateCycles = 2;
 inline constexpr uint32_t kScalarStartCycles = 2;
+inline constexpr uint32_t kRowMaskBits = 512;
+inline constexpr uint32_t kWordCycles = 4;
 
 struct ScalarProgram {
   uint32_t arithmetic = 0;
@@ -57,6 +59,8 @@ struct VecActivity {
   uint32_t branches = 0;
   uint32_t transposes = 0;
   uint32_t transpose_tiles = 0;
+  uint64_t skipped_rows = 0;
+  uint64_t skip_cycles = 0;
 
   friend constexpr bool operator==(const VecActivity&,
                                    const VecActivity&) = default;
@@ -94,11 +98,14 @@ class VecEngine {
   void Initialize(const VecCommand& command);
   void RunPass(const Word128& instruction, const Word128& next,
                Memories& memories);
-  void RunWord(PassState& state, uint32_t w, Memories& memories);
+  void RunQuads(PassState& state, uint32_t quads, uint32_t words, uint32_t n8,
+                bool drains, Memories& memories);
+  [[nodiscard]] bool RunWord(PassState& state, uint32_t w, Memories& memories);
   [[nodiscard]] const FbufWord& Operand(const PassState& state,
                                         uint32_t address, Memories& memories);
   void Store(PassState& state, uint32_t word, const FbufWord& out,
              Memories& memories);
+  [[nodiscard]] WriteTarget Target(WriteTarget target) const;
   void RunSalu(const Word128& instruction);
   void RunTranspose(const Word128& instruction, Memories& memories);
   void RunSmem(const Word128& instruction, Memories& memories);
@@ -120,6 +127,7 @@ class VecEngine {
   uint64_t scalar_free_slot_ = 0;
   bool undrained_ = false;
   bool undrained_pbuf_at_mul_ = false;
+  std::bitset<kRowMaskBits> row_mask_;
 };
 
 }  // namespace hotarubi::iss

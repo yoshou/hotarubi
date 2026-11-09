@@ -89,6 +89,12 @@ enum class IntegerOp : uint8_t {
   kRsub = 7,
 };
 
+enum class RowMask : uint8_t {
+  kNone = 0,
+  kSkip = 1,
+  kSet = 2,
+};
+
 struct Pass {
   uint32_t rx = 0;
   uint32_t rx2 = 0;
@@ -126,6 +132,7 @@ struct Pass {
   bool nodrain = false;
   bool x_s1 = false;
   uint32_t ctx = 0;
+  RowMask rm = RowMask::kNone;
 };
 
 Pass DecodePass(const Word128& instruction);

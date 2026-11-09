@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -83,6 +84,7 @@ struct Pass {
   bool nodrain = false;
   bool x_s1 = false;
   uint32_t ctx = 0;
+  uint32_t rm = 0;
 };
 
 Instruction Encode(const Pass& p) {
@@ -123,7 +125,8 @@ Instruction Encode(const Pass& p) {
       .Set(27, 1, p.c0_pred ? 1 : 0)
       .Set(26, 1, p.nodrain ? 1 : 0)
       .Set(25, 1, p.x_s1 ? 1 : 0)
-      .Set(23, 2, p.ctx);
+      .Set(23, 2, p.ctx)
+      .Set(21, 2, p.rm);
   return word;
 }
 
@@ -1287,6 +1290,133 @@ std::vector<FbufWord> Shifted(const std::vector<FbufWord>& words,
     }
   }
   return out;
+}
+
+TEST(VecProgramTest, RowMaskSkipsTheRowsAMarkingPassFoundZero) {
+  constexpr uint32_t kRows = 8;
+  constexpr uint32_t kWords = 2;
+  constexpr uint32_t kOut = 64;
+  constexpr size_t kTotal = size_t{kRows} * kWords;
+  std::mt19937 generator(91);
+  std::vector<FbufWord> in(kTotal);
+  std::vector<FbufWord> before(kTotal);
+  for (uint32_t i = 0; i < in.size(); ++i) {
+    for (uint32_t e = 0; e < 32; ++e) {
+      in[i].at(e) = static_cast<uint32_t>(generator()) | 1U;
+      before[i].at(e) = static_cast<uint32_t>(generator());
+    }
+  }
+  for (const size_t q : {size_t{1}, size_t{4}, size_t{5}}) {
+    in[q * kWords].fill(0);
+    in[(q * kWords) + 1].fill(0);
+  }
+  in[size_t{6} * kWords].fill(0);
+  const Pass mark{.rx = kRegSrc,
+                  .rq = kRegRowsQ,
+                  .rnw = kRegN8,
+                  .rn8 = kRegN8,
+                  .wr = 0,
+                  .ialu = 4,
+                  .nodrain = true,
+                  .rm = 2};
+  const Pass skip{.rx = kRegSrc,
+                  .rd = kRegDst,
+                  .rq = kRegRowsQ,
+                  .rnw = kRegN8,
+                  .rn8 = kRegN8,
+                  .ialu = 4,
+                  .rm = 1};
+  const ProgramRun run{
+      .program = {Encode(mark), Encode(skip), Ret()},
+      .args = {.src = 0, .dst = kOut, .rows_q = kRows, .n8 = kWords},
+      .fbuf = {{0, in}, {kOut, before}},
+      .pbuf = {},
+      .tables = nullptr,
+      .out_base = kOut,
+      .out_words = kRows * kWords};
+  const std::vector<FbufWord> out = RunProgram(run, 92);
+  for (uint32_t q = 0; q < kRows; ++q) {
+    const bool skipped = q == 1 || q == 4 || q == 5;
+    for (uint32_t w = 0; w < kWords; ++w) {
+      const uint32_t i = (q * kWords) + w;
+      ASSERT_EQ(out[i], skipped ? before[i] : in[i])
+          << "row " << q << " word " << w;
+    }
+  }
+}
+
+void CheckSkippedRowsWaitForPendingWrites(uint32_t rows, uint32_t period) {
+  constexpr uint32_t kOne = 22;
+  constexpr uint32_t kTwo = 23;
+  constexpr uint32_t kMid = 100;
+  constexpr uint32_t kOut = 200;
+  std::mt19937 generator(93 + rows);
+  std::vector<FbufWord> in(rows);
+  std::vector<FbufWord> before(rows);
+  std::vector<bool> visible(rows);
+  for (uint32_t q = 0; q < rows; ++q) {
+    visible[q] = q % period == period - 1;
+    for (uint32_t e = 0; e < 32; ++e) {
+      in[q].at(e) =
+          visible[q] ? (static_cast<uint32_t>(generator()) << 2) | 4U : 0U;
+      before[q].at(e) = static_cast<uint32_t>(generator());
+    }
+  }
+  const Pass mark{.rx = kRegSrc,
+                  .rq = kRegRowsQ,
+                  .rnw = kRegOne,
+                  .rn8 = kRegOne,
+                  .wr = 0,
+                  .ialu = 4,
+                  .rm = 2};
+  const Pass first{.rx = kRegSrc,
+                   .rd = kRegSrc2,
+                   .rq = kRegRowsQ,
+                   .rnw = kRegOne,
+                   .rn8 = kRegOne,
+                   .rimm = kOne,
+                   .c0 = 4,
+                   .ialu = 4,
+                   .rm = 1};
+  const Pass second{.rx = kRegSrc2,
+                    .rd = kRegDst,
+                    .rq = kRegRowsQ,
+                    .rnw = kRegOne,
+                    .rn8 = kRegOne,
+                    .rimm = kTwo,
+                    .c0 = 4,
+                    .ialu = 4,
+                    .rm = 1};
+  const ProgramRun run{
+      .program = {SaluImm(kSaluAdd, kRegOne, kRegZero, 1),
+                  SaluImm(kSaluAdd, kOne, kRegZero, 1),
+                  SaluImm(kSaluAdd, kTwo, kRegZero, 2), Encode(mark),
+                  Encode(first), Encode(second), Ret()},
+      .args = {.src = 0, .src2 = kMid, .dst = kOut, .rows_q = rows, .n8 = 1},
+      .fbuf = {{0, in}, {kMid, before}, {kOut, before}},
+      .pbuf = {},
+      .tables = nullptr,
+      .out_base = kOut,
+      .out_words = rows};
+  const std::vector<FbufWord> out = RunProgram(run, 94 + rows);
+  for (uint32_t q = 0; q < rows; ++q) {
+    FbufWord expected = before[q];
+    if (visible[q]) {
+      for (uint32_t e = 0; e < 32; ++e) {
+        expected.at(e) = in[q].at(e) | 3U;
+      }
+    }
+    ASSERT_EQ(out[q], expected)
+        << "rows " << rows << " period " << period << " row " << q;
+  }
+}
+
+TEST(VecProgramTest, SkippedRowsDoNotBypassThePendingWriteCheck) {
+  for (const uint32_t rows : {6U, 10U, 12U, 18U}) {
+    for (const uint32_t period : {2U, 5U, 6U}) {
+      CheckSkippedRowsWaitForPendingWrites(rows, period);
+    }
+  }
 }
 
 TEST(VecProgramTest, DependentPassesOverlapTheDrain) {

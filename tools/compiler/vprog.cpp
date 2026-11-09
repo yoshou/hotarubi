@@ -80,6 +80,7 @@ Instruction EncodePass(const Pass& pass) {
   Field(instruction, 26, 1, U(pass.nodrain));
   Field(instruction, 25, 1, U(pass.x_s1));
   Field(instruction, 24, 2, pass.ctx);
+  Field(instruction, 22, 2, U(pass.rm));
   return instruction;
 }
 
@@ -143,7 +144,11 @@ void Assembler::Label(std::string_view name) {
 }
 
 Assembler& Assembler::Emit(const Pass& pass) {
-  items_.emplace_back(pass);
+  Pass emitted = pass;
+  if (skip_masked_rows_ && emitted.rm == RowMask::kNone) {
+    emitted.rm = RowMask::kSkip;
+  }
+  items_.emplace_back(emitted);
   ++size_;
   return *this;
 }

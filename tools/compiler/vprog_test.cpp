@@ -150,6 +150,29 @@ TEST(VprogTest, AssemblerEnablesX2AndRawCopies) {
   EXPECT_EQ(plain.Words()[0].Get(29, 3), 0U);
 }
 
+TEST(VprogTest, PassPlacesTheContextAndRowMask) {
+  const Instruction word =
+      EncodePass({.wr = Write::kNone, .ctx = 1, .rm = RowMask::kSet});
+  EXPECT_EQ(word.Get(23, 2), 1U);
+  EXPECT_EQ(word.Get(21, 2), 2U);
+  EXPECT_EQ(word.Get(0, 21), 0U);
+}
+
+TEST(VprogTest, AssemblerSkipsMaskedRowsInsideARegion) {
+  Assembler a;
+  a.Emit({.rx = 1, .rd = 3, .wr = Write::kFbuf});
+  a.SkipMaskedRows(true);
+  a.Emit({.rx = 1, .rd = 3, .wr = Write::kFbuf});
+  a.Emit({.rx = 1, .wr = Write::kNone, .rm = RowMask::kSet});
+  a.SkipMaskedRows(false);
+  a.Emit({.rx = 1, .rd = 3, .wr = Write::kFbuf});
+  const std::vector<Instruction> words = a.Words();
+  EXPECT_EQ(words[0].Get(21, 2), 0U);
+  EXPECT_EQ(words[1].Get(21, 2), static_cast<uint64_t>(RowMask::kSkip));
+  EXPECT_EQ(words[2].Get(21, 2), static_cast<uint64_t>(RowMask::kSet));
+  EXPECT_EQ(words[3].Get(21, 2), 0U);
+}
+
 TEST(VprogTest, Transpose8PlacesItsRegistersAndPackBit) {
   Assembler a(true);
   a.Transpose8(11, 3, 4, 5, 12, 13, 4, TransposePack::kZip4);

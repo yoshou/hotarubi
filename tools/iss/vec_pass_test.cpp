@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <random>
@@ -722,6 +723,109 @@ TEST_F(VecPassTest, RejectsProgramsWithUndefinedResults) {
   EXPECT_DEATH(
       Run({encoding::Pass(empty), encoding::Ret()}, {10, 50}, 30, 1, 4),
       "0 quads");
+}
+
+TEST_F(VecPassTest, RowMaskSkipsTheRowsAMarkingPassFoundZero) {
+  constexpr uint32_t kQuads = 8;
+  constexpr uint32_t kWords = 2;
+  Fill(0, kQuads * kWords);
+  Fill(100, kQuads * kWords);
+  for (const size_t q : {0, 1, 3, 4, 5, 6, 7}) {
+    for (size_t w = 0; w < kWords; ++w) {
+      memories_.fbuf.at((q * kWords) + w).fill(0);
+    }
+  }
+  memories_.fbuf.at(size_t{2} * kWords).fill(0);
+  PassFields mark = Copy();
+  mark.wr = 0;
+  mark.ialu = 4;
+  mark.rm = 2;
+  mark.nodrain = 1;
+  PassFields skip = Copy();
+  skip.ialu = 4;
+  skip.rm = 1;
+  Run({encoding::Pass(mark), encoding::Pass(skip), encoding::Ret()}, {0, 0},
+      100, kQuads, kWords);
+  for (uint32_t q = 0; q < kQuads; ++q) {
+    for (uint32_t w = 0; w < kWords; ++w) {
+      const uint32_t word = (q * kWords) + w;
+      for (uint32_t e = 0; e < kFbufElements; ++e) {
+        ASSERT_EQ(After(100 + word, e),
+                  q == 2 ? Before(word, e) : Before(100 + word, e))
+            << "row " << q << " word " << w << " element " << e;
+      }
+    }
+  }
+  EXPECT_EQ(engine_.Activity().skipped_rows, kQuads - 1);
+  EXPECT_EQ(engine_.Activity().skip_cycles, 2U);
+  EXPECT_EQ(engine_.Activity().words, (kQuads * kWords) + kWords);
+  EXPECT_EQ(engine_.Activity().drains, 2U);
+  EXPECT_EQ(engine_.Activity().overlaps, 0U);
+}
+
+TEST_F(VecPassTest, SkipRunsAfterAnIssuedWordCostTheRestartOfTheNextWord) {
+  for (const uint32_t x2 : {0U, 1U}) {
+    for (const uint32_t wr : {0U, 1U}) {
+      for (const uint32_t k : {1U, 2U, 3U, 6U}) {
+        const uint32_t quads = k + 2;
+        Fill(0, quads);
+        Fill(50, quads);
+        for (uint32_t q = 1; q <= k; ++q) {
+          memories_.fbuf.at(q).fill(0);
+        }
+        PassFields mark = Copy();
+        mark.wr = 0;
+        mark.ialu = 4;
+        mark.rm = 2;
+        PassFields skip = Copy();
+        skip.rx2 = kSrc2;
+        skip.x2_en = x2;
+        skip.c0 = x2;
+        skip.wr = wr;
+        skip.rm = 1;
+        Run({encoding::Pass(mark), encoding::Pass(skip), encoding::Ret()},
+            {0, 50}, 100, quads, 1);
+        const uint32_t restart = (1 + x2) * (1 + wr);
+        EXPECT_EQ(engine_.Activity().skipped_rows, k);
+        EXPECT_EQ(engine_.Activity().skip_cycles,
+                  std::max(k + restart, kWordCycles) - kWordCycles)
+            << "x2 " << x2 << " wr " << wr << " run " << k;
+      }
+    }
+  }
+}
+
+TEST_F(VecPassTest, TrailingSkipRunsAreHiddenOnlyByADrain) {
+  constexpr auto kDrainHidden =
+      static_cast<uint32_t>(kOverlapLatencyWords * kWordCycles);
+  for (const uint32_t run : {5U, kDrainHidden + 7}) {
+    for (const bool overlap : {false, true}) {
+      const uint32_t quads = run + 1;
+      Fill(0, quads);
+      for (uint32_t q = 1; q < quads; ++q) {
+        memories_.fbuf.at(q).fill(0);
+      }
+      PassFields mark = Copy();
+      mark.wr = 0;
+      mark.ialu = 4;
+      mark.rm = 2;
+      PassFields skip = Copy();
+      skip.rm = 1;
+      std::vector<Word128> program = {encoding::Pass(mark),
+                                      encoding::Pass(skip)};
+      if (overlap) {
+        PassFields second = skip;
+        second.rd = kSrc2;
+        program.push_back(encoding::Pass(second));
+      }
+      program.push_back(encoding::Ret());
+      Run(program, {0, 300}, 100, quads, 1);
+      const uint32_t drained = std::max(run, kDrainHidden) - kDrainHidden;
+      EXPECT_EQ(engine_.Activity().skip_cycles,
+                overlap ? run + drained : drained)
+          << "run " << run << " overlap " << overlap;
+    }
+  }
 }
 
 TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {

@@ -147,6 +147,12 @@ package vec_pkg;
     SelRs1  = 3'd6
   } sel_e;
 
+  typedef enum logic [1:0] {
+    RmNone = 2'd0,
+    RmSkip = 2'd1,
+    RmSet  = 2'd2
+  } rm_e;
+
   typedef enum logic [2:0] {
     IaluNone = 3'd0,
     IaluAdd  = 3'd1,
@@ -185,12 +191,13 @@ package vec_pkg;
     logic       c0_pred;
     logic       nodrain;
     logic [CtxW-1:0] ctx;
+    rm_e        rm;
   } pass_t;
 
   function automatic pass_t dec_pass(input logic [127:0] w);
     pass_t d;
     logic  unused_w;
-    unused_w = ^{w[127:124], w[46:44], w[22:0]};
+    unused_w = ^{w[127:124], w[46:44], w[20:0]};
     d.rx        = w[123:119];
     d.rx2       = w[118:114];
     d.rd        = w[113:109];
@@ -227,6 +234,7 @@ package vec_pkg;
     d.nodrain   = w[26];
     d.x_s1      = w[25];
     d.ctx       = w[24:23];
+    d.rm        = (w[22:21] == 2'd3) ? RmNone : rm_e'(w[22:21]);
     return d;
   endfunction
 
@@ -283,6 +291,9 @@ package vec_pkg;
     sel_e        sel;
     ia_e         ialu;
     logic        c0_pred;
+    logic        rm_set;
+    logic        row_end;
+    logic [8:0]  row;
     logic [31:0] imm;
     logic [31:0] imm2;
   } ctrl_t;

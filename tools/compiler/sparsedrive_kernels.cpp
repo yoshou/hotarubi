@@ -706,6 +706,22 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
   a.Memory(vp::Smem::kSld, {.rd = 14, .ra = 9, .rb = 29});
   a.Alu(vp::Salu::kAdd, 29, 29, 0, 1);
   a.Memory(vp::Smem::kSld, {.rd = 15, .ra = 9, .rb = 29});
+  k.Pl(11, "VM");
+  a.Emit({.rx = 11,
+          .rq = 4,
+          .rnw = 28,
+          .rn8 = 5,
+          .wr = vp::Write::kNone,
+          .ialu = vp::Ialu::kOr,
+          .rm = vp::RowMask::kSet});
+  k.P({.rx = 11,
+       .rd = 3,
+       .cmp = vp::Cmp::kLt,
+       .cmp_src = vp::CmpSrc::kLane,
+       .cmp_int = true,
+       .sel = vp::Sel::kNull,
+       .dst_s1 = true});
+  a.SkipMaskedRows(true);
   k.HalfPixel();
   k.Pl(23, "P1");
   k.Pl(24, "P2");
@@ -809,6 +825,7 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
        .c0 = vp::C0::kX2,
        .ialu = vp::Ialu::kOr,
        .dst_s1 = true});
+  a.SkipMaskedRows(false);
   a.Ret();
   return a;
 }
@@ -958,6 +975,30 @@ vp::Assembler MapKeypointLevel(uint32_t tq) {
     }
     a.Memory(vp::Smem::kSld, {.rd = rd, .ra = 9, .rb = 29});
   }
+  k.Pl(11, "VM");
+  a.Emit({.rx = 11,
+          .rq = 4,
+          .rnw = 28,
+          .rn8 = 5,
+          .wr = vp::Write::kNone,
+          .ialu = vp::Ialu::kOr,
+          .rm = vp::RowMask::kSet});
+  a.LoadImmediate(16, 4);
+  for (const auto& [plane, sel] :
+       {std::pair{"A0", vp::Sel::kNull}, std::pair{"B0", vp::Sel::kZero}}) {
+    k.Pl(12, plane);
+    a.Emit({.rx = 11,
+            .rd = 12,
+            .rq = 4,
+            .rnw = 16,
+            .rn8 = 5,
+            .wr = vp::Write::kFbuf,
+            .cmp = vp::Cmp::kLt,
+            .cmp_src = vp::CmpSrc::kLane,
+            .cmp_int = true,
+            .sel = sel});
+  }
+  a.SkipMaskedRows(true);
   k.HalfPixel();
   k.Pl(23, "P1");
   k.Pl(24, "P2");
@@ -980,6 +1021,7 @@ vp::Assembler MapKeypointLevel(uint32_t tq) {
   for (uint32_t n = 0; n < 4; ++n) {
     MapKeypointCorner(a, k, n);
   }
+  a.SkipMaskedRows(false);
   k.Pl(11, "A0");
   a.LoadImmediate(12, 1);
   a.Transpose8(11, 3, 4, 5, 12, 12, 4, vp::TransposePack::kZip4);
