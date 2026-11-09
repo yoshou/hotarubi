@@ -558,14 +558,16 @@ module dma_engine (
 
   function automatic logic [127:0] zb(input logic [7:0] z);
     logic [127:0] r;
+    logic [7:0]   d;
     r = '0;
+    d = z - 8'({c_tok, 1'b0});
     if (c_abuf) begin
       if (!c_row && z == 8'd8) begin
         r[31:0] = 32'h7F7F7F7F;
       end
       if (c_row && z >= 8'({c_tok, 1'b0})) begin
         for (int i = 0; i < 16; i++) begin
-          if (int'(32'(z) - 32'({c_tok, 1'b0})) * 16 + i < int'(c_tok)) begin
+          if ({d, 4'(i)} < 12'(c_tok)) begin
             r[8 * i +: 8] = 8'h7F;
           end
         end
@@ -573,6 +575,17 @@ module dma_engine (
     end
     return r;
   endfunction
+
+  logic       z_step;
+  logic [7:0] zcnt_n;
+
+  assign z_step = src_pop && c_idx && (c_mode == ModeRaw);
+  assign zcnt_n = (setup_pulse || (z_step && (zcnt == ubeats - 1'b1))) ? 8'd0 :
+                  z_step ? zcnt + 1'b1 : zcnt;
+
+  always_ff @(posedge clk_i) begin
+    zbeat <= zb(zcnt_n);
+  end
 
   assign src_v   = c_gacc ? 1'b0 :
                    (c_idx && c_mode == ModeRaw) ? (unit_known && (null_act || !rf_empty)) :
@@ -586,30 +599,22 @@ module dma_engine (
       unit_known <= 1'b1;
       null_act   <= 1'b0;
       zcnt       <= '0;
-      zbeat      <= '0;
       u_left     <= '0;
     end else if (setup_pulse) begin
       unit_known <= !(c_idx && c_mode == ModeRaw);
       null_act   <= 1'b0;
       zcnt       <= '0;
-      zbeat      <= zb(8'd0);
       u_left     <= c_idx ? rows_w : 24'd0;
     end else begin
       if (uf_pop) begin
         unit_known <= 1'b1;
         null_act   <= uf_dout;
       end
-      if (src_pop && c_idx && c_mode == ModeRaw) begin
-        if (zcnt == ubeats - 1'b1) begin
-          zcnt       <= '0;
-          zbeat      <= zb(8'd0);
-          unit_known <= 1'b0;
-          null_act   <= 1'b0;
-          u_left     <= u_left - 1'b1;
-        end else begin
-          zcnt  <= zcnt + 1'b1;
-          zbeat <= zb(zcnt + 1'b1);
-        end
+      zcnt <= zcnt_n;
+      if (z_step && (zcnt == ubeats - 1'b1)) begin
+        unit_known <= 1'b0;
+        null_act   <= 1'b0;
+        u_left     <= u_left - 1'b1;
       end
       if (c_st && c_idx && ((st_word_idx && ((rd_req_o && rd_grant_i) || rd_skip)) ||
                             (st_tok_idx && tok_end))) begin
@@ -653,7 +658,6 @@ module dma_engine (
     end else begin
       wv <= 1'b0;
       if (src_pop && c_mode != ModeT32 && !c_row) begin
-        asm_r[bcnt * 128 +: 128] <= src_d;
         if (bcnt == bpw - 1'b1) begin
           bcnt <= '0;
           wv   <= 1'b1;
@@ -670,6 +674,12 @@ module dma_engine (
           idx <= idx + 1'b1;
         end
       end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (!setup_pulse && src_pop && c_mode != ModeT32 && !c_row) begin
+      asm_r[bcnt * 128 +: 128] <= src_d;
     end
   end
 
@@ -768,7 +778,6 @@ module dma_engine (
     end else begin
       t_v <= t32_out_valid && t32_out_ready;
       if (t32_out_valid && t32_out_ready) begin
-        t_d    <= t32_out;
         t_addr <= blk_base + cg_off + (t32_lo ? n_half : 20'd0);
         t_cnt  <= t_cnt + 1'b1;
         if (t_cnt == 3'd7) begin
@@ -782,6 +791,12 @@ module dma_engine (
           end
         end
       end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (!setup_pulse && t32_out_valid && t32_out_ready) begin
+      t_d <= t32_out;
     end
   end
 
@@ -824,9 +839,14 @@ module dma_engine (
       ibr_v <= 1'b0;
     end else if (ibr_load) begin
       ibr_v <= 1'b1;
-      ibr_d <= ib_dout;
     end else if (ibr_v && ga_ent_ready) begin
       ibr_v <= 1'b0;
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (!setup_pulse && ibr_load) begin
+      ibr_d <= ib_dout;
     end
   end
 
@@ -931,6 +951,11 @@ module dma_engine (
       wo_v <= 1'b0;
     end else if (!wo_v || wr_grant_i) begin
       wo_v <= !wf_empty;
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (!wo_v || wr_grant_i) begin
       wo_d <= wf_dout;
     end
   end
@@ -1000,13 +1025,11 @@ module dma_engine (
         end
       end
       if (rdv[2]) begin
-        hold     <= rd_data_i;
         hold_v   <= 1'b1;
         inflight <= 1'b0;
       end
       if (!c_row) begin
         if (!ser_v && hold_v) begin
-          ser    <= {96'd0, hold};
           ser_v  <= 1'b1;
           scnt   <= '0;
           hold_v <= 1'b0;
@@ -1021,6 +1044,15 @@ module dma_engine (
       end else if (hold_v && rf_win_ready) begin
         hold_v <= 1'b0;
       end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (!setup_pulse && rdv[2]) begin
+      hold <= rd_data_i;
+    end
+    if (!setup_pulse && !c_row && !ser_v && hold_v) begin
+      ser <= {96'd0, hold};
     end
   end
 

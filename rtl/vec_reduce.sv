@@ -37,12 +37,15 @@ module vec_reduce
       in_valid_r <= 1'b0;
     end else begin
       in_valid_r <= in_valid_i;
-      y_r        <= y_i;
-      ph_r       <= ph_i;
-      ctx_r      <= ctx_i;
-      j_r        <= j_i;
-      red_r      <= red_i;
     end
+  end
+
+  always_ff @(posedge clk_i) begin
+    y_r   <= y_i;
+    ph_r  <= ph_i;
+    ctx_r <= ctx_i;
+    j_r   <= j_i;
+    red_r <= red_i;
   end
 
   logic [31:0] l1 [4], l2 [2], l3;

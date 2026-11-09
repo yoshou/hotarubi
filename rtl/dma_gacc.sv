@@ -31,7 +31,7 @@ module dma_gacc (
   output logic          null_o
 );
 
-  localparam int Nl     = 8;
+  localparam int Nl     = 16;
   localparam int LMul   = 6;
   localparam int LAdd   = 6;
   localparam int LWb    = 2 + LMul + LAdd;
@@ -44,7 +44,7 @@ module dma_gacc (
   logic [12:0] dst;
   logic [31:0] w_base;
   logic [15:0] w_gstride, w_qwords;
-  logic [31:0] w_qoff, w_grp, wreq_addr;
+  logic [31:0] w_qoff, w_grp, pq_addr;
   logic [4:0]  nd;
   logic [5:0]  row_beats;
 
@@ -57,7 +57,6 @@ module dma_gacc (
     GHdr,
     GWmul,
     GWadd,
-    GWreq,
     GWwait,
     GEnt,
     GDrain,
@@ -65,16 +64,20 @@ module dma_gacc (
   } st_e;
 
   st_e          st;
+  logic         zeroing, flushing;
   logic [11:0]  s_cur;
   logic [2:0]   s_in_grp;
   logic [1:0]   e_t, e_k;
   logic         e_half;
-  logic [3:0]   wreq_kb, wrcv_kb;
-  logic [2:0]   wrcv_b;
+  logic [3:0]   pq_kb, rx_kb;
+  logic [2:0]   rx_b;
+  logic [8:0]   grp_left;
+  logic         pq_on, rx_on, rx_half, nx_ready, wh_cur, wh_cm;
+  logic         ent_req, pq_fire, w_fire, grp_end, adv;
   logic         wr_we;
-  logic [5:0]   wr_wa, wr_ra;
+  logic [6:0]   wr_wa, wr_ra;
   logic [31:0]  wr_rd [4];
-  logic [6:0]   zcnt;
+  logic [5:0]   zcnt;
   logic [3:0]   drain_cnt;
   logic         cm_busy, cm_pend;
   logic [2:0]   cm_i;
@@ -94,24 +97,24 @@ module dma_gacc (
   logic [127:0] rscale [2];
   logic [257:0] rinfo [2];
   logic         mac_busy, mac_row_end, mac_start, pipe_empty;
-  logic [4:0]   mac_b;
+  logic [3:0]   mac_b;
   logic [7:0]   gap [4];
   logic         p_v [LWb + 1];
   logic [1:0]   p_t [LWb + 1];
-  logic [4:0]   p_b [LWb + 1];
-  logic [6:0]   rd_idx_d [LMul + 1];
-  logic [63:0]  md_r;
+  logic [3:0]   p_b [LWb + 1];
+  logic [5:0]   rd_idx_d [LMul + 1];
+  logic [127:0] md_r;
   logic [31:0]  mc_r;
   logic [7:0]   me_r;
   logic [31:0]  xf [Nl], prod [Nl], acc_q [Nl], sum [Nl], fl_q [Nl];
   logic [31:0]  cs, cs_d;
   logic [9:0]   cs_e;
   logic         acc_we;
-  logic [6:0]   acc_wa;
+  logic [5:0]   acc_wa;
   logic [31:0]  acc_wd [Nl];
-  logic         fl_rd_v, fl_word_v;
+  logic         fl_rd_v, fl_rd_v2, fl_word_v;
   logic [5:0]   fl_g, fl_g_d;
-  logic [1:0]   fl_t, fl_t_d;
+  logic [1:0]   fl_t, fl_t_d, fl_t_d2;
   logic [1023:0] fl_word;
 
   typedef enum logic [1:0] {
@@ -127,29 +130,98 @@ module dma_gacc (
 
   assign ent_cur     = e_half ? ent_data_i[127:64] : ent_data_i[63:0];
   assign ent_null    = (ent_cur[31:0] == 32'hFFFFFFFF);
-  assign ent_ok      = (st == GEnt) && ent_valid_i && !cm_busy && !cm_pend && !pf_afull &&
-                       (ent_null || req_ready_i);
+  assign ent_ok      = (st == GEnt) && ent_valid_i &&
+                       (ent_null || (!cm_busy && !cm_pend && !pf_afull && req_ready_i));
   assign ent_take    = ent_ok;
   assign ent_ready_o = (st == GHdr) ? ent_valid_i : (ent_take && e_half);
+
+  assign ent_req = (st == GEnt) && ent_valid_i && !ent_null && !cm_busy && !cm_pend && !pf_afull;
+  assign pq_fire = pq_on && !ent_req && req_ready_i;
 
   always_comb begin
     req_valid_o = 1'b0;
     req_addr_o  = '0;
     req_beats_o = '0;
     req_tag_o   = 2'd0;
-    w_ready_o   = 1'b0;
-    if (st == GWreq) begin
+    if (ent_req) begin
       req_valid_o = 1'b1;
-      req_tag_o   = 2'd2;
-      req_beats_o = 16'd8;
-      req_addr_o  = wreq_addr;
-    end else if (st == GEnt) begin
-      req_valid_o = ent_valid_i && !ent_null && !cm_busy && !cm_pend && !pf_afull;
       req_addr_o  = {ent_cur[27:0], 4'b0};
       req_beats_o = 16'(row_beats);
       req_tag_o   = 2'd0;
-    end else if (st == GWwait) begin
-      w_ready_o = 1'b1;
+    end else if (pq_on) begin
+      req_valid_o = 1'b1;
+      req_tag_o   = 2'd2;
+      req_beats_o = 16'd8;
+      req_addr_o  = pq_addr;
+    end
+  end
+
+  assign w_ready_o = rx_on && !(cm_busy && (wh_cm == rx_half));
+  assign w_fire    = w_valid_i && w_ready_o;
+  assign grp_end   = ent_take && (e_k == 2'd3) && (e_t == 2'd3) && (s_in_grp == 3'd7) &&
+                     (s_cur != slots - 1'b1);
+  assign adv       = nx_ready && ((st == GWwait) || grp_end);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni || clear_i) begin
+      pq_on    <= 1'b0;
+      rx_on    <= 1'b0;
+      nx_ready <= 1'b0;
+    end else begin
+      if (st == GWadd) begin
+        pq_on    <= 1'b1;
+        rx_on    <= 1'b1;
+        nx_ready <= 1'b0;
+      end else if (adv && grp_left != 9'd0) begin
+        pq_on    <= 1'b1;
+        rx_on    <= 1'b1;
+        nx_ready <= 1'b0;
+      end else begin
+        if (adv) begin
+          nx_ready <= 1'b0;
+        end
+        if (pq_fire && pq_kb == kb - 1'b1) begin
+          pq_on <= 1'b0;
+        end
+        if (w_fire && rx_b == 3'd7 && rx_kb == kb - 1'b1) begin
+          rx_on    <= 1'b0;
+          nx_ready <= 1'b1;
+        end
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (st == GWadd) begin
+      w_grp    <= w_base + (w_qoff << 7);
+      pq_addr  <= w_base + (w_qoff << 7);
+      pq_kb    <= '0;
+      rx_kb    <= '0;
+      rx_b     <= '0;
+      rx_half  <= 1'b0;
+      grp_left <= 9'((slots + 12'd7) >> 3) - 9'd1;
+    end else if (adv && grp_left != 9'd0) begin
+      w_grp    <= w_grp + 32'd128;
+      pq_addr  <= w_grp + 32'd128;
+      pq_kb    <= '0;
+      rx_kb    <= '0;
+      rx_b     <= '0;
+      rx_half  <= ~rx_half;
+      grp_left <= grp_left - 9'd1;
+    end else begin
+      if (pq_fire) begin
+        pq_kb   <= pq_kb + 1'b1;
+        pq_addr <= pq_addr + 32'({w_gstride, 7'b0});
+      end
+      if (w_fire) begin
+        rx_b <= rx_b + 1'b1;
+        if (rx_b == 3'd7) begin
+          rx_kb <= rx_kb + 1'b1;
+        end
+      end
+    end
+    if (adv) begin
+      wh_cur <= rx_half;
     end
   end
 
@@ -161,11 +233,10 @@ module dma_gacc (
       e_t       <= '0;
       e_k       <= '0;
       e_half    <= 1'b0;
-      wreq_kb   <= '0;
-      wrcv_kb   <= '0;
-      wrcv_b    <= '0;
       zcnt      <= '0;
       drain_cnt <= '0;
+      zeroing   <= 1'b0;
+      flushing  <= 1'b0;
     end else begin
       case (st)
         GIdle: begin
@@ -184,12 +255,14 @@ module dma_gacc (
             zcnt      <= '0;
             drain_cnt <= '0;
             st        <= cfg_acc_i ? GHdr : GZero;
+            zeroing   <= !cfg_acc_i;
           end
         end
         GZero: begin
           zcnt <= zcnt + 1'b1;
-          if (zcnt == 7'd127) begin
-            st <= GHdr;
+          if (zcnt == 6'd63) begin
+            st      <= GHdr;
+            zeroing <= 1'b0;
           end
         end
         GHdr: begin
@@ -200,40 +273,16 @@ module dma_gacc (
             if (slots == 12'd0) begin
               st <= GDrain;
             end else begin
-              st      <= GWmul;
-              wreq_kb <= '0;
-              wrcv_kb <= '0;
-              wrcv_b  <= '0;
+              st <= GWmul;
             end
           end
         end
         GWmul: st <= GWadd;
-        GWadd: begin
-          w_grp     <= w_base + (w_qoff << 7);
-          wreq_addr <= w_base + (w_qoff << 7);
-          st        <= GWreq;
-        end
-        GWreq: begin
-          if (req_ready_i) begin
-            wreq_kb   <= wreq_kb + 1'b1;
-            wreq_addr <= wreq_addr + 32'({w_gstride, 7'b0});
-            if (wreq_kb == kb - 1'b1) begin
-              st <= GWwait;
-            end
-          end
-        end
+        GWadd: st <= GWwait;
         GWwait: begin
-          if (w_valid_i) begin
-            wrcv_b <= wrcv_b + 1'b1;
-            if (wrcv_b == 3'd7) begin
-              if (wrcv_kb == kb - 1'b1) begin
-                wrcv_kb  <= '0;
-                st       <= GEnt;
-                s_in_grp <= '0;
-              end else begin
-                wrcv_kb <= wrcv_kb + 1'b1;
-              end
-            end
+          if (adv) begin
+            st       <= GEnt;
+            s_in_grp <= '0;
           end
         end
         GEnt: begin
@@ -247,11 +296,8 @@ module dma_gacc (
                 s_in_grp <= s_in_grp + 1'b1;
                 if (s_cur == slots - 1'b1) begin
                   st <= GDrain;
-                end else if (s_in_grp == 3'd7) begin
-                  st        <= GWreq;
-                  wreq_kb   <= '0;
-                  w_grp     <= w_grp + 32'd128;
-                  wreq_addr <= w_grp + 32'd128;
+                end else if (s_in_grp == 3'd7 && !nx_ready) begin
+                  st <= GWwait;
                 end
               end else begin
                 e_t <= e_t + 1'b1;
@@ -267,6 +313,7 @@ module dma_gacc (
             if (drain_cnt == 4'd3) begin
               drain_cnt <= '0;
               st        <= do_flush ? GFlush : GIdle;
+              flushing  <= do_flush;
             end
           end else begin
             drain_cnt <= '0;
@@ -274,10 +321,15 @@ module dma_gacc (
         end
         GFlush: begin
           if (fl_st == FEnd) begin
-            st <= GIdle;
+            st       <= GIdle;
+            flushing <= 1'b0;
           end
         end
-        default: st <= GIdle;
+        default: begin
+          st       <= GIdle;
+          zeroing  <= 1'b0;
+          flushing <= 1'b0;
+        end
       endcase
     end
   end
@@ -286,12 +338,12 @@ module dma_gacc (
     w_qoff <= 32'(quad) * 32'(w_qwords);
   end
 
-  assign wr_we = (st == GWwait) && w_valid_i;
-  assign wr_wa = {wrcv_kb[2:0], wrcv_b};
-  assign wr_ra = {cm_i, cm_t, cm_col[2]};
+  assign wr_we = w_fire;
+  assign wr_wa = {rx_half, rx_kb[2:0], rx_b};
+  assign wr_ra = {wh_cm, cm_i, cm_t, cm_col[2]};
 
   for (genvar gb = 0; gb < 4; gb++) begin : wbank
-    (* ram_style = "distributed" *) logic [31:0] mem [64];
+    (* ram_style = "distributed" *) logic [31:0] mem [128];
 
     always_ff @(posedge clk_i) begin
       if (wr_we) begin
@@ -329,20 +381,15 @@ module dma_gacc (
         cm_v[i] <= 1'b0;
       end
     end else begin
-      cm_v[0]   <= cm_busy;
-      cm_i_d[0] <= cm_i;
+      cm_v[0] <= cm_busy;
       for (int i = 1; i <= LMul; i++) begin
-        cm_v[i]   <= cm_v[i-1];
-        cm_i_d[i] <= cm_i_d[i-1];
+        cm_v[i] <= cm_v[i-1];
       end
       if (ent_take && !ent_null) begin
         cm_busy <= 1'b1;
         cm_pend <= 1'b1;
         cm_i    <= '0;
         cm_cnt  <= '0;
-        cm_bw   <= ent_cur[63:32];
-        cm_t    <= e_t;
-        cm_col  <= s_cur[2:0];
       end else if (cm_busy) begin
         cm_i <= cm_i + 1'b1;
         if (cm_i == 3'd7) begin
@@ -350,12 +397,27 @@ module dma_gacc (
         end
       end
       if (cm_v[LMul - 1]) begin
-        cm_c[cm_i_d[LMul - 1] * 32 +: 32] <= cm_y;
-        cm_cnt                            <= cm_cnt + 1'b1;
+        cm_cnt <= cm_cnt + 1'b1;
       end
       if (pf_push) begin
         cm_pend <= 1'b0;
       end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    cm_i_d[0] <= cm_i;
+    for (int i = 1; i <= LMul; i++) begin
+      cm_i_d[i] <= cm_i_d[i-1];
+    end
+    if (!clear_i && ent_take && !ent_null) begin
+      cm_bw  <= ent_cur[63:32];
+      cm_t   <= e_t;
+      cm_col <= s_cur[2:0];
+      wh_cm  <= wh_cur;
+    end
+    if (!clear_i && cm_v[LMul - 1]) begin
+      cm_c[cm_i_d[LMul - 1] * 32 +: 32] <= cm_y;
     end
   end
 
@@ -392,14 +454,10 @@ module dma_gacc (
       rfull   <= '0;
     end else begin
       if (row_fire) begin
-        if (rb_b >= nd) begin
-          rscale[rb_fill] <= row_data_i;
-        end
         if (row_last) begin
           rb_b           <= '0;
           rfull[rb_fill] <= 1'b1;
           rb_fill        <= ~rb_fill;
-          rinfo[rb_fill] <= pf_dout;
         end else begin
           rb_b <= rb_b + 1'b1;
         end
@@ -414,14 +472,20 @@ module dma_gacc (
     if (row_fire && rb_b < nd) begin
       rbuf[{rb_fill, rb_b[3:0]}] <= row_data_i;
     end
+    if (!clear_i && row_fire && rb_b >= nd) begin
+      rscale[rb_fill] <= row_data_i;
+    end
+    if (!clear_i && row_last) begin
+      rinfo[rb_fill] <= pf_dout;
+    end
   end
 
   logic [1:0] mac_t;
 
   assign mac_t       = rinfo[rb_mac][257:256];
-  assign mac_start   = !mac_busy && rfull[rb_mac] && (gap[mac_t] == 8'd0) && (st != GFlush) &&
-                       (st != GZero);
-  assign mac_row_end = mac_busy && (mac_b == 5'(6'({nd, 1'b0}) - 6'd1));
+  assign mac_start   = !mac_busy && rfull[rb_mac] && (gap[mac_t] == 8'd0) && !flushing &&
+                       !zeroing;
+  assign mac_row_end = mac_busy && (mac_b == 4'(nd - 5'd1));
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni || clear_i) begin
@@ -455,7 +519,7 @@ module dma_gacc (
   logic [7:0]  mac_e;
   logic [31:0] mac_c;
 
-  assign mac_kb = 4'(mac_b[4:2]);
+  assign mac_kb = 4'(mac_b[3:1]);
   assign mac_e  = rscale[rb_mac][mac_kb * 8 +: 8];
   assign mac_c  = rinfo[rb_mac][mac_kb * 32 +: 32];
 
@@ -471,9 +535,9 @@ module dma_gacc (
   end
 
   logic [127:0] mac_data;
-  logic [6:0]   rd_idx;
+  logic [5:0]   rd_idx;
 
-  assign mac_data = rbuf[{rb_mac, mac_b[4:1]}];
+  assign mac_data = rbuf[{rb_mac, mac_b}];
   assign rd_idx   = {mac_t, mac_b};
 
   function automatic logic [31:0] i8_to_f32(input logic [7:0] q);
@@ -503,18 +567,23 @@ module dma_gacc (
       end
     end else begin
       p_v[0] <= mac_busy;
-      p_t[0] <= mac_t;
-      p_b[0] <= mac_b;
       for (int i = 1; i <= LWb; i++) begin
         p_v[i] <= p_v[i-1];
-        p_t[i] <= p_t[i-1];
-        p_b[i] <= p_b[i-1];
       end
     end
   end
 
   always_ff @(posedge clk_i) begin
-    md_r <= mac_b[0] ? mac_data[127:64] : mac_data[63:0];
+    p_t[0] <= mac_t;
+    p_b[0] <= mac_b;
+    for (int i = 1; i <= LWb; i++) begin
+      p_t[i] <= p_t[i-1];
+      p_b[i] <= p_b[i-1];
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    md_r <= mac_data;
     mc_r <= mac_c;
     me_r <= mac_e;
     for (int l = 0; l < Nl; l++) begin
@@ -551,36 +620,43 @@ module dma_gacc (
   end
 
   logic       wb_v;
-  logic [6:0] wb_idx;
+  logic [5:0] wb_idx;
 
   assign wb_v   = p_v[LWb - 1];
   assign wb_idx = {p_t[LWb - 1], p_b[LWb - 1]};
-  assign acc_we = (st == GZero) || wb_v;
-  assign acc_wa = (st == GZero) ? zcnt : wb_idx;
+  assign acc_we = zeroing || wb_v;
+  assign acc_wa = zeroing ? zcnt : wb_idx;
 
   always_comb begin
     for (int l = 0; l < Nl; l++) begin
-      acc_wd[l] = (st == GZero) ? 32'd0 : sum[l];
+      acc_wd[l] = zeroing ? 32'd0 : sum[l];
     end
   end
 
-  logic [6:0] fl_idx;
+  logic [5:0] fl_idx;
 
-  assign fl_idx = {fl_t, fl_g[4:0]};
+  assign fl_idx = {fl_t, fl_g[4:1]};
 
-  for (genvar gl = 0; gl < Nl; gl++) begin : accl
-    (* ram_style = "distributed" *) logic [31:0] accm [128];
+  (* ram_style = "block" *) logic [Nl*32-1:0] accm [64];
+  logic [Nl*32-1:0] acc_wd_w, acc_rd_m, acc_rd;
+  logic [5:0]       acc_ra;
 
-    always_ff @(posedge clk_i) begin
-      if (acc_we) begin
-        accm[acc_wa] <= acc_wd[gl];
-      end
+  assign acc_ra = flushing ? fl_idx : rd_idx_d[LMul - 1];
+
+  always_comb begin
+    for (int l = 0; l < Nl; l++) begin
+      acc_wd_w[l*32 +: 32] = acc_wd[l];
+      acc_q[l]             = acc_rd[l*32 +: 32];
+      fl_q[l]              = acc_rd[l*32 +: 32];
     end
+  end
 
-    always_ff @(posedge clk_i) begin
-      acc_q[gl] <= accm[rd_idx_d[LMul]];
-      fl_q[gl]  <= accm[fl_idx];
+  always_ff @(posedge clk_i) begin
+    if (acc_we) begin
+      accm[acc_wa] <= acc_wd_w;
     end
+    acc_rd_m <= accm[acc_ra];
+    acc_rd   <= acc_rd_m;
   end
 
   always_comb begin
@@ -602,10 +678,12 @@ module dma_gacc (
       fl_g      <= '0;
       fl_t      <= '0;
       fl_rd_v   <= 1'b0;
+      fl_rd_v2  <= 1'b0;
       fl_word_v <= 1'b0;
     end else begin
-      fl_rd_v <= 1'b0;
-      if (st != GFlush) begin
+      fl_rd_v  <= 1'b0;
+      fl_rd_v2 <= fl_rd_v;
+      if (!flushing) begin
         fl_st     <= FRead;
         fl_g      <= '0;
         fl_t      <= '0;
@@ -614,8 +692,6 @@ module dma_gacc (
         case (fl_st)
           FRead: begin
             fl_rd_v <= 1'b1;
-            fl_t_d  <= fl_t;
-            fl_g_d  <= fl_g;
             if (fl_t == 2'd3) begin
               fl_st <= FWait;
             end else begin
@@ -638,13 +714,21 @@ module dma_gacc (
           end
         endcase
       end
-      if (fl_rd_v) begin
-        for (int c = 0; c < 8; c++) begin
-          fl_word[(fl_t_d * 8 + c) * 32 +: 32] <= fl_q[c];
-        end
-        if (fl_t_d == 2'd3) begin
-          fl_word_v <= 1'b1;
-        end
+      if (fl_rd_v2 && fl_t_d2 == 2'd3) begin
+        fl_word_v <= 1'b1;
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    fl_t_d2 <= fl_t_d;
+    if (!clear_i && flushing && fl_st == FRead) begin
+      fl_t_d <= fl_t;
+      fl_g_d <= fl_g;
+    end
+    if (!clear_i && fl_rd_v2) begin
+      for (int c = 0; c < 8; c++) begin
+        fl_word[(fl_t_d2 * 8 + c) * 32 +: 32] <= fl_q[{fl_g_d[0], 3'(c)}];
       end
     end
   end

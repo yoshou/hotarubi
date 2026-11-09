@@ -103,8 +103,127 @@ module npu_top
   logic        gemm_stat_fed, vec_stat_issue, vec_stat_drain, vec_stat_scalar, vec_stat_pass;
   logic        dma_stat_rd_beat, dma_stat_wr_beat, dma_stat_denied, dma_stat_null;
 
-  assign dma_axi_err = (m0_axi_rvalid_i && m0_axi_rresp_i[1]) ||
-                       (m0_axi_bvalid_i && m0_axi_bresp_i[1]);
+  logic [31:0]  d_axi_araddr, d_axi_awaddr, q_axi_araddr, q_axi_awaddr;
+  logic [7:0]   d_axi_arlen, d_axi_awlen, q_axi_arlen, q_axi_awlen;
+  logic [2:0]   d_axi_arsize, d_axi_awsize, q_axi_arsize, q_axi_awsize;
+  logic [1:0]   d_axi_arburst, d_axi_awburst, q_axi_arburst, q_axi_awburst;
+  logic [1:0]   d_axi_rresp, d_axi_bresp, q_axi_rresp, q_axi_bresp;
+  logic [127:0] d_axi_rdata, d_axi_wdata, q_axi_rdata, q_axi_wdata;
+  logic [15:0]  d_axi_wstrb, q_axi_wstrb;
+  logic         d_axi_arvalid, d_axi_arready, d_axi_rlast, d_axi_rvalid, d_axi_rready;
+  logic         d_axi_awvalid, d_axi_awready, d_axi_wlast, d_axi_wvalid, d_axi_wready;
+  logic         d_axi_bvalid, d_axi_bready;
+  logic         q_axi_arvalid, q_axi_arready, q_axi_rlast, q_axi_rvalid, q_axi_rready;
+  logic         q_axi_awvalid, q_axi_awready, q_axi_wlast, q_axi_wvalid, q_axi_wready;
+  logic         q_axi_bvalid, q_axi_bready;
+
+  axi_slice u_m0 (
+    .clk_i,
+    .rst_ni,
+    .ar_addr_i      (d_axi_araddr),
+    .ar_len_i       (d_axi_arlen),
+    .ar_size_i      (d_axi_arsize),
+    .ar_burst_i     (d_axi_arburst),
+    .ar_valid_i     (d_axi_arvalid),
+    .ar_ready_o     (d_axi_arready),
+    .r_data_o       (d_axi_rdata),
+    .r_resp_o       (d_axi_rresp),
+    .r_last_o       (d_axi_rlast),
+    .r_valid_o      (d_axi_rvalid),
+    .aw_addr_i      (d_axi_awaddr),
+    .aw_len_i       (d_axi_awlen),
+    .aw_size_i      (d_axi_awsize),
+    .aw_burst_i     (d_axi_awburst),
+    .aw_valid_i     (d_axi_awvalid),
+    .aw_ready_o     (d_axi_awready),
+    .w_data_i       (d_axi_wdata),
+    .w_strb_i       (d_axi_wstrb),
+    .w_last_i       (d_axi_wlast),
+    .w_valid_i      (d_axi_wvalid),
+    .w_ready_o      (d_axi_wready),
+    .b_resp_o       (d_axi_bresp),
+    .b_valid_o      (d_axi_bvalid),
+    .m_axi_araddr_o (m0_axi_araddr_o),
+    .m_axi_arlen_o  (m0_axi_arlen_o),
+    .m_axi_arsize_o (m0_axi_arsize_o),
+    .m_axi_arburst_o(m0_axi_arburst_o),
+    .m_axi_arvalid_o(m0_axi_arvalid_o),
+    .m_axi_arready_i(m0_axi_arready_i),
+    .m_axi_rdata_i  (m0_axi_rdata_i),
+    .m_axi_rresp_i  (m0_axi_rresp_i),
+    .m_axi_rlast_i  (m0_axi_rlast_i),
+    .m_axi_rvalid_i (m0_axi_rvalid_i),
+    .m_axi_rready_o (m0_axi_rready_o),
+    .m_axi_awaddr_o (m0_axi_awaddr_o),
+    .m_axi_awlen_o  (m0_axi_awlen_o),
+    .m_axi_awsize_o (m0_axi_awsize_o),
+    .m_axi_awburst_o(m0_axi_awburst_o),
+    .m_axi_awvalid_o(m0_axi_awvalid_o),
+    .m_axi_awready_i(m0_axi_awready_i),
+    .m_axi_wdata_o  (m0_axi_wdata_o),
+    .m_axi_wstrb_o  (m0_axi_wstrb_o),
+    .m_axi_wlast_o  (m0_axi_wlast_o),
+    .m_axi_wvalid_o (m0_axi_wvalid_o),
+    .m_axi_wready_i (m0_axi_wready_i),
+    .m_axi_bresp_i  (m0_axi_bresp_i),
+    .m_axi_bvalid_i (m0_axi_bvalid_i),
+    .m_axi_bready_o (m0_axi_bready_o)
+  );
+
+  axi_slice u_m1 (
+    .clk_i,
+    .rst_ni,
+    .ar_addr_i      (q_axi_araddr),
+    .ar_len_i       (q_axi_arlen),
+    .ar_size_i      (q_axi_arsize),
+    .ar_burst_i     (q_axi_arburst),
+    .ar_valid_i     (q_axi_arvalid),
+    .ar_ready_o     (q_axi_arready),
+    .r_data_o       (q_axi_rdata),
+    .r_resp_o       (q_axi_rresp),
+    .r_last_o       (q_axi_rlast),
+    .r_valid_o      (q_axi_rvalid),
+    .aw_addr_i      (q_axi_awaddr),
+    .aw_len_i       (q_axi_awlen),
+    .aw_size_i      (q_axi_awsize),
+    .aw_burst_i     (q_axi_awburst),
+    .aw_valid_i     (q_axi_awvalid),
+    .aw_ready_o     (q_axi_awready),
+    .w_data_i       (q_axi_wdata),
+    .w_strb_i       (q_axi_wstrb),
+    .w_last_i       (q_axi_wlast),
+    .w_valid_i      (q_axi_wvalid),
+    .w_ready_o      (q_axi_wready),
+    .b_resp_o       (q_axi_bresp),
+    .b_valid_o      (q_axi_bvalid),
+    .m_axi_araddr_o (m1_axi_araddr_o),
+    .m_axi_arlen_o  (m1_axi_arlen_o),
+    .m_axi_arsize_o (m1_axi_arsize_o),
+    .m_axi_arburst_o(m1_axi_arburst_o),
+    .m_axi_arvalid_o(m1_axi_arvalid_o),
+    .m_axi_arready_i(m1_axi_arready_i),
+    .m_axi_rdata_i  (m1_axi_rdata_i),
+    .m_axi_rresp_i  (m1_axi_rresp_i),
+    .m_axi_rlast_i  (m1_axi_rlast_i),
+    .m_axi_rvalid_i (m1_axi_rvalid_i),
+    .m_axi_rready_o (m1_axi_rready_o),
+    .m_axi_awaddr_o (m1_axi_awaddr_o),
+    .m_axi_awlen_o  (m1_axi_awlen_o),
+    .m_axi_awsize_o (m1_axi_awsize_o),
+    .m_axi_awburst_o(m1_axi_awburst_o),
+    .m_axi_awvalid_o(m1_axi_awvalid_o),
+    .m_axi_awready_i(m1_axi_awready_i),
+    .m_axi_wdata_o  (m1_axi_wdata_o),
+    .m_axi_wstrb_o  (m1_axi_wstrb_o),
+    .m_axi_wlast_o  (m1_axi_wlast_o),
+    .m_axi_wvalid_o (m1_axi_wvalid_o),
+    .m_axi_wready_i (m1_axi_wready_i),
+    .m_axi_bresp_i  (m1_axi_bresp_i),
+    .m_axi_bvalid_i (m1_axi_bvalid_i),
+    .m_axi_bready_o (m1_axi_bready_o)
+  );
+
+  assign dma_axi_err = (d_axi_rvalid && d_axi_rresp[1]) || (d_axi_bvalid && d_axi_bresp[1]);
 
   npu_seq u_seq (
     .clk_i,
@@ -127,31 +246,31 @@ module npu_top
     .s_axil_rvalid_o,
     .s_axil_rready_i,
     .irq_o,
-    .m_axi_araddr_o  (m1_axi_araddr_o),
-    .m_axi_arlen_o   (m1_axi_arlen_o),
-    .m_axi_arsize_o  (m1_axi_arsize_o),
-    .m_axi_arburst_o (m1_axi_arburst_o),
-    .m_axi_arvalid_o (m1_axi_arvalid_o),
-    .m_axi_arready_i (m1_axi_arready_i),
-    .m_axi_rdata_i   (m1_axi_rdata_i),
-    .m_axi_rresp_i   (m1_axi_rresp_i),
-    .m_axi_rlast_i   (m1_axi_rlast_i),
-    .m_axi_rvalid_i  (m1_axi_rvalid_i),
-    .m_axi_rready_o  (m1_axi_rready_o),
-    .m_axi_awaddr_o  (m1_axi_awaddr_o),
-    .m_axi_awlen_o   (m1_axi_awlen_o),
-    .m_axi_awsize_o  (m1_axi_awsize_o),
-    .m_axi_awburst_o (m1_axi_awburst_o),
-    .m_axi_awvalid_o (m1_axi_awvalid_o),
-    .m_axi_awready_i (m1_axi_awready_i),
-    .m_axi_wdata_o   (m1_axi_wdata_o),
-    .m_axi_wstrb_o   (m1_axi_wstrb_o),
-    .m_axi_wlast_o   (m1_axi_wlast_o),
-    .m_axi_wvalid_o  (m1_axi_wvalid_o),
-    .m_axi_wready_i  (m1_axi_wready_i),
-    .m_axi_bresp_i   (m1_axi_bresp_i),
-    .m_axi_bvalid_i  (m1_axi_bvalid_i),
-    .m_axi_bready_o  (m1_axi_bready_o),
+    .m_axi_araddr_o  (q_axi_araddr),
+    .m_axi_arlen_o   (q_axi_arlen),
+    .m_axi_arsize_o  (q_axi_arsize),
+    .m_axi_arburst_o (q_axi_arburst),
+    .m_axi_arvalid_o (q_axi_arvalid),
+    .m_axi_arready_i (q_axi_arready),
+    .m_axi_rdata_i   (q_axi_rdata),
+    .m_axi_rresp_i   (q_axi_rresp),
+    .m_axi_rlast_i   (q_axi_rlast),
+    .m_axi_rvalid_i  (q_axi_rvalid),
+    .m_axi_rready_o  (q_axi_rready),
+    .m_axi_awaddr_o  (q_axi_awaddr),
+    .m_axi_awlen_o   (q_axi_awlen),
+    .m_axi_awsize_o  (q_axi_awsize),
+    .m_axi_awburst_o (q_axi_awburst),
+    .m_axi_awvalid_o (q_axi_awvalid),
+    .m_axi_awready_i (q_axi_awready),
+    .m_axi_wdata_o   (q_axi_wdata),
+    .m_axi_wstrb_o   (q_axi_wstrb),
+    .m_axi_wlast_o   (q_axi_wlast),
+    .m_axi_wvalid_o  (q_axi_wvalid),
+    .m_axi_wready_i  (q_axi_wready),
+    .m_axi_bresp_i   (q_axi_bresp),
+    .m_axi_bvalid_i  (q_axi_bvalid),
+    .m_axi_bready_o  (q_axi_bready),
     .dma_axi_err_i   (dma_axi_err),
     .eng_rst_no      (eng_rst_n),
     .gemm_cmd_valid_o(gemm_cmd_valid),
@@ -249,7 +368,8 @@ module npu_top
 
   logic          v_fb_rd_req, v_fb_rd_grant, v_fb_wr_req, v_fb_wr_grant, v_ab_wr_req, v_ab_wr_grant;
   logic [11:0]   v_fb_raddr, v_fb_waddr;
-  logic [1023:0] v_fb_wdata, pbuf_q;
+  logic [1023:0] v_fb_wdata, v_fb_tdata, pbuf_q;
+  logic          v_fb_wtr;
   logic [9:0]    v_pb_addr;
   logic [9:0]    tab_addr [Lanes];
   logic [63:0]   tab_data [Lanes];
@@ -282,6 +402,8 @@ module npu_top
     .fbuf_wr_grant_i(v_fb_wr_grant),
     .fbuf_waddr_o   (v_fb_waddr),
     .fbuf_wdata_o   (v_fb_wdata),
+    .fbuf_wtr_o     (v_fb_wtr),
+    .fbuf_tdata_o   (v_fb_tdata),
     .pbuf_a_addr_o  (v_pb_addr),
     .pbuf_a_rdata_i (pbuf_q),
     .tab_addr_o     (tab_addr),
@@ -320,31 +442,31 @@ module npu_top
     .cmd_flags_i     (dma_flags),
     .cmd_tok_i       (dma_tok),
     .busy_o          (dma_busy),
-    .m_axi_araddr_o  (m0_axi_araddr_o),
-    .m_axi_arlen_o   (m0_axi_arlen_o),
-    .m_axi_arsize_o  (m0_axi_arsize_o),
-    .m_axi_arburst_o (m0_axi_arburst_o),
-    .m_axi_arvalid_o (m0_axi_arvalid_o),
-    .m_axi_arready_i (m0_axi_arready_i),
-    .m_axi_rdata_i   (m0_axi_rdata_i),
-    .m_axi_rresp_i   (m0_axi_rresp_i),
-    .m_axi_rlast_i   (m0_axi_rlast_i),
-    .m_axi_rvalid_i  (m0_axi_rvalid_i),
-    .m_axi_rready_o  (m0_axi_rready_o),
-    .m_axi_awaddr_o  (m0_axi_awaddr_o),
-    .m_axi_awlen_o   (m0_axi_awlen_o),
-    .m_axi_awsize_o  (m0_axi_awsize_o),
-    .m_axi_awburst_o (m0_axi_awburst_o),
-    .m_axi_awvalid_o (m0_axi_awvalid_o),
-    .m_axi_awready_i (m0_axi_awready_i),
-    .m_axi_wdata_o   (m0_axi_wdata_o),
-    .m_axi_wstrb_o   (m0_axi_wstrb_o),
-    .m_axi_wlast_o   (m0_axi_wlast_o),
-    .m_axi_wvalid_o  (m0_axi_wvalid_o),
-    .m_axi_wready_i  (m0_axi_wready_i),
-    .m_axi_bresp_i   (m0_axi_bresp_i),
-    .m_axi_bvalid_i  (m0_axi_bvalid_i),
-    .m_axi_bready_o  (m0_axi_bready_o),
+    .m_axi_araddr_o  (d_axi_araddr),
+    .m_axi_arlen_o   (d_axi_arlen),
+    .m_axi_arsize_o  (d_axi_arsize),
+    .m_axi_arburst_o (d_axi_arburst),
+    .m_axi_arvalid_o (d_axi_arvalid),
+    .m_axi_arready_i (d_axi_arready),
+    .m_axi_rdata_i   (d_axi_rdata),
+    .m_axi_rresp_i   (d_axi_rresp),
+    .m_axi_rlast_i   (d_axi_rlast),
+    .m_axi_rvalid_i  (d_axi_rvalid),
+    .m_axi_rready_o  (d_axi_rready),
+    .m_axi_awaddr_o  (d_axi_awaddr),
+    .m_axi_awlen_o   (d_axi_awlen),
+    .m_axi_awsize_o  (d_axi_awsize),
+    .m_axi_awburst_o (d_axi_awburst),
+    .m_axi_awvalid_o (d_axi_awvalid),
+    .m_axi_awready_i (d_axi_awready),
+    .m_axi_wdata_o   (d_axi_wdata),
+    .m_axi_wstrb_o   (d_axi_wstrb),
+    .m_axi_wlast_o   (d_axi_wlast),
+    .m_axi_wvalid_o  (d_axi_wvalid),
+    .m_axi_wready_i  (d_axi_wready),
+    .m_axi_bresp_i   (d_axi_bresp),
+    .m_axi_bvalid_i  (d_axi_bvalid),
+    .m_axi_bready_o  (d_axi_bready),
     .wr_req_o        (d_wr_req),
     .wr_grant_i      (d_wr_grant),
     .wr_mem_o        (d_wr_mem),
@@ -401,8 +523,8 @@ module npu_top
   logic          ab_we;
 
   always_ff @(posedge clk_i) begin
-    ab_we   <= v_ab_wr_req | (d_wr_abuf & d_wr_grant);
-    ab_addr <= v_ab_wr_req ? v_ab_waddr : (d_wr_abuf & d_wr_grant) ? d_wr_addr[12:0] : d_rd_addr[12:0];
+    ab_we   <= v_ab_wr_req | d_wr_abuf;
+    ab_addr <= v_ab_wr_req ? v_ab_waddr : d_wr_abuf ? d_wr_addr[12:0] : d_rd_addr[12:0];
     ab_wd   <= v_ab_wr_req ? v_ab_wdata : d_wr_data[1055:0];
   end
 
@@ -428,7 +550,7 @@ module npu_top
   always_ff @(posedge clk_i) begin
     wbuf_q1 <= wbuf[g_wbuf_addr[10:0]];
     wbuf_q  <= wbuf_q1;
-    if (d_wr_wbuf && d_wr_grant) begin
+    if (d_wr_wbuf) begin
       wbuf[d_wr_addr[10:0]] <= d_wr_data;
     end
   end
@@ -438,9 +560,20 @@ module npu_top
   logic [11:0]   fb_wa, fb_wa_r, fb_ra, g_ra_r, d_ra_r;
   logic          fb_we, fb_we_r, sel_g_r, sel_v_r;
 
-  assign fb_we = g_fbuf_we | (v_fb_wr_req & v_fb_wr_grant) | (d_wr_fbuf & d_wr_grant);
+  assign fb_we = g_fbuf_we | v_fb_wr_req | d_wr_fbuf;
   assign fb_wa = g_fbuf_we ? g_fbuf_waddr[11:0] : v_fb_wr_req ? v_fb_waddr : d_wr_addr[11:0];
-  assign fb_wd = g_fbuf_we ? g_fbuf_wdata : v_fb_wr_req ? v_fb_wdata : d_wr_data[1023:0];
+  logic [1:0] fb_src;
+
+  assign fb_src = g_fbuf_we ? 2'd0 : v_fb_wr_req ? (v_fb_wtr ? 2'd2 : 2'd1) : 2'd3;
+
+  always_comb begin
+    case (fb_src)
+      2'd0:    fb_wd = g_fbuf_wdata;
+      2'd1:    fb_wd = v_fb_wdata;
+      2'd2:    fb_wd = v_fb_tdata;
+      default: fb_wd = d_wr_data[1023:0];
+    endcase
+  end
 
   always_ff @(posedge clk_i) begin
     fb_we_r <= fb_we;
@@ -471,7 +604,7 @@ module npu_top
   logic          pb_we;
 
   always_ff @(posedge clk_i) begin
-    pb_we <= d_wr_pbuf && d_wr_grant;
+    pb_we <= d_wr_pbuf;
     pb_wa <= d_wr_addr[8:0];
     pb_wd <= d_wr_data[1023:0];
   end
@@ -489,7 +622,7 @@ module npu_top
   logic [63:0] tb_wd_r;
 
   always_ff @(posedge clk_i) begin
-    tb_we_r <= d_wr_tbuf && d_wr_grant;
+    tb_we_r <= d_wr_tbuf && !vec_busy_r;
     tb_wa_r <= d_wr_addr[9:0];
     tb_wd_r <= d_wr_data[63:0];
   end
@@ -502,14 +635,15 @@ module npu_top
     assign addr_b = tb_we_r ? tb_wa_r : tab_addr[2*i+1];
 
     always_ff @(posedge clk_i) begin
-      ra_r            <= tb[tab_addr[2*i]];
-      tab_data[2*i]   <= ra_r;
+      ra_r <= tb[tab_addr[2*i]];
       if (tb_we_r) begin
         tb[addr_b] <= tb_wd_r;
       end
-      rb_r            <= tb[addr_b];
-      tab_data[2*i+1] <= rb_r;
+      rb_r <= tb[addr_b];
     end
+
+    assign tab_data[2*i]   = ra_r;
+    assign tab_data[2*i+1] = rb_r;
   end
 
   (* ram_style = "block" *) logic [127:0] cbuf [1024];
@@ -526,7 +660,7 @@ module npu_top
   logic [127:0] cb_wd_r;
 
   always_ff @(posedge clk_i) begin
-    cb_we_r <= d_wr_cbuf && d_wr_grant;
+    cb_we_r <= d_wr_cbuf && !vec_busy_r;
     cb_wa_r <= d_wr_addr[9:0];
     cb_wd_r <= d_wr_data[127:0];
   end
@@ -541,7 +675,8 @@ module npu_top
 
   logic unused_top;
 
-  assign unused_top = ^{s_axil_awaddr_i[11:8], s_axil_araddr_i[11:8], g_abuf_addr[19:13],
+  assign unused_top = ^{d_axi_rready, d_axi_bready, q_axi_rready, q_axi_bready,
+                        s_axil_awaddr_i[11:8], s_axil_araddr_i[11:8], g_abuf_addr[19:13],
                         g_wbuf_addr[19:11], g_fbuf_raddr[19:12], g_fbuf_waddr[19:12],
                         d_wr_addr[19:13], d_wr_data[1151:1056], d_rd_addr[19:13], v_pb_addr[9],
                         d_rd_abuf, d_rd_fbuf};

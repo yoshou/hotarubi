@@ -2,6 +2,8 @@ set(rtl_sources
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_pkg.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_rom_pkg.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/sfifo.sv
+  ${CMAKE_CURRENT_SOURCE_DIR}/reg_slice.sv
+  ${CMAKE_CURRENT_SOURCE_DIR}/axi_slice.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/skew.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/fp32_add.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/fp32_mul.sv

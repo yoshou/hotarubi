@@ -27,10 +27,13 @@ module vec_lane
     if (!rst_ni) begin
       v_r <= 1'b0;
     end else begin
-      v_r  <= in_valid_i;
-      x_r  <= x_i;
-      c0_r <= c0_i;
+      v_r <= in_valid_i;
     end
+  end
+
+  always_ff @(posedge clk_i) begin
+    x_r  <= x_i;
+    c0_r <= c0_i;
   end
 
   fp32_add u_pre (
@@ -161,19 +164,24 @@ module vec_lane
   end
 
   logic [31:0] d, v_d [InterpLatency];
+  logic [63:0] tab_r;
+
+  always_ff @(posedge clk_i) begin
+    tab_r <= tab_data_i;
+  end
 
   fp32_ufmul u_int (
     .clk_i,
     .rst_ni,
     .in_valid_i (1'b1),
-    .s_i        (tab_data_i[63:32]),
+    .s_i        (tab_r[63:32]),
     .frac_i     (frac_d[TabLatency-1]),
     .out_valid_o(d_valid),
     .y_o        (d)
   );
 
   always_ff @(posedge clk_i) begin
-    v_d[0] <= tab_data_i[31:0];
+    v_d[0] <= tab_r[31:0];
     for (int i = 1; i < InterpLatency; i++) begin
       v_d[i] <= v_d[i-1];
     end

@@ -47,7 +47,7 @@ The PL clock is 250 MHz (pl_clk0, IOPLL 2,000 MHz / 8).
 
 - One AXI4 master, 128 bits, INCR bursts of at most 16 beats that do not cross a 4 KB boundary.
 - One instruction at a time.
-- The gather-accumulate datapath has 8 lanes.
+- The gather-accumulate datapath has 16 lanes.
 
 ### On-chip memories
 
@@ -517,8 +517,9 @@ Each source holds one pending completion record with its statistics record. One 
 |---|---|
 | Block design | Zynq UltraScale+ PS (KV260 SOM preset) and the NPU, referenced as a module through a Verilog wrapper |
 | Control registers | M_AXI_HPM0_FPD (128 bits) → SmartConnect → NPU AXI-Lite (32 bits), at 0xA000_0000, 4 KB |
-| DMA | NPU AXI4 master 0 → SmartConnect → S_AXI_HP0_FPD (128 bits) |
-| Instruction fetch and trace | NPU AXI4 master 1 → SmartConnect → S_AXI_HP1_FPD (128 bits) |
+| DMA | NPU AXI4 master 0 → S_AXI_HP0_FPD (128 bits), connected directly; AxCACHE 0011, AxPROT, AxQOS, AxLOCK, AxID and AxUSER 0 |
+| Instruction fetch and trace | NPU AXI4 master 1 → S_AXI_HP1_FPD (128 bits), connected like master 0 |
+| AXI register stage | Both masters are registered at the NPU boundary: AR, AW and W through two-entry skid buffers with registered ready, R and B through input registers; RREADY and BREADY are always 1 |
 | Clock | pl_clk0, 250 MHz |
 | Interrupt | pl_ps_irq0[0], GIC SPI 89, level high |
 

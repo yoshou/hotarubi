@@ -100,22 +100,27 @@ module bdu2_dsp #(
         vq[i] <= 1'b0;
       end
     end else begin
-      vq[0]  <= in_valid_i;
-      fq[0]  <= first_i;
-      lq[0]  <= last_i;
-      sq[0]  <= acc_sel_i;
-      tq[0]  <= tag_i;
-      e0q[0] <= $signed({2'b00, ea0_i}) + $signed({2'b00, ew_i}) - 10'sd254 + sbias(wmode_i);
-      e1q[0] <= $signed({2'b00, ea1_i}) + $signed({2'b00, ew_i}) - 10'sd254 + sbias(wmode_i);
+      vq[0] <= in_valid_i;
       for (int i = 1; i < Lat; i++) begin
-        vq[i]  <= vq[i-1];
-        fq[i]  <= fq[i-1];
-        lq[i]  <= lq[i-1];
-        sq[i]  <= sq[i-1];
-        tq[i]  <= tq[i-1];
-        e0q[i] <= e0q[i-1];
-        e1q[i] <= e1q[i-1];
+        vq[i] <= vq[i-1];
       end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    fq[0]  <= first_i;
+    lq[0]  <= last_i;
+    sq[0]  <= acc_sel_i;
+    tq[0]  <= tag_i;
+    e0q[0] <= $signed({2'b00, ea0_i}) + $signed({2'b00, ew_i}) - 10'sd254 + sbias(wmode_i);
+    e1q[0] <= $signed({2'b00, ea1_i}) + $signed({2'b00, ew_i}) - 10'sd254 + sbias(wmode_i);
+    for (int i = 1; i < Lat; i++) begin
+      fq[i]  <= fq[i-1];
+      lq[i]  <= lq[i-1];
+      sq[i]  <= sq[i-1];
+      tq[i]  <= tq[i-1];
+      e0q[i] <= e0q[i-1];
+      e1q[i] <= e1q[i-1];
     end
   end
 
@@ -141,7 +146,7 @@ module bdu2_dsp #(
   assign s0 = pf[17:0];
   assign s1 = 19'((pf - 48'(s0)) >>> 18);
 
-  logic                va, fa, la;
+  logic                va, vb, vf, fa, la;
   logic [SelWidth-1:0] sa;
   logic [TagWidth-1:0] ta;
   logic                sg0, sg1;
@@ -151,19 +156,26 @@ module bdu2_dsp #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       va <= 1'b0;
+      vb <= 1'b0;
+      vf <= 1'b0;
     end else begin
-      va   <= vq[Lat-1];
-      fa   <= fq[Lat-1];
-      la   <= lq[Lat-1];
-      sa   <= sq[Lat-1];
-      ta   <= tq[Lat-1];
-      sg0  <= s0[17];
-      mg0  <= s0[17] ? 17'(-s0) : 17'(s0);
-      sg1  <= s1[18];
-      mg1  <= s1[18] ? 17'(-s1) : 17'(s1);
-      ex0a <= e0q[Lat-1];
-      ex1a <= e1q[Lat-1];
+      va <= vq[Lat-1];
+      vb <= va;
+      vf <= vb;
     end
+  end
+
+  always_ff @(posedge clk_i) begin
+    fa   <= fq[Lat-1];
+    la   <= lq[Lat-1];
+    sa   <= sq[Lat-1];
+    ta   <= tq[Lat-1];
+    sg0  <= s0[17];
+    mg0  <= s0[17] ? 17'(-s0) : 17'(s0);
+    sg1  <= s1[18];
+    mg1  <= s1[18] ? 17'(-s1) : 17'(s1);
+    ex0a <= e0q[Lat-1];
+    ex1a <= e1q[Lat-1];
   end
 
   function automatic logic [4:0] msb_of(input logic [16:0] mag);
@@ -190,63 +202,67 @@ module bdu2_dsp #(
     end
   endfunction
 
-  logic                vb, fb, lb, z0b, z1b, sg0b, sg1b;
+  logic                fb, lb, z0b, z1b, sg0b, sg1b;
   logic [SelWidth-1:0] sb;
   logic [TagWidth-1:0] tb;
   logic [16:0]         mg0b, mg1b;
   logic [4:0]          ms0b, ms1b;
   logic signed [9:0]   ex0b, ex1b;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      vb <= 1'b0;
-    end else begin
-      vb   <= va;
-      fb   <= fa;
-      lb   <= la;
-      sb   <= sa;
-      tb   <= ta;
-      sg0b <= sg0;
-      sg1b <= sg1;
-      mg0b <= mg0;
-      mg1b <= mg1;
-      z0b  <= (mg0 == 17'd0);
-      z1b  <= (mg1 == 17'd0);
-      ms0b <= msb_of(mg0);
-      ms1b <= msb_of(mg1);
-      ex0b <= ex0a + $signed({5'd0, msb_of(mg0)}) + 10'sd127;
-      ex1b <= ex1a + $signed({5'd0, msb_of(mg1)}) + 10'sd127;
-    end
+  always_ff @(posedge clk_i) begin
+    fb   <= fa;
+    lb   <= la;
+    sb   <= sa;
+    tb   <= ta;
+    sg0b <= sg0;
+    sg1b <= sg1;
+    mg0b <= mg0;
+    mg1b <= mg1;
+    z0b  <= (mg0 == 17'd0);
+    z1b  <= (mg1 == 17'd0);
+    ms0b <= msb_of(mg0);
+    ms1b <= msb_of(mg1);
+    ex0b <= ex0a + $signed({5'd0, msb_of(mg0)}) + 10'sd127;
+    ex1b <= ex1a + $signed({5'd0, msb_of(mg1)}) + 10'sd127;
   end
 
-  logic                vf, ff, lf;
+  logic                ff, lf;
   logic [SelWidth-1:0] sf;
   logic [TagWidth-1:0] tf;
   logic [31:0]         f0, f1;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      vf <= 1'b0;
-    end else begin
-      vf <= vb;
-      ff <= fb;
-      lf <= lb;
-      sf <= sb;
-      tf <= tb;
-      f0 <= pack_f(sg0b, mg0b, ms0b, ex0b, z0b);
-      f1 <= pack_f(sg1b, mg1b, ms1b, ex1b, z1b);
-    end
+  always_ff @(posedge clk_i) begin
+    ff <= fb;
+    lf <= lb;
+    sf <= sb;
+    tf <= tb;
+    f0 <= pack_f(sg0b, mg0b, ms0b, ex0b, z0b);
+    f1 <= pack_f(sg1b, mg1b, ms1b, ex1b, z1b);
   end
 
-  logic [31:0] acc0 [Nacc], acc1 [Nacc];
-  logic        add_valid0, add_valid1;
-  logic [31:0] y0, y1;
+  logic [31:0]         acc0 [Nacc], acc1 [Nacc];
+  logic [31:0]         acc0_rd, acc1_rd, acc0_wd, acc1_wd;
+  logic                acc0_we, acc1_we;
+  logic [SelWidth-1:0] acc_wa;
+  logic                add_valid0, add_valid1;
+  logic [31:0]         y0, y1;
+
+  always_ff @(posedge clk_i) begin
+    if (acc0_we) begin
+      acc0[acc_wa] <= acc0_wd;
+    end
+    if (acc1_we) begin
+      acc1[acc_wa] <= acc1_wd;
+    end
+    acc0_rd <= (acc0_we && acc_wa == sb) ? acc0_wd : acc0[sb];
+    acc1_rd <= (acc1_we && acc_wa == sb) ? acc1_wd : acc1[sb];
+  end
 
   fp32_add u_add0 (
     .clk_i,
     .rst_ni,
     .in_valid_i (vf),
-    .a_i        (ff ? init0_f : acc0[sf]),
+    .a_i        (ff ? init0_f : acc0_rd),
     .b_i        (f0),
     .out_valid_o(add_valid0),
     .y_o        (y0)
@@ -256,7 +272,7 @@ module bdu2_dsp #(
     .clk_i,
     .rst_ni,
     .in_valid_i (vf),
-    .a_i        (ff ? init1_f : acc1[sf]),
+    .a_i        (ff ? init1_f : acc1_rd),
     .b_i        (f1),
     .out_valid_o(add_valid1),
     .y_o        (y1)
@@ -290,23 +306,21 @@ module bdu2_dsp #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       out_valid_o <= 1'b0;
-      for (int i = 0; i < Nacc; i++) begin
-        acc0[i] <= 32'd0;
-        acc1[i] <= 32'd0;
-      end
     end else begin
-      if (add_valid0) begin
-        acc0[s10] <= y0;
-      end
-      if (add_valid1) begin
-        acc1[s10] <= y1;
-      end
       out_valid_o <= add_valid0 & l10;
-      out_sel_o   <= s10;
-      out_tag_o   <= t10;
-      out_acc0_o  <= y0;
-      out_acc1_o  <= y1;
     end
+  end
+
+  always_ff @(posedge clk_i) begin
+    acc0_we    <= add_valid0;
+    acc1_we    <= add_valid1;
+    acc_wa     <= s10;
+    acc0_wd    <= y0;
+    acc1_wd    <= y1;
+    out_sel_o  <= s10;
+    out_tag_o  <= t10;
+    out_acc0_o <= y0;
+    out_acc1_o <= y1;
   end
 
 endmodule

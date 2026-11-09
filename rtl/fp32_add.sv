@@ -23,31 +23,46 @@ module fp32_add (
 
   assign a_ge_b = ({ea, ma} >= {eb, mb});
 
-  logic        v1, sub1, sbig1;
+  logic v1, v2, v3, v4, v5;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      v1          <= 1'b0;
+      v2          <= 1'b0;
+      v3          <= 1'b0;
+      v4          <= 1'b0;
+      v5          <= 1'b0;
+      out_valid_o <= 1'b0;
+    end else begin
+      v1          <= in_valid_i;
+      v2          <= v1;
+      v3          <= v2;
+      v4          <= v3;
+      v5          <= v4;
+      out_valid_o <= v5;
+    end
+  end
+
+  logic        sub1, sbig1;
   logic [7:0]  ebig1;
   logic [8:0]  d1;
   logic [23:0] mbig1, msmall1;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v1 <= 1'b0;
+  always_ff @(posedge clk_i) begin
+    if (a_ge_b) begin
+      sbig1   <= sa;
+      sub1    <= sa ^ sb;
+      ebig1   <= ea;
+      mbig1   <= ma;
+      msmall1 <= mb;
+      d1      <= {1'b0, ea} - {1'b0, eb};
     end else begin
-      v1 <= in_valid_i;
-      if (a_ge_b) begin
-        sbig1   <= sa;
-        sub1    <= sa ^ sb;
-        ebig1   <= ea;
-        mbig1   <= ma;
-        msmall1 <= mb;
-        d1      <= {1'b0, ea} - {1'b0, eb};
-      end else begin
-        sbig1   <= sb;
-        sub1    <= sa ^ sb;
-        ebig1   <= eb;
-        mbig1   <= mb;
-        msmall1 <= ma;
-        d1      <= {1'b0, eb} - {1'b0, ea};
-      end
+      sbig1   <= sb;
+      sub1    <= sa ^ sb;
+      ebig1   <= eb;
+      mbig1   <= mb;
+      msmall1 <= ma;
+      d1      <= {1'b0, eb} - {1'b0, ea};
     end
   end
 
@@ -69,36 +84,26 @@ module fp32_add (
     end
   end
 
-  logic        v2, sub2, sbig2;
+  logic        sub2, sbig2;
   logic [7:0]  ebig2;
   logic [26:0] mbig2, msmall2;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v2 <= 1'b0;
-    end else begin
-      v2      <= v1;
-      sub2    <= sub1;
-      sbig2   <= sbig1;
-      ebig2   <= ebig1;
-      mbig2   <= {mbig1, 3'b000};
-      msmall2 <= msmall_sh | {26'd0, sticky};
-    end
+  always_ff @(posedge clk_i) begin
+    sub2    <= sub1;
+    sbig2   <= sbig1;
+    ebig2   <= ebig1;
+    mbig2   <= {mbig1, 3'b000};
+    msmall2 <= msmall_sh | {26'd0, sticky};
   end
 
-  logic        v3, sbig3;
+  logic        sbig3;
   logic [7:0]  ebig3;
   logic [27:0] sum3;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v3 <= 1'b0;
-    end else begin
-      v3    <= v2;
-      sbig3 <= sbig2;
-      ebig3 <= ebig2;
-      sum3  <= sub2 ? ({1'b0, mbig2} - {1'b0, msmall2}) : ({1'b0, mbig2} + {1'b0, msmall2});
-    end
+  always_ff @(posedge clk_i) begin
+    sbig3 <= sbig2;
+    ebig3 <= ebig2;
+    sum3  <= sub2 ? ({1'b0, mbig2} - {1'b0, msmall2}) : ({1'b0, mbig2} + {1'b0, msmall2});
   end
 
   logic [4:0] lzc;
@@ -113,38 +118,28 @@ module fp32_add (
     end
   end
 
-  logic        v4, sbig4, zero4;
+  logic        sbig4, zero4;
   logic [7:0]  ebig4;
   logic [27:0] sum4;
   logic [4:0]  lzc4;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v4 <= 1'b0;
-    end else begin
-      v4    <= v3;
-      sbig4 <= sbig3;
-      ebig4 <= ebig3;
-      zero4 <= (sum3 == 28'd0);
-      sum4  <= sum3;
-      lzc4  <= lzc;
-    end
+  always_ff @(posedge clk_i) begin
+    sbig4 <= sbig3;
+    ebig4 <= ebig3;
+    zero4 <= (sum3 == 28'd0);
+    sum4  <= sum3;
+    lzc4  <= lzc;
   end
 
-  logic        v5, sbig5, zero5;
+  logic        sbig5, zero5;
   logic [27:0] norm5;
   logic [9:0]  e_adj5;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v5 <= 1'b0;
-    end else begin
-      v5     <= v4;
-      sbig5  <= sbig4;
-      zero5  <= zero4;
-      norm5  <= sum4 << lzc4;
-      e_adj5 <= {2'b00, ebig4} + 10'd1 - {5'd0, lzc4};
-    end
+  always_ff @(posedge clk_i) begin
+    sbig5  <= sbig4;
+    zero5  <= zero4;
+    norm5  <= sum4 << lzc4;
+    e_adj5 <= {2'b00, ebig4} + 10'd1 - {5'd0, lzc4};
   end
 
   logic [23:0] mant_r;
@@ -169,20 +164,15 @@ module fp32_add (
     end
   end
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      out_valid_o <= 1'b0;
+  always_ff @(posedge clk_i) begin
+    if (zero5) begin
+      y_o <= 32'd0;
+    end else if ($signed(e_fin) <= 10'sd0) begin
+      y_o <= 32'd0;
+    end else if (e_fin >= 10'd255) begin
+      y_o <= {sbig5, 8'hFF, 23'd0};
     end else begin
-      out_valid_o <= v5;
-      if (zero5) begin
-        y_o <= 32'd0;
-      end else if ($signed(e_fin) <= 10'sd0) begin
-        y_o <= 32'd0;
-      end else if (e_fin >= 10'd255) begin
-        y_o <= {sbig5, 8'hFF, 23'd0};
-      end else begin
-        y_o <= {sbig5, e_fin[7:0], m_fin};
-      end
+      y_o <= {sbig5, e_fin[7:0], m_fin};
     end
   end
 

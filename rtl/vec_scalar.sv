@@ -381,11 +381,6 @@ module vec_scalar
             ns     <= 3'd0;
             nstart <= recip_count_i ? 6'd1 : (prog_i == ScRstd) ? 6'd10 : 6'd8;
             nlen   <= (!recip_count_i && prog_i == ScRstd) ? 3'd5 : 3'd3;
-            if (recip_count_i) begin
-              for (int r = 0; r < 4; r++) begin
-                av[r] <= float_n(nelem_i);
-              end
-            end
           end
         end
         PhIssue: begin
@@ -407,31 +402,6 @@ module vec_scalar
           end
         end
         PhWrite: begin
-          if (opk_r == 2'd3) begin
-            for (int r = 0; r < 4; r++) begin
-              case (dst_r)
-                DstT0:   t0[r] <= imm_r[r];
-                DstT1:   t1[r] <= imm_r[r];
-                DstT2:   t2[r] <= imm_r[r];
-                DstT3:   t3[r] <= imm_r[r];
-                DstY:    yv[r] <= imm_r[r];
-                DstRn:   rn_o  <= imm_r[r];
-                default: begin
-                end
-              endcase
-            end
-          end else begin
-            case (dst_r)
-              DstT0:   t0[tok] <= res;
-              DstT1:   t1[tok] <= res;
-              DstT2:   t2[tok] <= res;
-              DstT3:   t3[tok] <= res;
-              DstY:    yv[tok] <= res;
-              DstRn:   rn_o    <= res;
-              default: begin
-              end
-            endcase
-          end
           if (step_done) begin
             tok  <= 2'd0;
             step <= step + 6'd1;
@@ -447,6 +417,41 @@ module vec_scalar
         end
         default: ph <= PhIdle;
       endcase
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (ph == PhIdle && start_i && recip_count_i) begin
+      for (int r = 0; r < 4; r++) begin
+        av[r] <= float_n(nelem_i);
+      end
+    end
+    if (ph == PhWrite) begin
+      if (opk_r == 2'd3) begin
+        for (int r = 0; r < 4; r++) begin
+          case (dst_r)
+            DstT0:   t0[r] <= imm_r[r];
+            DstT1:   t1[r] <= imm_r[r];
+            DstT2:   t2[r] <= imm_r[r];
+            DstT3:   t3[r] <= imm_r[r];
+            DstY:    yv[r] <= imm_r[r];
+            DstRn:   rn_o  <= imm_r[r];
+            default: begin
+            end
+          endcase
+        end
+      end else begin
+        case (dst_r)
+          DstT0:   t0[tok] <= res;
+          DstT1:   t1[tok] <= res;
+          DstT2:   t2[tok] <= res;
+          DstT3:   t3[tok] <= res;
+          DstY:    yv[tok] <= res;
+          DstRn:   rn_o    <= res;
+          default: begin
+          end
+        endcase
+      end
     end
   end
 

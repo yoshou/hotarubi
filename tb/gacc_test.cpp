@@ -51,7 +51,7 @@ GaccList MakeList(std::mt19937& rng, Ddr& ddr, uint32_t list_address,
   GaccList list{.list_address = list_address,
                 .w_address = w_address,
                 .w_stride = 0,
-                .quad_row_words = slots / 8,
+                .quad_row_words = (slots + 7) / 8,
                 .slots = slots,
                 .rows = {},
                 .bw = {}};
@@ -265,6 +265,28 @@ TEST(GaccTest, MaximumBlocksPerToken) {
   WriteRowPool(rng, ddr, 32, kRowWords);
   const GaccList list =
       MakeList(rng, ddr, kListArea, 8, kRowWords, kQuad, 32, kWArea);
+  Accumulators acc;
+  for (std::vector<uint32_t>& token : acc) {
+    token.assign(size_t{32} * kRowWords, kFp32Zero);
+  }
+  ReferenceGacc(ddr, list, kRowWords, kQuad, acc);
+  RunAndCompare(
+      bench,
+      {Gacc(kListArea, list.slots, kRowWords, kDst, kQuad, kGaccFlagFlush)},
+      kDst, ToWords(acc, kRowWords));
+}
+
+TEST(GaccTest, PartialLastSlotGroup) {
+  std::mt19937 rng(55);
+  NpuBench bench(55);
+  Ddr& ddr = bench.Memory();
+  constexpr uint32_t kRowWords = 5;
+  constexpr uint32_t kSlots = 13;
+  constexpr uint32_t kQuad = 2;
+  constexpr uint32_t kDst = 300;
+  WriteRowPool(rng, ddr, 40, kRowWords);
+  const GaccList list =
+      MakeList(rng, ddr, kListArea, kSlots, kRowWords, kQuad, 40, kWArea);
   Accumulators acc;
   for (std::vector<uint32_t>& token : acc) {
     token.assign(size_t{32} * kRowWords, kFp32Zero);

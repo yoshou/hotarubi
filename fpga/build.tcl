@@ -47,8 +47,10 @@ proc create_npu_bd {} {
 
   create_bd_cell -type module -reference npu_top_v npu
   connect_axi /ps/M_AXI_HPM0_FPD /npu/s_axil npu/s_axil
-  connect_axi /npu/m0_axi /ps/S_AXI_HP0_FPD ps/S_AXI_HP0_FPD
-  connect_axi /npu/m1_axi /ps/S_AXI_HP1_FPD ps/S_AXI_HP1_FPD
+  connect_bd_intf_net [get_bd_intf_pins npu/m0_axi] [get_bd_intf_pins ps/S_AXI_HP0_FPD]
+  connect_bd_intf_net [get_bd_intf_pins npu/m1_axi] [get_bd_intf_pins ps/S_AXI_HP1_FPD]
+  connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins ps/saxihp0_fpd_aclk]
+  connect_bd_net [get_bd_pins ps/pl_clk0] [get_bd_pins ps/saxihp1_fpd_aclk]
   connect_bd_net [get_bd_pins npu/irq] [get_bd_pins ps/pl_ps_irq0]
 
   assign_bd_address

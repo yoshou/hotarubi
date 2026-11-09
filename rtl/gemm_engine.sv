@@ -260,8 +260,14 @@ module gemm_engine #(
   assign fbuf_rd_req_o = ireq[0][0] & acc;
 
   always_ff @(posedge clk_i) begin
-    for (int j = 0; j < 32; j++) begin
-      init_word[j] <= acc ? fbuf_rdata_i[j*32 +: 32] : 32'd0;
+    if (!acc) begin
+      for (int j = 0; j < 32; j++) begin
+        init_word[j] <= 32'd0;
+      end
+    end else begin
+      for (int j = 0; j < 32; j++) begin
+        init_word[j] <= fbuf_rdata_i[j*32 +: 32];
+      end
     end
   end
 
@@ -269,13 +275,16 @@ module gemm_engine #(
     if (!rst_ni) begin
       fbuf_we_o <= 1'b0;
     end else begin
-      fbuf_we_o    <= o_valid[0][0];
-      fbuf_waddr_o <= o_tag[0][0];
-      for (int p = 0; p < Mp; p++) begin
-        for (int c = 0; c < Nt; c++) begin
-          fbuf_wdata_o[((2*p)*8 + c)*32 +: 32]   <= o_acc0[p][c];
-          fbuf_wdata_o[((2*p+1)*8 + c)*32 +: 32] <= o_acc1[p][c];
-        end
+      fbuf_we_o <= o_valid[0][0];
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    fbuf_waddr_o <= o_tag[0][0];
+    for (int p = 0; p < Mp; p++) begin
+      for (int c = 0; c < Nt; c++) begin
+        fbuf_wdata_o[((2*p)*8 + c)*32 +: 32]   <= o_acc0[p][c];
+        fbuf_wdata_o[((2*p+1)*8 + c)*32 +: 32] <= o_acc1[p][c];
       end
     end
   end

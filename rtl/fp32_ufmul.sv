@@ -8,23 +8,32 @@ module fp32_ufmul (
   output logic [31:0] y_o
 );
 
-  logic       v1, sg1, z1;
+  logic       v1, v2, v3, sg1, z1;
   logic [7:0] e1;
   (* use_dsp = "yes" *) logic [39:0] p1;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      v1 <= 1'b0;
+      v1          <= 1'b0;
+      v2          <= 1'b0;
+      v3          <= 1'b0;
+      out_valid_o <= 1'b0;
     end else begin
-      v1  <= in_valid_i;
-      sg1 <= s_i[31];
-      e1  <= s_i[30:23];
-      z1  <= (s_i[30:23] == 8'd0) | (frac_i == 16'd0);
-      p1  <= {1'b1, s_i[22:0]} * frac_i;
+      v1          <= in_valid_i;
+      v2          <= v1;
+      v3          <= v2;
+      out_valid_o <= v3;
     end
   end
 
-  logic        v2, sg2, z2;
+  always_ff @(posedge clk_i) begin
+    sg1 <= s_i[31];
+    e1  <= s_i[30:23];
+    z1  <= (s_i[30:23] == 8'd0) | (frac_i == 16'd0);
+    p1  <= {1'b1, s_i[22:0]} * frac_i;
+  end
+
+  logic        sg2, z2;
   logic [7:0]  e2;
   logic [39:0] p2;
   logic [5:0]  lzc2;
@@ -40,33 +49,23 @@ module fp32_ufmul (
     end
   end
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v2 <= 1'b0;
-    end else begin
-      v2   <= v1;
-      sg2  <= sg1;
-      z2   <= z1;
-      e2   <= e1;
-      p2   <= p1;
-      lzc2 <= lzc;
-    end
+  always_ff @(posedge clk_i) begin
+    sg2  <= sg1;
+    z2   <= z1;
+    e2   <= e1;
+    p2   <= p1;
+    lzc2 <= lzc;
   end
 
-  logic        v3, sg3, z3;
+  logic        sg3, z3;
   logic [39:0] pn3;
   logic [9:0]  e3;
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      v3 <= 1'b0;
-    end else begin
-      v3  <= v2;
-      sg3 <= sg2;
-      z3  <= z2;
-      pn3 <= p2 << lzc2;
-      e3  <= {2'b00, e2} - {4'd0, lzc2};
-    end
+  always_ff @(posedge clk_i) begin
+    sg3 <= sg2;
+    z3  <= z2;
+    pn3 <= p2 << lzc2;
+    e3  <= {2'b00, e2} - {4'd0, lzc2};
   end
 
   logic        round_up;
@@ -89,20 +88,15 @@ module fp32_ufmul (
     end
   end
 
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      out_valid_o <= 1'b0;
+  always_ff @(posedge clk_i) begin
+    if (z3) begin
+      y_o <= 32'd0;
+    end else if ($signed(e_fin) <= 10'sd0) begin
+      y_o <= 32'd0;
+    end else if (e_fin >= 10'd255) begin
+      y_o <= {sg3, 8'hFF, 23'd0};
     end else begin
-      out_valid_o <= v3;
-      if (z3) begin
-        y_o <= 32'd0;
-      end else if ($signed(e_fin) <= 10'sd0) begin
-        y_o <= 32'd0;
-      end else if (e_fin >= 10'd255) begin
-        y_o <= {sg3, 8'hFF, 23'd0};
-      end else begin
-        y_o <= {sg3, e_fin[7:0], m_fin};
-      end
+      y_o <= {sg3, e_fin[7:0], m_fin};
     end
   end
 

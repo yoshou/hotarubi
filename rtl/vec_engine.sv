@@ -25,6 +25,8 @@ module vec_engine
   input  logic          fbuf_wr_grant_i,
   output logic [11:0]   fbuf_waddr_o,
   output logic [1023:0] fbuf_wdata_o,
+  output logic          fbuf_wtr_o,
+  output logic [1023:0] fbuf_tdata_o,
   output logic [9:0]    pbuf_a_addr_o,
   input  logic [1023:0] pbuf_a_rdata_i,
   output logic [9:0]    tab_addr_o [Lanes],
@@ -1105,20 +1107,24 @@ module vec_engine
 
   logic [Hw-1:0] c0_in, y_int_in;
 
+  logic inv_x, inv_c;
+
+  assign inv_x = (e1_c.ialu == IaluRsub);
+  assign inv_c = (e1_c.ialu == IaluSub);
+
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
-      logic [31:0] xl, c0l;
+      logic [31:0] xl, c0l, sum;
       xl  = e1_x[l*32 +: 32];
       c0l = (e1_c.c0_pred & !e1_pred[l]) ? 32'd0 : e1_c0raw[l*32 +: 32];
+      sum = (inv_x ? ~xl : xl) + (inv_c ? ~c0l : c0l) + {31'd0, inv_x | inv_c};
       c0_in[l*32 +: 32] = c0l;
       case (e1_c.ialu)
-        IaluAdd:  y_int_in[l*32 +: 32] = xl + c0l;
-        IaluSub:  y_int_in[l*32 +: 32] = xl - c0l;
+        IaluAdd, IaluSub, IaluRsub: y_int_in[l*32 +: 32] = sum;
         IaluAnd:  y_int_in[l*32 +: 32] = xl & c0l;
         IaluOr:   y_int_in[l*32 +: 32] = xl | c0l;
         IaluXor:  y_int_in[l*32 +: 32] = xl ^ c0l;
         IaluShr1: y_int_in[l*32 +: 32] = {1'b0, xl[31:1]};
-        IaluRsub: y_int_in[l*32 +: 32] = c0l - xl;
         default:  y_int_in[l*32 +: 32] = 32'd0;
       endcase
     end
@@ -1354,7 +1360,9 @@ module vec_engine
 
   assign fbuf_wr_req_o = tr_mode ? tr_wr : !wf_empty;
   assign fbuf_waddr_o  = tr_mode ? tr_wa : wf_dout[1035:1024];
-  assign fbuf_wdata_o  = tr_mode ? tr_wd : wf_dout[1023:0];
+  assign fbuf_wdata_o  = wf_dout[1023:0];
+  assign fbuf_wtr_o    = tr_mode;
+  assign fbuf_tdata_o  = tr_wd;
 
   localparam int PendDepth = 32;
   localparam int PendAw    = $clog2(PendDepth);

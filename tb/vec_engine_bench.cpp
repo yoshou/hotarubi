@@ -20,7 +20,6 @@ struct VecEngineBench::State {
   iss::FbufWord pbuf_q1{};
   iss::FbufWord pbuf_q{};
   std::array<uint64_t, iss::kLanes> tab_r{};
-  std::array<uint64_t, iss::kLanes> tab_q{};
   iss::Word128 cbuf_q1{};
   iss::Word128 cbuf_q{};
   bool abuf_we = false;
@@ -42,7 +41,7 @@ void Drive(Vvec_engine& model, const VecEngineBench::State& state) {
     model.pbuf_a_rdata_i[i] = state.pbuf_q.at(i);
   }
   for (uint32_t l = 0; l < iss::kLanes; ++l) {
-    model.tab_data_i[l] = state.tab_q.at(l);
+    model.tab_data_i[l] = state.tab_r.at(l);
   }
   model.cbuf_rdata_i[0] = static_cast<uint32_t>(state.cbuf_q.low);
   model.cbuf_rdata_i[1] = static_cast<uint32_t>(state.cbuf_q.low >> 32);
@@ -109,7 +108,6 @@ void VecEngineBench::Tick(iss::Memories& memories) {
   for (uint32_t l = 0; l < iss::kLanes; ++l) {
     next.tab_r.at(l) =
         memories.tbuf.at(model.tab_addr_o[l] & (iss::kTbufDepth - 1));
-    next.tab_q.at(l) = state.tab_r.at(l);
   }
   next.cbuf_q1 = memories.cbuf.at(model.cbuf_addr_o & (iss::kCbufDepth - 1));
   next.cbuf_q = state.cbuf_q1;
@@ -130,7 +128,8 @@ void VecEngineBench::Tick(iss::Memories& memories) {
   if (next.fbuf_we) {
     next.fbuf_addr = model.fbuf_waddr_o & (iss::kFbufDepth - 1);
     for (uint32_t i = 0; i < 32; ++i) {
-      next.fbuf_data.at(i) = model.fbuf_wdata_o[i];
+      next.fbuf_data.at(i) =
+          model.fbuf_wtr_o != 0 ? model.fbuf_tdata_o[i] : model.fbuf_wdata_o[i];
     }
   }
 

@@ -319,7 +319,7 @@ module npu_seq #(
   logic [7:0]   opc;
   logic [3:0]   wt;
   logic         out_gemm, out_vec, out_dma, d_gemm, d_vec, d_dma;
-  logic         wait_ok, eng_ok, issue;
+  logic         wait_ok, eng_ok, issue, host_ok;
 
   assign ins        = ins_r;
   assign ibuf_empty = ib_fifo_empty && !ins_v;
@@ -332,14 +332,22 @@ module npu_seq #(
       OpDmaLd, OpDmaSt: eng_ok = dma_cmd_ready_i && !out_dma;
       OpGemm:           eng_ok = gemm_cmd_ready_i && !out_gemm;
       OpVec:            eng_ok = vec_cmd_ready_i && !out_vec;
-      OpWaitHost:       eng_ok = (host_go >= ins[31:0]);
+      OpWaitHost:       eng_ok = host_ok;
       default:          eng_ok = 1'b1;
     endcase
   end
 
-  assign waiting_host = running && ins_v && (opc == OpWaitHost) && !(host_go >= ins[31:0]);
+  assign waiting_host = running && ins_v && (opc == OpWaitHost) && !host_ok;
 
   logic tr_ok, ins_load;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      host_ok <= 1'b0;
+    end else begin
+      host_ok <= !ins_load && !ib_clear && (host_go >= ins[31:0]);
+    end
+  end
 
   assign issue    = running && ins_v && wait_ok && eng_ok && !srst && tr_ok;
   assign ins_load = !ib_fifo_empty && (!ins_v || issue);
