@@ -365,7 +365,8 @@ TEST(SequencerTest, StatisticsRecordsFollowEngineCompletions) {
                .onchip = 32,
                .rows = 1,
                .row_words = 4,
-               .flags = kDmaFlagIndex}),
+               .tok = 1,
+               .flags = kDmaFlagIndex | kDmaFlagRow}),
       Signal(11, 22, kWaitDma),
       Halt()};
   ASSERT_TRUE(bench.Run(program));

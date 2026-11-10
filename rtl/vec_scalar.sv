@@ -226,14 +226,6 @@ module vec_scalar
             last = 1'b1;
           end
         end
-        ScSum: begin
-          opk = 2'd3;
-          dst = DstBs;
-          for (int r = 0; r < 4; r++) begin
-            imm[r] = t0[r];
-          end
-          last = 1'b1;
-        end
         ScRstd: begin
           if (step == 6'd7) begin
             opk = 2'd2;

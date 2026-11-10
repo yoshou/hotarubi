@@ -120,7 +120,7 @@ module dma_engine (
   assign tbeats = (c_abuf ? 8'({c_tok, 1'b0}) : 8'({c_tok, 3'b000})) + 8'(nsc);
 
   logic          ld_done, st_done;
-  logic          st_word_idx, st_tok_idx, tok_end, tok_known, tok_null, tneed, bout_fire, rd_skip;
+  logic          bout_fire;
   logic          ga_ent_valid, ga_ent_ready, ga_req_valid, ga_req_ready, ga_row_ready, ga_w_ready;
   logic          ga_out_valid, ga_out_ready, ga_idle, ga_start;
   logic [31:0]   ga_req_addr;
@@ -130,7 +130,6 @@ module dma_engine (
   logic [12:0]   ga_out_addr;
   logic          wq_push, wq_pop, wq_empty;
   logic [127:0]  wq_dout;
-  logic [7:0]    tcnt;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -148,7 +147,7 @@ module dma_engine (
             c_w      <= cmd_row_words_i;
             c_stride <= cmd_ddr_stride_i;
             c_mode   <= cmd_st_i ? ModeRaw : cmd_mode_i;
-            c_idx    <= cmd_flags_i[0] && !(cmd_mode_i == ModeGacc && !cmd_st_i);
+            c_idx    <= cmd_flags_i[0] && cmd_flags_i[1] && !cmd_st_i && (cmd_mode_i == ModeRaw);
             c_row    <= cmd_flags_i[1] && (cmd_st_i || cmd_mode_i == ModeRaw);
             c_abuf   <= (cmd_mem_i == 3'd0);
             c_gacc   <= !cmd_st_i && (cmd_mode_i == ModeGacc);
@@ -301,17 +300,16 @@ module dma_engine (
   logic [1:0]  gi_sub;
   logic [23:0] gi_cnt;
   logic [31:0] gi_entry;
-  logic        uf_push, uf_pop, uf_empty, uf_afull, ufs_push, ufs_pop, ufs_empty, ufs_afull;
-  logic        uf_dout, ufs_dout;
+  logic        uf_push, uf_pop, uf_empty, uf_afull;
+  logic        uf_dout;
   logic        gi_can, gi_step;
 
   assign gi_entry = ib_dout[gi_sub * 32 +: 32];
   assign gi_null  = (gi_entry == 32'hFFFFFFFF);
-  assign gi_can   = run && c_idx && !gi_done && !ib_empty && !(c_st ? ufs_afull : uf_afull);
+  assign gi_can   = run && c_idx && !gi_done && !ib_empty && !uf_afull;
   assign gi_valid = gi_can && !gi_null;
   assign gi_step  = gi_can && (gi_null || gi_ready);
-  assign uf_push  = gi_step && !c_st;
-  assign ufs_push = gi_step && c_st;
+  assign uf_push  = gi_step;
   assign ib_pop   = c_gacc ? ibr_load : (gi_step && (gi_sub == 2'd3 || gi_cnt == rows_w - 1'b1));
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -351,7 +349,7 @@ module dma_engine (
     end
   end
 
-  logic [$clog2(UfDepth):0] uf_count, ufs_count;
+  logic [$clog2(UfDepth):0] uf_count;
 
   sfifo #(
     .Width      (1),
@@ -368,23 +366,6 @@ module dma_engine (
     .empty_o(uf_empty),
     .afull_o(uf_afull),
     .count_o(uf_count)
-  );
-
-  sfifo #(
-    .Width      (1),
-    .Depth      (UfDepth),
-    .AfullMargin(2)
-  ) u_ufs (
-    .clk_i,
-    .rst_ni,
-    .clear_i(setup_pulse),
-    .push_i (ufs_push),
-    .din_i  (gi_null),
-    .pop_i  (ufs_pop),
-    .dout_o (ufs_dout),
-    .empty_o(ufs_empty),
-    .afull_o(ufs_afull),
-    .count_o(ufs_count)
   );
 
   logic        b_valid, b_ready, b_idle, req_valid, req_ready;
@@ -553,7 +534,7 @@ module dma_engine (
   logic [127:0] src_d, zbeat;
   logic         need_uf;
 
-  assign need_uf = run && !c_st && c_idx && !unit_known && (c_mode == ModeRaw);
+  assign need_uf = run && c_idx && !unit_known;
   assign uf_pop  = need_uf && !uf_empty;
 
   function automatic logic [127:0] zb(input logic [7:0] z);
@@ -561,15 +542,10 @@ module dma_engine (
     logic [7:0]   d;
     r = '0;
     d = z - 8'({c_tok, 1'b0});
-    if (c_abuf) begin
-      if (!c_row && z == 8'd8) begin
-        r[31:0] = 32'h7F7F7F7F;
-      end
-      if (c_row && z >= 8'({c_tok, 1'b0})) begin
-        for (int i = 0; i < 16; i++) begin
-          if ({d, 4'(i)} < 12'(c_tok)) begin
-            r[8 * i +: 8] = 8'h7F;
-          end
+    if (c_abuf && z >= 8'({c_tok, 1'b0})) begin
+      for (int i = 0; i < 16; i++) begin
+        if ({d, 4'(i)} < 12'(c_tok)) begin
+          r[8 * i +: 8] = 8'h7F;
         end
       end
     end
@@ -579,7 +555,7 @@ module dma_engine (
   logic       z_step;
   logic [7:0] zcnt_n;
 
-  assign z_step = src_pop && c_idx && (c_mode == ModeRaw);
+  assign z_step = src_pop && c_idx;
   assign zcnt_n = (setup_pulse || (z_step && (zcnt == ubeats - 1'b1))) ? 8'd0 :
                   z_step ? zcnt + 1'b1 : zcnt;
 
@@ -588,7 +564,7 @@ module dma_engine (
   end
 
   assign src_v   = c_gacc ? 1'b0 :
-                   (c_idx && c_mode == ModeRaw) ? (unit_known && (null_act || !rf_empty)) :
+                   c_idx ? (unit_known && (null_act || !rf_empty)) :
                    !rf_empty;
   assign src_d   = null_act ? zbeat : rf_dout;
   assign src_pop = src_v && cons_ok && run && !c_st;
@@ -601,7 +577,7 @@ module dma_engine (
       zcnt       <= '0;
       u_left     <= '0;
     end else if (setup_pulse) begin
-      unit_known <= !(c_idx && c_mode == ModeRaw);
+      unit_known <= !c_idx;
       null_act   <= 1'b0;
       zcnt       <= '0;
       u_left     <= c_idx ? rows_w : 24'd0;
@@ -615,10 +591,6 @@ module dma_engine (
         unit_known <= 1'b0;
         null_act   <= 1'b0;
         u_left     <= u_left - 1'b1;
-      end
-      if (c_st && c_idx && ((st_word_idx && ((rd_req_o && rd_grant_i) || rd_skip)) ||
-                            (st_tok_idx && tok_end))) begin
-        u_left <= u_left - 1'b1;
       end
     end
   end
@@ -982,14 +954,8 @@ module dma_engine (
   logic [$clog2(WbDepth):0] wb_count;
   logic                     rd_can, ser_take;
 
-  assign st_word_idx = c_st && c_idx && !c_row;
-  assign st_tok_idx  = c_st && c_idx && c_row;
   assign rd_can      = run && c_st && !rd_all && !hold_v && !inflight;
-  assign tneed       = st_tok_idx && !tok_known;
-  assign ufs_pop     = (st_word_idx && ((rd_req_o && rd_grant_i) || rd_skip)) ||
-                       (tneed && !ufs_empty);
-  assign rd_skip     = st_word_idx && rd_can && !ufs_empty && ufs_dout;
-  assign rd_req_o    = rd_can && (!st_word_idx || (!ufs_empty && !ufs_dout));
+  assign rd_req_o    = rd_can;
   assign rd_mem_o    = c_mem;
   assign ser_take    = !c_row && hold_v && (!ser_v || (wb_push && scnt == bpw - 1'b1));
 
@@ -1017,8 +983,8 @@ module dma_engine (
       rd_addr_r <= c_oc;
     end else begin
       rdv <= {rdv[1:0], rd_req_o && rd_grant_i};
-      if ((rd_req_o && rd_grant_i) || rd_skip) begin
-        inflight  <= rd_req_o && rd_grant_i;
+      if (rd_req_o && rd_grant_i) begin
+        inflight  <= 1'b1;
         rd_cnt    <= rd_cnt + 1'b1;
         rd_addr_r <= rd_addr_r + 1'b1;
         if (rd_cnt == oc_words - 1'b1) begin
@@ -1060,42 +1026,12 @@ module dma_engine (
   assign rf_win_valid  = c_st && c_row && hold_v;
   assign rf_win_word   = {96'd0, hold};
   assign bout_fire     = rf_bout_valid && rf_bout_ready;
-  assign tok_end       = bout_fire && (tcnt == ubeats - 1'b1);
-  assign rf_bout_ready = c_st && c_row && (tok_null ? 1'b1 : !wb_afull) &&
-                         (!st_tok_idx || tok_known);
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      tcnt      <= '0;
-      tok_known <= 1'b1;
-      tok_null  <= 1'b0;
-    end else if (setup_pulse) begin
-      tcnt      <= '0;
-      tok_known <= !st_tok_idx;
-      tok_null  <= 1'b0;
-    end else begin
-      if (tneed && !ufs_empty) begin
-        tok_known <= 1'b1;
-        tok_null  <= ufs_dout;
-      end
-      if (bout_fire) begin
-        if (tcnt == ubeats - 1'b1) begin
-          tcnt <= '0;
-          if (st_tok_idx) begin
-            tok_known <= 1'b0;
-            tok_null  <= 1'b0;
-          end
-        end else begin
-          tcnt <= tcnt + 1'b1;
-        end
-      end
-    end
-  end
+  assign rf_bout_ready = c_st && c_row && !wb_afull;
 
   logic [127:0] ser_beat;
 
   assign ser_beat = ser[scnt * 128 +: 128];
-  assign wb_push  = c_row ? (bout_fire && !tok_null) : (ser_v && !wb_afull);
+  assign wb_push  = c_row ? bout_fire : (ser_v && !wb_afull);
   assign wb_din   = c_row ? rf_bout : ser_beat;
 
   sfifo #(
@@ -1183,12 +1119,12 @@ module dma_engine (
 
   assign st_done = gen_all_done && b_idle && !w_active && rd_all && !inflight && !hold_v &&
                    !ser_v && wb_empty && (aw_cnt == b_cnt) && (rdv == 3'b000) &&
-                   (!c_row || rf_idle) && (!c_idx || (ufs_empty && u_left == 24'd0)) &&
+                   (!c_row || rf_idle) &&
                    (reserved == 8'd0) && tf_empty;
 
   logic unused_dma;
 
-  assign unused_dma = ^{m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, ufs_count, rf_afull,
+  assign unused_dma = ^{m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, rf_afull,
                         rf_count, tf_count, wq_afull, wq_count, wf_count, list_beats, wb_count};
 
 endmodule

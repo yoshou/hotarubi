@@ -41,8 +41,7 @@ enum class RowScalar : uint8_t {
   kRstd = 2,
   kNegMax = 3,
   kRecipSum = 4,
-  kSum = 5,
-  kMax = 6
+  kMax = 5
 };
 enum class Perm : uint8_t {
   kNone = 0,
@@ -68,8 +67,7 @@ enum class Sel : uint8_t {
   kX2 = 2,
   kImm = 3,
   kNull = 4,
-  kRs0 = 5,
-  kRs1 = 6
+  kRs1 = 5
 };
 enum class Ialu : uint8_t {
   kNone = 0,
@@ -97,13 +95,7 @@ enum class Salu : uint8_t {
   kSeq = 11,
   kMov = 12
 };
-enum class Smem : uint8_t {
-  kSld = 0,
-  kRsld = 2,
-  kRsmov = 4,
-  kSmovr = 5,
-  kRn = 6
-};
+enum class Smem : uint8_t { kSld = 0, kRsmov = 1, kRn = 2 };
 enum class Cond : uint8_t { kAlways = 0, kZ = 1, kNz = 2 };
 
 struct Pass {
@@ -121,7 +113,6 @@ struct Pass {
   WordMap wx2 = WordMap::kNorm;
   WordMap wd = WordMap::kNorm;
   Pbuf pa = Pbuf::kNone;
-  bool pa_at_mul = false;
   C0 c0 = C0::kZero;
   B b = B::kOne;
   Nl nl = Nl::kNone;
@@ -140,7 +131,6 @@ struct Pass {
   Ialu ialu = Ialu::kNone;
   bool dst_s1 = false;
   bool c0_pred = false;
-  bool nodrain = false;
   bool x_s1 = false;
   uint32_t ctx = 0;
   RowMask rm = RowMask::kNone;
@@ -152,7 +142,6 @@ struct SmemArgs {
   uint32_t rb = 0;
   std::optional<uint32_t> col = std::nullopt;
   bool which = false;
-  bool neg = false;
   uint32_t ctx = 0;
   uint32_t imm = 0;
 };
@@ -188,8 +177,6 @@ class Assembler {
 
   Assembler& StoreScalar(uint32_t rw, uint32_t rlane, uint32_t rcol,
                          uint32_t rval, uint32_t r_one);
-  Assembler& StoreRowScalar(uint32_t rw, uint32_t rcol8, uint32_t rcol,
-                            bool rs0, uint32_t r_one);
   Assembler& IntToFloat(uint32_t rx, uint32_t rd, uint32_t rq, uint32_t rnw,
                         uint32_t rn8, uint32_t r_c0, uint32_t r_ncf,
                         uint32_t rtmp);

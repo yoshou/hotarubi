@@ -64,7 +64,6 @@ module vec_engine
     StMrd,
     StMwait,
     StMex,
-    StMrs,
     StRnwait,
     StBex,
     StNext,
@@ -174,6 +173,7 @@ module vec_engine
   logic        sk_last1, sk_last2, sk_go1, sk_go2, sk_end;
   logic        rd_v, rd_is_entry, rd_is_hold;
   logic [11:0] rd_addr;
+  logic [9:0]  rd_pa_addr;
   ctrl_t       rd_ctrl;
   logic [7:0]  mask8;
 
@@ -208,12 +208,11 @@ module vec_engine
                                              13'(rb_dst + 12'(ww_word));
     rd_ctrl.j         = slot_j;
     rd_ctrl.qw        = ww_word[1:0];
-    rd_ctrl.pa_at_mul = pd.pa_at_mul;
     rd_ctrl.pa_tile   = (pd.pa == PaTile);
     case (pd.pa)
-      PaRowvec: rd_ctrl.pa_addr = p_pb + 10'(w[9:2]);
-      PaTile:   rd_ctrl.pa_addr = p_pb + pt_row + 10'(w[1:0]);
-      default:  rd_ctrl.pa_addr = 10'd0;
+      PaRowvec: rd_pa_addr = p_pb + 10'(w[9:2]);
+      PaTile:   rd_pa_addr = p_pb + pt_row + 10'(w[1:0]);
+      default:  rd_pa_addr = 10'd0;
     endcase
     rd_ctrl.pa_slice = w[1:0];
     rd_ctrl.px       = pd.px;
@@ -285,11 +284,10 @@ module vec_engine
   assign tr_mode  = (st == StTransposeWait);
   assign tr_start = (st == StTransposeStart) && drained_r;
 
-  logic next_is_pass, next_pa_pre, overlap_ok;
+  logic next_is_pass, overlap_ok;
 
   assign next_is_pass = (pf_cnt >= 3'(CbufLatency)) && (cbuf_rdata_i[127:124] == KindPass);
-  assign next_pa_pre  = (pa_e'(cbuf_rdata_i[71:70]) != PaNone) && !cbuf_rdata_i[69];
-  assign overlap_ok   = next_is_pass && !(pd.pa_at_mul && next_pa_pre) && (pd.rm != RmSet);
+  assign overlap_ok   = next_is_pass && (pd.rm != RmSet);
 
   vec_transpose #(
     .ReadLatency(MemLatency)
@@ -322,9 +320,6 @@ module vec_engine
   logic [CtxIdxW-1:0] sc_ctx;
   logic               sc_rs_we, sc_rs_sel;
   logic [31:0]        sc_rs_val [4];
-  logic               rs_we0, rs_we1;
-  logic [31:0]        rs_val [4];
-  logic [31:0]        rs_pick [4];
   logic [31:0]        rn;
   logic [31:0]        rs0 [NumContexts][4];
   logic [31:0]        rs1 [NumContexts][4];
@@ -349,8 +344,7 @@ module vec_engine
   logic                   rq_empty, rq_push, rq_pop, done_any;
   logic [CtxIdxW-1:0]     done_ctx;
 
-  assign pass_reads_rs  = (pd.c0 == C0Rs0) | (pd.b == BRs1) | (pd.sel == SelRs0) |
-                          (pd.sel == SelRs1);
+  assign pass_reads_rs  = (pd.c0 == C0Rs0) | (pd.b == BRs1) | (pd.sel == SelRs1);
   assign pass_last_fire = rd_fire & rd_is_entry & (w == p_nw - 10'd1) & (q == p_rq - 9'd1);
   assign rq_empty       = (rq_count == '0);
   assign ctx_all_idle   = &ctx_idle;
@@ -374,9 +368,9 @@ module vec_engine
     end
     rq_push = done_any & (ctx_prog[done_ctx] != ScNone);
     case (sm_op)
-      SmemRn:  sm_ready = rq_empty & !sc_busy & !sc_start & !sc_running;
-      SmemSld: sm_ready = 1'b1;
-      default: sm_ready = !sc_outstanding[sm_ctx];
+      SmemRn:    sm_ready = rq_empty & !sc_busy & !sc_start & !sc_running;
+      SmemRsmov: sm_ready = !sc_outstanding[sm_ctx];
+      default:   sm_ready = 1'b1;
     endcase
   end
 
@@ -445,23 +439,13 @@ module vec_engine
         end
       end
     end
-    if (rs_we0) begin
-      for (int t = 0; t < 4; t++) begin
-        rs0[sm_ctx][t] <= rs_val[t];
-      end
-    end
-    if (rs_we1) begin
-      for (int t = 0; t < 4; t++) begin
-        rs1[sm_ctx][t] <= rs_val[t];
-      end
-    end
   end
   logic [31:0]   op_a, op_b;
   logic [31:0]   mul_p1, mul_p2, mul_p3;
   logic [1023:0] mword;
 
   logic [4:0]  ins_rd, ins_ra, ins_rb, sa_op, sm_col;
-  logic        sa_imm, sm_colimm, sm_which, sm_neg;
+  logic        sa_imm, sm_colimm, sm_which;
   logic [2:0]  sm_op;
   logic [31:0] ins_imm;
   logic [1:0]  br_cond;
@@ -477,7 +461,6 @@ module vec_engine
   assign sm_colimm = ins[105];
   assign sm_col    = sm_colimm ? ins[104:100] : op_b[4:0];
   assign sm_which  = ins[99];
-  assign sm_neg    = ins[98];
   assign ins_imm   = ins[31:0];
   assign br_cond   = ins[123:122];
   assign br_tgt    = ins[9:0];
@@ -501,14 +484,6 @@ module vec_engine
     endcase
   endfunction
 
-  function automatic logic [31:0] ftz32(input logic [31:0] f);
-    return (f[30:23] == 8'd0) ? 32'd0 : f;
-  endfunction
-
-  function automatic logic [31:0] fneg32(input logic [31:0] f);
-    return (f[30:23] == 8'd0) ? 32'd0 : {~f[31], f[30:0]};
-  endfunction
-
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       st          <= StIdle;
@@ -517,8 +492,6 @@ module vec_engine
       gap         <= 2'd0;
       rf_we       <= 1'b0;
       sm_rd_v     <= 1'b0;
-      rs_we0      <= 1'b0;
-      rs_we1      <= 1'b0;
       cbuf_addr_o <= 10'd0;
       pf_cnt      <= 3'd0;
       pre_on      <= 1'b0;
@@ -526,8 +499,6 @@ module vec_engine
     end else begin
       sc_start <= 1'b0;
       rf_we    <= 1'b0;
-      rs_we0   <= 1'b0;
-      rs_we1   <= 1'b0;
       gap      <= (rd_fire & rd_is_entry) ? 2'd3 : (gap != 2'd0) ? gap - 2'd1 : 2'd0;
       if (rq_pop) begin
         sc_start   <= 1'b1;
@@ -598,7 +569,7 @@ module vec_engine
             qf       <= cmd_q_i;
             c_scr    <= !cmd_q_i ? cmd_dst_i[11:0] :
                         uses_imm(cmd_op_i) ? cmd_src2_i : cmd_imm_i[11:0];
-            if (cmd_op_i == 5'(OpRun)) begin
+            if (cmd_op_i[4]) begin
               pc    <= cmd_aux_i[9:0];
               c_aux <= 11'd0;
             end else begin
@@ -741,7 +712,7 @@ module vec_engine
           if (cur_skip) begin
             if ((q == p_rq - 9'd1) || sk_end) begin
               cur_skip <= 1'b0;
-              st       <= (pd.nodrain || overlap_ok) ? StNext : StDrain;
+              st       <= overlap_ok ? StNext : StDrain;
             end else if (sk_go1) begin
               q        <= q + 9'd1;
               rb_src   <= src_d1;
@@ -768,7 +739,7 @@ module vec_engine
               if (w == p_nw - 10'd1) begin
                 w <= 10'd0;
                 if ((q == p_rq - 9'd1) || sk_end) begin
-                  st <= ((pd.nodrain && (pd.rm != RmSet)) || overlap_ok) ? StNext : StDrain;
+                  st <= overlap_ok ? StNext : StDrain;
                 end else if (sk_go1) begin
                   q        <= q + 9'd1;
                   rb_src   <= src_d1;
@@ -842,7 +813,7 @@ module vec_engine
           sm_addr <= op_a[11:0] + ins_imm[11:0];
           if (drained && sm_ready) begin
             case (sm_op)
-              SmemSld, SmemRsld: begin
+              SmemSld: begin
                 sm_rd_v <= 1'b1;
                 st      <= StMrd;
               end
@@ -876,40 +847,14 @@ module vec_engine
               rf_wa <= ins_rd;
               rf_wd <= mword[sm_col*32 +: 32];
             end
-            SmemRsld: begin
-              for (int t = 0; t < 4; t++) begin
-                rs_pick[t] <= mword[(t*8 + 32'(sm_col[2:0]))*32 +: 32];
-              end
-            end
             SmemRsmov: begin
               rf_we <= (ins_rd != 5'd0);
               rf_wa <= ins_rd;
               rf_wd <= sm_which ? rs0[sm_ctx][sm_col[1:0]] : rs1[sm_ctx][sm_col[1:0]];
             end
-            SmemSmovr: begin
-              if (sm_which) begin
-                rs_we0 <= 1'b1;
-              end else begin
-                rs_we1 <= 1'b1;
-              end
-              for (int t = 0; t < 4; t++) begin
-                rs_val[t] <= op_a;
-              end
-            end
             default: begin
             end
           endcase
-          st <= (sm_op == SmemRsld) ? StMrs : StNext;
-        end
-        StMrs: begin
-          if (sm_which) begin
-            rs_we0 <= 1'b1;
-          end else begin
-            rs_we1 <= 1'b1;
-          end
-          for (int t = 0; t < 4; t++) begin
-            rs_val[t] <= sm_neg ? fneg32(rs_pick[t]) : ftz32(rs_pick[t]);
-          end
           st <= StNext;
         end
         StRnwait: begin
@@ -1016,14 +961,11 @@ module vec_engine
   end
 
   logic [1023:0] x_word, x2_word;
-  logic [255:0]  pa_slice_w;
 
-  assign x_word     = rt[MemLatency-1].dual ? xhold : fbuf_rdata_i;
-  assign x2_word    = fbuf_rdata_i;
-  assign pa_slice_w = pbuf_a_rdata_i[ent_c0.pa_slice*256 +: 256];
+  assign x_word  = rt[MemLatency-1].dual ? xhold : fbuf_rdata_i;
+  assign x2_word = fbuf_rdata_i;
 
-  logic [1023:0] wq_x, wq_x2;
-  logic [255:0]  wq_pa;
+  logic [1023:0] wq_x, wq_x2, wq_pa;
   ctrl_t         wq_c;
   logic          ph0_v, ph1_v, ph2_v, ph3_v;
   logic [1:0]    ph_code;
@@ -1048,7 +990,7 @@ module vec_engine
     if (ent_v0) begin
       wq_x  <= x_word;
       wq_x2 <= x2_word;
-      wq_pa <= pa_slice_w;
+      wq_pa <= pbuf_a_rdata_i;
       wq_c  <= ent_c0;
     end
   end
@@ -1059,6 +1001,9 @@ module vec_engine
   ctrl_t         ent_c;
   logic [1023:0] ent_xw, ent_x2w;
   logic [255:0]  ent_pa;
+  logic [1:0]    pa_part;
+
+  assign pa_part = wq_c.pa_tile ? ph_code : wq_c.pa_slice;
 
   assign ent_v = phs_v;
 
@@ -1066,7 +1011,7 @@ module vec_engine
     ent_c    = wq_c;
     ent_xw   = wq_x;
     ent_x2w  = wq_x2;
-    ent_pa   = wq_pa;
+    ent_pa   = wq_pa[pa_part*256 +: 256];
     ent_c.ph = ph_code;
   end
 
@@ -1090,15 +1035,10 @@ module vec_engine
     end
   end
 
-  function automatic logic [Hw-1:0] expand(input logic [1023:0] wdat, input logic tile,
-                                           input logic [1:0] ph, input logic [1:0] slice);
-    return tile ? wdat[ph*256 +: 256] : wdat[slice*256 +: 256];
-  endfunction
-
   logic          e0_v, e1_v;
   ctrl_t         e0_c, e1_c;
   logic [Hw-1:0] e0_x, e0_x2, e1_x, e1_x2, e1_c0raw;
-  logic [255:0]  e0_pa;
+  logic [255:0]  e0_pa, e1_pa;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -1169,6 +1109,7 @@ module vec_engine
     e1_x2    <= e0_x2;
     e1_pred  <= e0_pred;
     e1_c0raw <= e0_c0raw;
+    e1_pa    <= e0_pa;
   end
 
   logic [Hw-1:0] c0_in, y_int_in;
@@ -1252,7 +1193,7 @@ module vec_engine
   assign d2_in = (e1_c.c1 == C1Signfix) ? e1_x : e1_x2;
 
   always_ff @(posedge clk_i) begin
-    d1[0] <= e1_x2;
+    d1[0] <= (e1_c.b == BPbuf) ? e1_pa : e1_x2;
     for (int i = 1; i < StageB; i++) begin
       d1[i] <= d1[i-1];
     end
@@ -1262,27 +1203,22 @@ module vec_engine
     end
   end
 
-  ctrl_t c_pa;
-
-  assign c_pa = cd[(StageB - MemLatency) - 1];
-
   always_ff @(posedge clk_i) begin
-    pbuf_a_addr_o <= (c_pa.valid & c_pa.pa_at_mul) ? c_pa.pa_addr : rd_ctrl.pa_addr;
+    pbuf_a_addr_o <= rd_pa_addr;
   end
 
   ctrl_t         c_b;
-  logic [Hw-1:0] b_ext, pa_mul;
+  logic [Hw-1:0] b_ext;
   logic [31:0]   rs1_b;
 
-  assign c_b    = cd[StageB - 1];
-  assign pa_mul = expand(pbuf_a_rdata_i, c_b.pa_tile, c_b.ph, c_b.pa_slice);
-  assign rs1_b  = rs1[c_b.ctx[CtxIdxW-1:0]][c_b.ph];
+  assign c_b   = cd[StageB - 1];
+  assign rs1_b = rs1[c_b.ctx[CtxIdxW-1:0]][c_b.ph];
 
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
       case (c_b.b)
-        BX2:     b_ext[l*32 +: 32] = d1[StageB-1][l*32 +: 32];
-        BPbuf:   b_ext[l*32 +: 32] = pa_mul[l*32 +: 32];
+        BX2,
+        BPbuf:   b_ext[l*32 +: 32] = d1[StageB-1][l*32 +: 32];
         BRs1:    b_ext[l*32 +: 32] = rs1_b;
         BImm:    b_ext[l*32 +: 32] = c_b.imm;
         BLog2e:  b_ext[l*32 +: 32] = FpLog2e;
@@ -1331,7 +1267,6 @@ module vec_engine
         SelX2:   alt = d2[StageY-1][l*32 +: 32];
         SelImm:  alt = c_y.imm;
         SelNull: alt = NullEntry;
-        SelRs0:  alt = rs0[c_y.ctx[CtxIdxW-1:0]][c_y.ph];
         SelRs1:  alt = rs1[c_y.ctx[CtxIdxW-1:0]][c_y.ph];
         default: alt = 32'd0;
       endcase
@@ -1794,7 +1729,7 @@ module vec_engine
 
   logic unused_engine;
 
-  assign unused_engine = ^{c_y, c_ny, c_nl, c_c1, c_b, c_pa, rn, wf_count, ef_count, ef_afull,
+  assign unused_engine = ^{c_y, c_ny, c_nl, c_c1, c_b, rn, wf_count, ef_count, ef_afull,
                            df_count, af_count, sm_ctx_field, pd.ctx};
 
 endmodule

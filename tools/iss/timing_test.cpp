@@ -202,7 +202,7 @@ TEST(EstimateTest, IndexedAndRowFormatTransfersIncludeTheList) {
                                            .row_words = 9,
                                            .ddr_stride = 0,
                                            .mode = 0,
-                                           .flags = 1,
+                                           .flags = 3,
                                            .tok = 0});
   EXPECT_EQ(indexed.read_beats, 3U + (9U * 8));
   const DmaActivity rows = EstimateDma({.store = false,
@@ -271,8 +271,10 @@ TEST(EstimateTest, DdrExtentsCoverEveryRowOfATransfer) {
                         .tok = 8};
   EXPECT_EQ(EstimateDdrExtent(rows),
             (DdrExtent{.lo = 0x4000, .hi = 0x4000 + (4 * 8 * 8 * 16)}));
-  const DmaCommand indexed{.ddr_addr = 0x5000, .rows = 1, .flags = 1};
+  const DmaCommand indexed{.ddr_addr = 0x5000, .rows = 1, .flags = 3};
   EXPECT_TRUE(EstimateDdrExtent(indexed).whole);
+  const DmaCommand ignored{.ddr_addr = 0x5000, .rows = 1, .flags = 1};
+  EXPECT_FALSE(EstimateDdrExtent(ignored).whole);
   const DmaCommand gather{.ddr_addr = 0x6000, .rows = 1, .mode = 3};
   EXPECT_TRUE(EstimateDdrExtent(gather).whole);
   const DmaCommand empty{.ddr_addr = 0x7000, .rows = 0, .row_words = 1};
@@ -323,8 +325,8 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
                                                         .aux = 0,
                                                         .imm = 0x358637BD});
   EXPECT_EQ(layernorm.passes, 40U);
-  EXPECT_EQ(layernorm.drains, 8U);
-  EXPECT_EQ(layernorm.overlaps, 32U);
+  EXPECT_EQ(layernorm.drains, 4U);
+  EXPECT_EQ(layernorm.overlaps, 36U);
   EXPECT_EQ(layernorm.overlap_stall_words, 0U);
   EXPECT_EQ(layernorm.scalars.at(1), 8U);
   EXPECT_EQ(layernorm.scalars.at(2), 8U);

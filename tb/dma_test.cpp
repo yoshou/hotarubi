@@ -116,90 +116,100 @@ TEST(DmaTest, AbufRawLoadAndStoreWritesPadding) {
   }
 }
 
-TEST(DmaTest, FbufIndexListLoadWithNullEntries) {
+TEST(DmaTest, FbufRowFormatIndexListWithNullTokens) {
   std::mt19937 rng(23);
   NpuBench bench(23);
   Ddr& ddr = bench.Memory();
-  std::vector<FbufWord> expected;
-  for (uint32_t e = 0; e < 12; ++e) {
+  constexpr uint32_t kTok = 2;
+  constexpr uint32_t kTokenBytes = 128 * kTok;
+  constexpr uint32_t kTokens = 12;
+  constexpr uint32_t kWords = kTokens * kTok;
+  std::vector<std::vector<uint32_t>> tokens;
+  for (uint32_t e = 0; e < kTokens; ++e) {
+    std::vector<uint32_t> token(size_t{32} * kTok, 0);
     if (e == 3 || e == 10) {
       ddr.Write32(kListArea + (4 * e), 0xFFFFFFFFU);
-      expected.push_back(FbufWord{});
-      continue;
+    } else {
+      const uint32_t address = kSrcArea + (((e * 37) % 100) * kTokenBytes);
+      for (uint32_t i = 0; i < 32 * kTok; ++i) {
+        token[i] = RandomFp32(rng, -10, 10);
+        ddr.Write32(address + (4 * i), token[i]);
+      }
+      ddr.Write32(kListArea + (4 * e), address / 16);
     }
-    const uint32_t address = kSrcArea + ((rng() % 2000) * 16 * 9);
-    expected.push_back(RandomFbufWord(rng));
-    WriteFbuf(ddr, address, expected.back());
-    ddr.Write32(kListArea + (4 * e), address / 16);
+    tokens.push_back(token);
   }
-  RunProgram(bench, {DmaLoad({.ddr_addr = kDstArea,
+  FillGarbage(ddr, kAuxArea, kWords * kFbufWordBytes, rng);
+  RunProgram(bench, {DmaLoad({.ddr_addr = kAuxArea,
                               .mem = Mem::kFbuf,
-                              .onchip = 7,
+                              .onchip = 20,
                               .rows = 1,
-                              .row_words = 12}),
+                              .row_words = kWords}),
                      DmaLoad({.ddr_addr = kListArea,
                               .mem = Mem::kFbuf,
-                              .onchip = 7,
+                              .onchip = 20,
                               .rows = 3,
                               .row_words = 4,
-                              .flags = kDmaFlagIndex}),
-                     DmaStore({.ddr_addr = kAuxArea,
+                              .tok = kTok,
+                              .flags = kDmaFlagIndex | kDmaFlagRow}),
+                     DmaStore({.ddr_addr = kDstArea,
                                .mem = Mem::kFbuf,
-                               .onchip = 7,
+                               .onchip = 20,
                                .rows = 1,
-                               .row_words = 12}),
+                               .row_words = kWords}),
                      Halt()});
-  for (uint32_t i = 0; i < expected.size(); ++i) {
-    EXPECT_EQ(ReadFbuf(ddr, kAuxArea + (i * kFbufWordBytes)), expected[i])
-        << "word " << i;
+  for (uint32_t i = 0; i < kTokens; ++i) {
+    for (uint32_t ch = 0; ch < 32 * kTok; ++ch) {
+      const uint32_t word = ((i / 4) * 4 * kTok) + (ch / 8);
+      const uint32_t element = ((i % 4) * 8) + (ch % 8);
+      ASSERT_EQ(ddr.Read32(kDstArea + (word * kFbufWordBytes) + (4 * element)),
+                tokens[i][ch])
+          << "token " << i << " channel " << ch;
+    }
   }
 }
 
-TEST(DmaTest, FbufIndexListStoreScatters) {
+TEST(DmaTest, StoreIgnoresTheIndexFlag) {
   std::mt19937 rng(24);
   NpuBench bench(24);
   Ddr& ddr = bench.Memory();
+  constexpr uint32_t kStride = 0x400;
   std::vector<FbufWord> words;
-  std::vector<uint32_t> targets;
   for (uint32_t e = 0; e < 6; ++e) {
     words.push_back(RandomFbufWord(rng));
     WriteFbuf(ddr, kSrcArea + (e * kFbufWordBytes), words.back());
-    targets.push_back(kDstArea + (((e * 7) % 6) * 0x2000) + ((rng() % 8) * 16));
-    ddr.Write32(kListArea + (4 * e), targets.back() / 16);
   }
   RunProgram(bench, {DmaLoad({.ddr_addr = kSrcArea,
                               .mem = Mem::kFbuf,
                               .onchip = 50,
                               .rows = 1,
                               .row_words = 6}),
-                     DmaStore({.ddr_addr = kListArea,
+                     DmaStore({.ddr_addr = kDstArea,
                                .mem = Mem::kFbuf,
                                .onchip = 50,
                                .rows = 2,
                                .row_words = 3,
+                               .ddr_stride = kStride,
                                .flags = kDmaFlagIndex}),
                      Halt()});
   for (uint32_t e = 0; e < words.size(); ++e) {
-    EXPECT_EQ(ReadFbuf(ddr, targets[e]), words[e]) << "entry " << e;
+    EXPECT_EQ(ReadFbuf(ddr, kDstArea + ((e / 3) * kStride) +
+                                ((e % 3) * kFbufWordBytes)),
+              words[e])
+        << "word " << e;
   }
 }
 
-TEST(DmaTest, AbufIndexListNullEntryIsZeroBlockWithScale127) {
+TEST(DmaTest, LoadIgnoresTheIndexFlagWithoutRowFormat) {
   std::mt19937 rng(25);
   NpuBench bench(25);
   Ddr& ddr = bench.Memory();
-  const AbufWord word = RandomAbufWord(rng);
-  WriteAbuf(ddr, kSrcArea, word);
-  ddr.Write32(kListArea, kSrcArea / 16);
-  ddr.Write32(kListArea + 4, 0xFFFFFFFFU);
-  FillGarbage(ddr, kAuxArea, 2 * kAbufWordBytes, rng);
-  WriteAbuf(ddr, kAuxArea + kAbufWordBytes, RandomAbufWord(rng));
-  RunProgram(bench, {DmaLoad({.ddr_addr = kAuxArea,
-                              .mem = Mem::kAbuf,
-                              .onchip = 10,
-                              .rows = 1,
-                              .row_words = 2}),
-                     DmaLoad({.ddr_addr = kListArea,
+  std::vector<AbufWord> words;
+  for (uint32_t e = 0; e < 2; ++e) {
+    words.push_back(RandomAbufWord(rng));
+    WriteAbuf(ddr, kSrcArea + (e * kAbufWordBytes), words.back());
+  }
+  RunProgram(bench, {DmaLoad({.ddr_addr = kSrcArea,
                               .mem = Mem::kAbuf,
                               .onchip = 10,
                               .rows = 1,
@@ -211,10 +221,10 @@ TEST(DmaTest, AbufIndexListNullEntryIsZeroBlockWithScale127) {
                                .rows = 1,
                                .row_words = 2}),
                      Halt()});
-  EXPECT_EQ(ReadAbuf(ddr, kDstArea), word);
-  AbufWord null_word;
-  null_word.scale = {127, 127, 127, 127};
-  EXPECT_EQ(ReadAbuf(ddr, kDstArea + kAbufWordBytes), null_word);
+  for (uint32_t e = 0; e < words.size(); ++e) {
+    EXPECT_EQ(ReadAbuf(ddr, kDstArea + (e * kAbufWordBytes)), words[e])
+        << "word " << e;
+  }
 }
 
 uint32_t MxTokenBytes(uint32_t tok) {

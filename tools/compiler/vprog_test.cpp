@@ -26,7 +26,6 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
                                        .wx2 = WordMap::kX2,
                                        .wd = WordMap::kS4,
                                        .pa = Pbuf::kTile,
-                                       .pa_at_mul = true,
                                        .c0 = C0::kImm,
                                        .b = B::kLog2e,
                                        .nl = Nl::kTab01,
@@ -45,8 +44,9 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
                                        .ialu = Ialu::kRsub,
                                        .dst_s1 = true,
                                        .c0_pred = true,
-                                       .nodrain = true,
-                                       .x_s1 = true});
+                                       .x_s1 = true,
+                                       .ctx = 1,
+                                       .rm = RowMask::kSet});
   EXPECT_EQ(word.Get(124, 4), 0U);
   EXPECT_EQ(word.Get(119, 5), 1U);
   EXPECT_EQ(word.Get(114, 5), 2U);
@@ -62,7 +62,7 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
   EXPECT_EQ(word.Get(74, 2), 2U);
   EXPECT_EQ(word.Get(72, 2), 3U);
   EXPECT_EQ(word.Get(70, 2), 2U);
-  EXPECT_EQ(word.Get(69, 1), 1U);
+  EXPECT_EQ(word.Get(69, 1), 0U);
   EXPECT_EQ(word.Get(66, 3), 4U);
   EXPECT_EQ(word.Get(63, 3), 6U);
   EXPECT_EQ(word.Get(61, 2), 3U);
@@ -71,20 +71,22 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
   EXPECT_EQ(word.Get(57, 1), 1U);
   EXPECT_EQ(word.Get(55, 2), 2U);
   EXPECT_EQ(word.Get(53, 2), 3U);
-  EXPECT_EQ(word.Get(50, 3), 6U);
+  EXPECT_EQ(word.Get(50, 3), 5U);
   EXPECT_EQ(word.Get(47, 3), 5U);
   EXPECT_EQ(word.Get(44, 3), 0U);
   EXPECT_EQ(word.Get(41, 3), 6U);
   EXPECT_EQ(word.Get(38, 3), 6U);
   EXPECT_EQ(word.Get(36, 2), 3U);
   EXPECT_EQ(word.Get(35, 1), 1U);
-  EXPECT_EQ(word.Get(32, 3), 6U);
+  EXPECT_EQ(word.Get(32, 3), 5U);
   EXPECT_EQ(word.Get(29, 3), 7U);
   EXPECT_EQ(word.Get(28, 1), 1U);
   EXPECT_EQ(word.Get(27, 1), 1U);
-  EXPECT_EQ(word.Get(26, 1), 1U);
+  EXPECT_EQ(word.Get(26, 1), 0U);
   EXPECT_EQ(word.Get(25, 1), 1U);
-  EXPECT_EQ(word.Get(0, 25), 0U);
+  EXPECT_EQ(word.Get(23, 2), 1U);
+  EXPECT_EQ(word.Get(21, 2), 2U);
+  EXPECT_EQ(word.Get(0, 21), 0U);
 }
 
 TEST(VprogTest, ScalarInstructionsPlaceTheirFieldsAsSpecified) {
@@ -97,23 +99,25 @@ TEST(VprogTest, ScalarInstructionsPlaceTheirFieldsAsSpecified) {
   EXPECT_EQ(alu.Get(103, 1), 1U);
   EXPECT_EQ(alu.Get(0, 32), 0x80000001U);
   EXPECT_EQ(EncodeSalu(Salu::kAdd, 1, 2, 3, std::nullopt).Get(103, 1), 0U);
-  const Instruction smem = EncodeSmem(Smem::kRsld, {.rd = 4,
-                                                    .ra = 5,
-                                                    .rb = 6,
-                                                    .col = 19,
-                                                    .which = true,
-                                                    .neg = true,
-                                                    .imm = 0xFFFFFFF0U});
+  const Instruction smem = EncodeSmem(Smem::kRsmov, {.rd = 4,
+                                                     .ra = 5,
+                                                     .rb = 6,
+                                                     .col = 19,
+                                                     .which = true,
+                                                     .ctx = 1,
+                                                     .imm = 0xFFFFFFF0U});
   EXPECT_EQ(smem.Get(124, 4), 2U);
-  EXPECT_EQ(smem.Get(121, 3), 2U);
+  EXPECT_EQ(smem.Get(121, 3), 1U);
   EXPECT_EQ(smem.Get(116, 5), 4U);
   EXPECT_EQ(smem.Get(111, 5), 5U);
   EXPECT_EQ(smem.Get(106, 5), 6U);
   EXPECT_EQ(smem.Get(105, 1), 1U);
   EXPECT_EQ(smem.Get(100, 5), 19U);
   EXPECT_EQ(smem.Get(99, 1), 1U);
-  EXPECT_EQ(smem.Get(98, 1), 1U);
+  EXPECT_EQ(smem.Get(98, 1), 0U);
+  EXPECT_EQ(smem.Get(96, 2), 1U);
   EXPECT_EQ(smem.Get(0, 32), 0xFFFFFFF0U);
+  EXPECT_EQ(EncodeSmem(Smem::kRn, {}).Get(121, 3), 2U);
   const Instruction branch = EncodeBranch(Cond::kNz, 13, 700);
   EXPECT_EQ(branch.Get(124, 4), 3U);
   EXPECT_EQ(branch.Get(122, 2), 2U);

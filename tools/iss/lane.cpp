@@ -105,7 +105,7 @@ uint32_t C0Value(const Pass& pass, const LaneInputs& in, const RowState& rows) {
     case C0Source::kX2:
       return in.x2;
     case C0Source::kPbuf:
-      return in.pbuf_pre;
+      return in.pbuf;
     case C0Source::kRs0:
       return rows.rs0.at(in.t);
     case C0Source::kImm:
@@ -122,7 +122,7 @@ uint32_t BValue(const Pass& pass, const LaneInputs& in, const RowState& rows,
     case BSource::kX2:
       return in.x2;
     case BSource::kPbuf:
-      return in.pbuf_mul;
+      return in.pbuf;
     case BSource::kRs1:
       return rows.rs1.at(in.t);
     case BSource::kImm:
@@ -186,8 +186,6 @@ uint32_t SelectValue(Select sel, uint32_t c1, const LaneInputs& in,
       return in.imm;
     case Select::kNull:
       return kNullEntry;
-    case Select::kRs0:
-      return rows.rs0.at(in.t);
     case Select::kRs1:
       return rows.rs1.at(in.t);
     case Select::kNone:
@@ -216,7 +214,6 @@ Pass DecodePass(const Word128& instruction) {
       .wx2 = static_cast<WordMap>(w.Field(74, 2)),
       .wd = static_cast<WordMap>(w.Field(72, 2)),
       .pa = Decode(w.Field(70, 2), PbufAccess::kTile, PbufAccess::kNone),
-      .pa_at_mul = Flag(w, 69),
       .c0 = Decode(w.Field(66, 3), C0Source::kImm, C0Source::kZero),
       .b = Decode(w.Field(63, 3), BSource::kLog2e, BSource::kOne),
       .nl = static_cast<Nonlinear>(w.Field(61, 2)),
@@ -225,7 +222,7 @@ Pass DecodePass(const Word128& instruction) {
       .mask_en = Flag(w, 57),
       .red = Decode(w.Field(55, 2), Reduction::kMax, Reduction::kNone),
       .wr = static_cast<WriteTarget>(w.Field(53, 2)),
-      .sc = Decode(w.Field(50, 3), RowScalar::kMax, RowScalar::kRecipSum),
+      .sc = Decode(w.Field(50, 3), RowScalar::kMax, RowScalar::kNone),
       .px = Decode(w.Field(47, 3), Permutation::kT4b, Permutation::kNone),
       .pcol = w.Field(41, 3),
       .cmp = Decode(w.Field(38, 3), Compare::kGe, Compare::kNone),
@@ -235,7 +232,6 @@ Pass DecodePass(const Word128& instruction) {
       .ialu = static_cast<IntegerOp>(w.Field(29, 3)),
       .dst_s1 = Flag(w, 28),
       .c0_pred = Flag(w, 27),
-      .nodrain = Flag(w, 26),
       .x_s1 = Flag(w, 25),
       .ctx = w.Field(23, 2),
       .rm = Decode(w.Field(21, 2), RowMask::kSet, RowMask::kNone),

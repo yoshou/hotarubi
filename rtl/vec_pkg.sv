@@ -100,8 +100,7 @@ package vec_pkg;
     ScRstd     = 3'd2,
     ScNegmax   = 3'd3,
     ScRecipsum = 3'd4,
-    ScSum      = 3'd5,
-    ScMax      = 3'd6
+    ScMax      = 3'd5
   } sc_e;
 
   typedef enum logic [1:0] {
@@ -143,8 +142,7 @@ package vec_pkg;
     SelX2   = 3'd2,
     SelImm  = 3'd3,
     SelNull = 3'd4,
-    SelRs0  = 3'd5,
-    SelRs1  = 3'd6
+    SelRs1  = 3'd5
   } sel_e;
 
   typedef enum logic [1:0] {
@@ -169,7 +167,6 @@ package vec_pkg;
     logic       x2_en;
     rw_e        wx, wx2, wd;
     pa_e        pa;
-    logic       pa_at_mul;
     c0_e        c0;
     b_e         b;
     nl_e        nl;
@@ -189,7 +186,6 @@ package vec_pkg;
     logic       dst_s1;
     logic       x_s1;
     logic       c0_pred;
-    logic       nodrain;
     logic [CtxW-1:0] ctx;
     rm_e        rm;
   } pass_t;
@@ -197,7 +193,7 @@ package vec_pkg;
   function automatic pass_t dec_pass(input logic [127:0] w);
     pass_t d;
     logic  unused_w;
-    unused_w = ^{w[127:124], w[46:44], w[20:0]};
+    unused_w = ^{w[127:124], w[69], w[46:44], w[26], w[20:0]};
     d.rx        = w[123:119];
     d.rx2       = w[118:114];
     d.rd        = w[113:109];
@@ -212,7 +208,6 @@ package vec_pkg;
     d.wx2       = rw_e'(w[75:74]);
     d.wd        = rw_e'(w[73:72]);
     d.pa        = pa_e'(w[71:70]);
-    d.pa_at_mul = w[69];
     d.c0        = c0_e'(w[68:66]);
     d.b         = b_e'(w[65:63]);
     d.nl        = nl_e'(w[62:61]);
@@ -221,17 +216,16 @@ package vec_pkg;
     d.mask_en   = w[57];
     d.red       = red_e'(w[56:55]);
     d.wr        = wr_e'(w[54:53]);
-    d.sc        = sc_e'(w[52:50]);
+    d.sc        = (w[52:50] > 3'd5) ? ScNone : sc_e'(w[52:50]);
     d.px        = px_e'(w[49:47]);
     d.pcol      = w[43:41];
     d.cmp       = cmp_e'(w[40:38]);
     d.cmp_src   = cs_e'(w[37:36]);
     d.cmp_int   = w[35];
-    d.sel       = sel_e'(w[34:32]);
+    d.sel       = (w[34:32] > 3'd5) ? SelZero : sel_e'(w[34:32]);
     d.ialu      = ia_e'(w[31:29]);
     d.dst_s1    = w[28];
     d.c0_pred   = w[27];
-    d.nodrain   = w[26];
     d.x_s1      = w[25];
     d.ctx       = w[24:23];
     d.rm        = (w[22:21] == 2'd3) ? RmNone : rm_e'(w[22:21]);
@@ -259,10 +253,8 @@ package vec_pkg;
   localparam logic [4:0] SaluSeq  = 5'd11;
 
   localparam logic [2:0] SmemSld   = 3'd0;
-  localparam logic [2:0] SmemRsld  = 3'd2;
-  localparam logic [2:0] SmemRsmov = 3'd4;
-  localparam logic [2:0] SmemSmovr = 3'd5;
-  localparam logic [2:0] SmemRn    = 3'd6;
+  localparam logic [2:0] SmemRsmov = 3'd1;
+  localparam logic [2:0] SmemRn    = 3'd2;
 
   typedef struct packed {
     logic        valid;
@@ -279,8 +271,6 @@ package vec_pkg;
     logic [12:0] waddr;
     logic [2:0]  j;
     logic [1:0]  qw;
-    logic        pa_at_mul;
-    logic [9:0]  pa_addr;
     logic [1:0]  pa_slice;
     logic        pa_tile;
     px_e         px;

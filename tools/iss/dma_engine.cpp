@@ -219,26 +219,6 @@ void LoadWords(const DmaCommand& command, const Ddr& ddr, Memories& memories,
                DmaActivity& activity) {
   const uint32_t beats = BeatsPerWord(command.mem);
   const uint32_t bytes = beats * kBeatBytes;
-  const uint32_t count = command.rows * command.row_words;
-  if ((command.flags & kFlagIndex) != 0) {
-    const std::vector<uint32_t> entries =
-        ReadList(ddr, command.ddr_addr, count, activity);
-    for (uint32_t e = 0; e < count; ++e) {
-      WordBytes word{};
-      if (entries[e] != kNullEntry) {
-        CountRead(activity, beats);
-        ddr.Read(UnitAddress(entries[e]), std::span(word).first(bytes));
-      } else {
-        ++activity.null_entries;
-        if (command.mem == 0) {
-          std::ranges::fill(std::span(word).subspan(kAbufScaleOffset, kTokens),
-                            kNullScale);
-        }
-      }
-      WriteWord(memories, command.mem, command.onchip + e, word);
-    }
-    return;
-  }
   for (uint32_t r = 0; r < command.rows; ++r) {
     CountRead(activity, uint64_t{command.row_words} * beats);
     for (uint32_t w = 0; w < command.row_words; ++w) {
@@ -289,22 +269,6 @@ void StoreWords(const DmaCommand& command, Ddr& ddr, Memories& memories,
                 DmaActivity& activity) {
   const uint32_t beats = BeatsPerWord(command.mem);
   const uint32_t bytes = beats * kBeatBytes;
-  const uint32_t count = command.rows * command.row_words;
-  if ((command.flags & kFlagIndex) != 0) {
-    const std::vector<uint32_t> entries =
-        ReadList(ddr, command.ddr_addr, count, activity);
-    for (uint32_t e = 0; e < count; ++e) {
-      if (entries[e] != kNullEntry) {
-        CountWrite(activity, beats);
-        const WordBytes word =
-            ReadWord(memories, command.mem, command.onchip + e);
-        ddr.Write(UnitAddress(entries[e]), std::span(word).first(bytes));
-      } else {
-        ++activity.null_entries;
-      }
-    }
-    return;
-  }
   for (uint32_t r = 0; r < command.rows; ++r) {
     CountWrite(activity, uint64_t{command.row_words} * beats);
     for (uint32_t w = 0; w < command.row_words; ++w) {
@@ -318,29 +282,18 @@ void StoreWords(const DmaCommand& command, Ddr& ddr, Memories& memories,
 
 void StoreRows(const DmaCommand& command, Ddr& ddr, Memories& memories,
                DmaActivity& activity) {
-  const bool indexed = (command.flags & kFlagIndex) != 0;
-  const RowFormat format = MakeRowFormat(command, indexed);
+  const RowFormat format = MakeRowFormat(command, false);
   const uint32_t count = command.rows * command.row_words;
-  const std::vector<uint32_t> entries =
-      indexed ? ReadList(ddr, command.ddr_addr, count, activity)
-              : std::vector<uint32_t>{};
   Quad quad;
   for (uint32_t q = 0; q < count / kTokens; ++q) {
     UnpackQuad(format, memories, command.mem,
                command.onchip + (q * format.words), quad);
     for (uint32_t j = 0; j < kTokens; ++j) {
       const uint32_t u = (q * kTokens) + j;
-      if (!indexed) {
-        CountWrite(activity, format.bytes / kBeatBytes);
-        ddr.Write(RowAddress(command, u / command.row_words,
-                             uint64_t{u % command.row_words} * format.bytes),
-                  quad.at(j));
-      } else if (entries[u] != kNullEntry) {
-        CountWrite(activity, format.bytes / kBeatBytes);
-        ddr.Write(UnitAddress(entries[u]), quad.at(j));
-      } else {
-        ++activity.null_entries;
-      }
+      CountWrite(activity, format.bytes / kBeatBytes);
+      ddr.Write(RowAddress(command, u / command.row_words,
+                           uint64_t{u % command.row_words} * format.bytes),
+                quad.at(j));
     }
   }
 }

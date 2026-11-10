@@ -43,8 +43,7 @@ enum class RowScalar : uint8_t {
   kRstd = 2,
   kNegMax = 3,
   kRecipSum = 4,
-  kSum = 5,
-  kMax = 6,
+  kMax = 5,
 };
 enum class Permutation : uint8_t {
   kNone = 0,
@@ -75,8 +74,7 @@ enum class Select : uint8_t {
   kX2 = 2,
   kImm = 3,
   kNull = 4,
-  kRs0 = 5,
-  kRs1 = 6,
+  kRs1 = 5,
 };
 enum class IntegerOp : uint8_t {
   kNone = 0,
@@ -110,7 +108,6 @@ struct Pass {
   WordMap wx2 = WordMap::kNorm;
   WordMap wd = WordMap::kNorm;
   PbufAccess pa = PbufAccess::kNone;
-  bool pa_at_mul = false;
   C0Source c0 = C0Source::kZero;
   BSource b = BSource::kOne;
   Nonlinear nl = Nonlinear::kNone;
@@ -129,7 +126,6 @@ struct Pass {
   IntegerOp ialu = IntegerOp::kNone;
   bool dst_s1 = false;
   bool c0_pred = false;
-  bool nodrain = false;
   bool x_s1 = false;
   uint32_t ctx = 0;
   RowMask rm = RowMask::kNone;
@@ -148,8 +144,7 @@ struct RowState {
 struct LaneInputs {
   uint32_t x = 0;
   uint32_t x2 = 0;
-  uint32_t pbuf_pre = 0;
-  uint32_t pbuf_mul = 0;
+  uint32_t pbuf = 0;
   uint32_t t = 0;
   uint32_t l = 0;
   uint32_t imm = 0;

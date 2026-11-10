@@ -22,7 +22,6 @@ struct PassFields {
   uint32_t wx2 = 0;
   uint32_t wd = 0;
   uint32_t pa = 0;
-  uint32_t pa_at_mul = 0;
   uint32_t c0 = 0;
   uint32_t b = 0;
   uint32_t nl = 0;
@@ -41,7 +40,6 @@ struct PassFields {
   uint32_t ialu = 0;
   uint32_t dst_s1 = 0;
   uint32_t c0_pred = 0;
-  uint32_t nodrain = 0;
   uint32_t x_s1 = 0;
   uint32_t ctx = 0;
   uint32_t rm = 0;
@@ -55,7 +53,6 @@ struct SmemFields {
   uint32_t col_imm = 0;
   uint32_t col = 0;
   uint32_t which = 0;
-  uint32_t neg = 0;
   uint32_t ctx = 0;
   uint32_t imm = 0;
 };

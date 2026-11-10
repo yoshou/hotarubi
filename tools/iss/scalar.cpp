@@ -84,9 +84,6 @@ void ApplyRowScalar(RowScalar program, const Reductions& reductions,
       case RowScalar::kRecipSum:
         rows.rs1.at(t) = Reciprocal(SumTree(sums));
         break;
-      case RowScalar::kSum:
-        rows.rs1.at(t) = SumTree(sums);
-        break;
       case RowScalar::kMax:
         rows.rs1.at(t) = reductions.max.at(t);
         break;

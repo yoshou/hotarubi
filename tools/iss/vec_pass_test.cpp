@@ -190,8 +190,8 @@ class VecPassTest : public testing::Test {
       for (uint32_t e = 0; e < kFbufElements; ++e) {
         const uint32_t x = Before(w, e);
         const uint32_t x2 = Before(10 + w, e);
-        const std::array<uint32_t, 7> alternatives = {
-            0, 0, x2, 0x5A5A5A5A, kNull, 0x01234567, rs1.at(e / 8)};
+        const std::array<uint32_t, 6> alternatives = {
+            0, 0, x2, 0x5A5A5A5A, kNull, rs1.at(e / 8)};
         ASSERT_EQ(After(100 + w, e), Holds(c, x, x2, e)
                                          ? reference::Add(x, 0)
                                          : alternatives.at(c.sel))
@@ -286,15 +286,24 @@ TEST_F(VecPassTest, ComparesAndSelects) {
   const std::array<uint32_t, kTokens> rs1 = {0x11111111, 0x22222222, 0x33333333,
                                              0x44444444};
   for (uint32_t t = 0; t < kTokens; ++t) {
-    memories_.fbuf.at(50).at((t * 8) + 2) = rs1.at(t);
+    for (uint32_t l = 0; l < kLanes; ++l) {
+      memories_.fbuf.at(50).at((t * kLanes) + l) = rs1.at(t);
+    }
   }
+  PassFields row_max = Copy();
+  row_max.rx = kR13;
+  row_max.rnw = kR14;
+  row_max.rn8 = kR14;
+  row_max.wr = 0;
+  row_max.red = 2;
+  row_max.sc = 5;
   for (uint32_t cmp = 1; cmp <= 7; ++cmp) {
     for (uint32_t source = 0; source < 4; ++source) {
       for (uint32_t integer = 0; integer < 2; ++integer) {
         const CompareCase c{.cmp = cmp,
                             .source = source,
                             .integer = integer,
-                            .sel = 1 + ((cmp + source + integer) % 6),
+                            .sel = 1 + ((cmp + source + integer) % 5),
                             .imm2 = source == 2 ? 13 : threshold};
         PassFields pass = Copy();
         pass.rx2 = kSrc2;
@@ -307,9 +316,8 @@ TEST_F(VecPassTest, ComparesAndSelects) {
         pass.sel = c.sel;
         Run({encoding::SaluImm(12, kR11, 0, c.imm2),
              encoding::SaluImm(12, kR12, 0, 0x5A5A5A5A),
-             encoding::SaluImm(12, kR13, 0, 0x01234567),
-             encoding::Smem({.op = 5, .ra = kR13, .which = 1}),
-             encoding::Smem({.op = 2, .col_imm = 1, .col = 2, .imm = 50}),
+             encoding::SaluImm(12, kR13, 0, 50),
+             encoding::SaluImm(12, kR14, 0, 1), encoding::Pass(row_max),
              encoding::Pass(pass), encoding::Ret()},
             {0, 10}, 100, 1, 4);
         CheckSelect(c, rs1);
@@ -434,28 +442,27 @@ TEST_F(VecPassTest, ReadsPbufRowVectorsAndTiles) {
   PassFields scale = Copy();
   scale.rpb = kPBase;
   scale.pa = 1;
-  scale.pa_at_mul = 1;
   scale.b = 2;
   PassFields tile = scale;
   tile.pa = 2;
-  for (const PassFields& pass : {add, scale, tile}) {
+  PassFields tile_add = add;
+  tile_add.pa = 2;
+  for (const PassFields& pass : {add, scale, tile, tile_add}) {
     Run({encoding::Pass(pass), encoding::Ret()}, {0, 0}, 100, 2, 4, 0, 3);
     for (uint32_t q = 0; q < 2; ++q) {
       for (uint32_t g = 0; g < 4; ++g) {
         for (uint32_t e = 0; e < kFbufElements; ++e) {
           const uint32_t x = Before((q * 4) + g, e);
           const uint32_t column = (g * 8) + (e % 8);
-          const uint32_t row_vector =
-              memories_.pbuf.at(3 + (column / 32)).at(column % 32);
-          uint32_t expected = reference::Add(x, row_vector);
-          if (pass.pa == 2) {
-            expected =
-                reference::Mul(x, memories_.pbuf.at(3 + (q * 4) + g).at(e));
-          } else if (pass.b == 2) {
-            expected = reference::Mul(x, row_vector);
-          }
+          const uint32_t value =
+              pass.pa == 2
+                  ? memories_.pbuf.at(3 + (q * 4) + g).at(e)
+                  : memories_.pbuf.at(3 + (column / 32)).at(column % 32);
+          const uint32_t expected =
+              pass.b == 2 ? reference::Mul(x, value) : reference::Add(x, value);
           ASSERT_EQ(After(100 + (q * 4) + g, e), expected)
-              << "pa " << pass.pa << " quad " << q << " word " << g;
+              << "pa " << pass.pa << " b " << pass.b << " quad " << q
+              << " word " << g;
         }
       }
     }
@@ -529,14 +536,14 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
   Fill(0, kWords);
   memories_.fbuf.at(4).at(3) = 0x80000000;
   const uint32_t epsilon = Random(100, 110) & 0x7FFFFFFFU;
-  std::array<std::array<uint32_t, kTokens>, 7> rs0{};
-  std::array<std::array<uint32_t, kTokens>, 7> rs1{};
-  for (uint32_t sc = 1; sc < 7; ++sc) {
+  std::array<std::array<uint32_t, kTokens>, 6> rs0{};
+  std::array<std::array<uint32_t, kTokens>, 6> rs1{};
+  for (uint32_t sc = 1; sc < 6; ++sc) {
     PassFields pass = Copy();
     pass.rimm = kR12;
     pass.rimm2 = kR11;
     pass.mask_en = 1;
-    pass.red = (sc == 3 || sc == 6) ? 2 : 1;
+    pass.red = (sc == 3 || sc == 5) ? 2 : 1;
     pass.sc = sc;
     if (sc == 2) {
       pass.b = 5;
@@ -544,7 +551,7 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
     Run({encoding::SaluImm(12, kR11, 0, kValid),
          encoding::SaluImm(12, kR12, 0, epsilon),
          encoding::SaluImm(12, kR13, 0, 70),
-         encoding::Smem({.op = 6, .ra = kR13}), encoding::Pass(pass),
+         encoding::Smem({.op = 2, .ra = kR13}), encoding::Pass(pass),
          encoding::Ret()},
         {0, 0}, 100, 1, kWords);
     rs0.at(sc) = engine_.Rows(0).rs0;
@@ -559,8 +566,7 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
                                    reference::Mul(row.squares, rn), epsilon)));
     EXPECT_EQ(rs0.at(3).at(t), reference::Negate(row.max));
     EXPECT_EQ(rs1.at(4).at(t), reference::Reciprocal(row.sum));
-    EXPECT_EQ(rs1.at(5).at(t), row.sum);
-    EXPECT_EQ(rs1.at(6).at(t), row.max);
+    EXPECT_EQ(rs1.at(5).at(t), row.max);
   }
 }
 
@@ -636,32 +642,34 @@ TEST_F(VecPassTest, ScalarMemoryInstructions) {
   Fill(0, 4);
   memories_.fbuf.at(1).at(14) = 0x00000003;
   memories_.fbuf.at(1).at(22) = 0x80000000;
+  PassFields negmax = Copy();
+  negmax.wr = 0;
+  negmax.red = 2;
+  negmax.sc = 3;
+  PassFields row_max = negmax;
+  row_max.sc = 5;
   Run({encoding::SaluImm(12, kR11, 0, 4095), encoding::SaluImm(12, kR12, 0, 9),
        encoding::Smem({.op = 0, .rd = 20, .ra = kR11, .rb = kR12, .imm = 3}),
        encoding::Smem(
            {.op = 0, .rd = 21, .ra = kR11, .col_imm = 1, .col = 31, .imm = 1}),
-       encoding::Smem({.op = 2,
-                       .ra = kR11,
-                       .col_imm = 1,
-                       .col = 6,
-                       .which = 1,
-                       .neg = 1,
-                       .imm = 2}),
-       encoding::Smem({.op = 2, .ra = kR11, .col_imm = 1, .col = 14, .imm = 2}),
-       encoding::Smem({.op = 4, .rd = 22, .col_imm = 1, .col = 3, .which = 1}),
-       encoding::Smem({.op = 4, .rd = 23, .col_imm = 1, .col = 7}),
-       encoding::Smem({.op = 6, .ra = 0}),
-       encoding::Smem({.op = 4, .rd = 24, .col_imm = 1, .col = 0}),
-       encoding::Smem({.op = 1, .rd = 25, .ra = kR11}), encoding::Ret()},
+       encoding::Pass(negmax),
+       encoding::Smem({.op = 1, .rd = 22, .col_imm = 1, .col = 3, .which = 1}),
+       encoding::Pass(row_max),
+       encoding::Smem({.op = 1, .rd = 23, .col_imm = 1, .col = 7}),
+       encoding::Smem({.op = 2, .ra = 0}),
+       encoding::Smem({.op = 1, .rd = 24, .col_imm = 1, .col = 0}),
+       encoding::Smem({.op = 3, .rd = 25, .ra = kR11}), encoding::Ret()},
       {0, 0}, 0, 1, 1);
   EXPECT_EQ(engine_.Register(20), Before(2, 9));
   EXPECT_EQ(engine_.Register(21), Before(0, 31));
   for (uint32_t t = 0; t < kTokens; ++t) {
-    const uint32_t value = Before(1, (t * 8) + 6);
-    const bool zero = ((value >> 23) & 0xFFU) == 0;
-    EXPECT_EQ(engine_.Rows(0).rs0.at(t), zero ? 0 : value ^ 0x80000000U);
-    const uint32_t other = Before(1, (t * 8) + 6);
-    EXPECT_EQ(engine_.Rows(0).rs1.at(t), zero ? 0 : other);
+    std::array<uint32_t, kLanes> lanes{};
+    for (uint32_t l = 0; l < kLanes; ++l) {
+      lanes.at(l) = Before(0, (t * kLanes) + l);
+    }
+    const uint32_t largest = reference::RowMax(lanes);
+    EXPECT_EQ(engine_.Rows(0).rs0.at(t), largest ^ 0x80000000U);
+    EXPECT_EQ(engine_.Rows(0).rs1.at(t), largest);
   }
   EXPECT_EQ(engine_.Register(22), engine_.Rows(0).rs0.at(3));
   EXPECT_EQ(engine_.Register(23), engine_.Rows(0).rs1.at(3));
@@ -704,7 +712,7 @@ TEST_F(VecPassTest, RegistersHoldTheCommandFields) {
   EXPECT_EQ(engine_.Register(8), 0xCAFEF00DU);
   EXPECT_EQ(engine_.Register(9), 0xABCU);
   EXPECT_EQ(engine_.Register(10), 0U);
-  engine_.Execute({.op = 21,
+  engine_.Execute({.op = 5,
                    .quantize = true,
                    .src = 1,
                    .src2 = 2,
@@ -718,6 +726,20 @@ TEST_F(VecPassTest, RegistersHoldTheCommandFields) {
   EXPECT_EQ(engine_.Register(7), 0x7ABU);
   EXPECT_EQ(engine_.Register(9), 0xABCU);
   EXPECT_EQ(engine_.Register(10), 1U);
+  memories_.cbuf.at(kProgram) = encoding::Ret();
+  engine_.Execute({.op = 21,
+                   .quantize = false,
+                   .src = 1,
+                   .src2 = 2,
+                   .dst = 3,
+                   .rows_q = 1,
+                   .n8 = 4,
+                   .p_base = 0,
+                   .aux = kProgram,
+                   .imm = 0},
+                  memories_);
+  EXPECT_EQ(engine_.Register(7), 0U);
+  EXPECT_EQ(engine_.Register(9), 3U);
 }
 
 TEST_F(VecPassTest, RejectsProgramsWithUndefinedResults) {
@@ -727,18 +749,6 @@ TEST_F(VecPassTest, RejectsProgramsWithUndefinedResults) {
                     encoding::Pass(shifted), encoding::Ret()},
                    {10, 0}, 0, 1, 4),
                "after writing it");
-  PassFields first = Copy();
-  first.nodrain = 1;
-  PassFields second = Copy();
-  second.rx = kDst;
-  second.rd = kSrc2;
-  EXPECT_DEATH(
-      Run({encoding::Pass(first), encoding::Pass(second), encoding::Ret()},
-          {10, 50}, 30, 1, 4),
-      "undrained nodrain");
-  EXPECT_DEATH(
-      Run({encoding::Pass(first), encoding::Ret()}, {10, 50}, 30, 1, 4),
-      "returns after a nodrain");
   PassFields empty = Copy();
   empty.rq = 0;
   EXPECT_DEATH(
@@ -761,7 +771,6 @@ TEST_F(VecPassTest, RowMaskSkipsTheRowsAMarkingPassFoundZero) {
   mark.wr = 0;
   mark.ialu = 4;
   mark.rm = 2;
-  mark.nodrain = 1;
   PassFields skip = Copy();
   skip.ialu = 4;
   skip.rm = 1;
@@ -915,7 +924,7 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().overlaps, 0U);
   PassFields reduce = Copy();
   reduce.red = 1;
-  reduce.sc = 5;
+  reduce.sc = 4;
   PassFields scaled = second;
   scaled.b = 3;
   Run({encoding::Pass(reduce), encoding::Pass(scaled), encoding::Ret()},
@@ -924,7 +933,7 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().overlaps, 1U);
   EXPECT_EQ(engine_.Activity().context_stall_words,
             kReductionLatencyWords +
-                ((ScalarProgramCycles(kScalarPrograms.at(5)) + 3) / 4));
+                ((ScalarProgramCycles(kScalarPrograms.at(4)) + 3) / 4));
   scaled.ctx = 1;
   Run({encoding::Pass(reduce), encoding::Pass(scaled), encoding::Ret()},
       {0, 50}, 100, 1, 4);
@@ -938,21 +947,22 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().overlaps, 1U);
   PassFields multiplier = Copy();
   multiplier.pa = 1;
-  multiplier.pa_at_mul = 1;
   multiplier.b = 2;
   PassFields pre_adder = Copy();
   pre_adder.rx = kDst;
   pre_adder.rd = kSrc2;
   pre_adder.pa = 1;
   pre_adder.c0 = 2;
-  Run({encoding::Pass(multiplier), encoding::Pass(pre_adder), encoding::Ret()},
-      {0, 50}, 100, 1, 4);
-  EXPECT_EQ(engine_.Activity().drains, 2U);
-  EXPECT_EQ(engine_.Activity().overlaps, 0U);
-  Run({encoding::Pass(pre_adder), encoding::Pass(multiplier), encoding::Ret()},
-      {100, 50}, 100, 1, 4);
-  EXPECT_EQ(engine_.Activity().drains, 1U);
-  EXPECT_EQ(engine_.Activity().overlaps, 1U);
+  for (const bool multiplier_first : {true, false}) {
+    Run(multiplier_first
+            ? std::vector{encoding::Pass(multiplier), encoding::Pass(pre_adder),
+                          encoding::Ret()}
+            : std::vector{encoding::Pass(pre_adder), encoding::Pass(multiplier),
+                          encoding::Ret()},
+        {multiplier_first ? 0U : 100U, 50}, 100, 1, 4);
+    EXPECT_EQ(engine_.Activity().drains, 1U);
+    EXPECT_EQ(engine_.Activity().overlaps, 1U);
+  }
 }
 
 }  // namespace

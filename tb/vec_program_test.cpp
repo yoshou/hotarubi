@@ -62,7 +62,6 @@ struct Pass {
   uint32_t wx2 = 0;
   uint32_t wd = 0;
   uint32_t pa = 0;
-  bool pa_at_mul = false;
   uint32_t c0 = 0;
   uint32_t b = 0;
   uint32_t nl = 0;
@@ -81,7 +80,6 @@ struct Pass {
   uint32_t ialu = 0;
   bool dst_s1 = false;
   bool c0_pred = false;
-  bool nodrain = false;
   bool x_s1 = false;
   uint32_t ctx = 0;
   uint32_t rm = 0;
@@ -104,7 +102,6 @@ Instruction Encode(const Pass& p) {
       .Set(74, 2, p.wx2)
       .Set(72, 2, p.wd)
       .Set(70, 2, p.pa)
-      .Set(69, 1, p.pa_at_mul ? 1 : 0)
       .Set(66, 3, p.c0)
       .Set(63, 3, p.b)
       .Set(61, 2, p.nl)
@@ -123,7 +120,6 @@ Instruction Encode(const Pass& p) {
       .Set(29, 3, p.ialu)
       .Set(28, 1, p.dst_s1 ? 1 : 0)
       .Set(27, 1, p.c0_pred ? 1 : 0)
-      .Set(26, 1, p.nodrain ? 1 : 0)
       .Set(25, 1, p.x_s1 ? 1 : 0)
       .Set(23, 2, p.ctx)
       .Set(21, 2, p.rm);
@@ -159,7 +155,6 @@ struct Smem {
   bool col_imm = true;
   uint32_t col = 0;
   uint32_t which = 0;
-  bool neg = false;
   uint32_t ctx = 0;
   uint32_t imm = 0;
 };
@@ -174,7 +169,6 @@ Instruction Encode(const Smem& s) {
       .Set(105, 1, s.col_imm ? 1 : 0)
       .Set(100, 5, s.col)
       .Set(99, 1, s.which)
-      .Set(98, 1, s.neg ? 1 : 0)
       .Set(96, 2, s.ctx)
       .Set(0, 32, s.imm);
   return word;
@@ -193,10 +187,8 @@ Instruction Ret() {
 }
 
 constexpr uint32_t kSmemSld = 0;
-constexpr uint32_t kSmemRsld = 2;
-constexpr uint32_t kSmemRsmov = 4;
-constexpr uint32_t kSmemSmovr = 5;
-constexpr uint32_t kSmemRn = 6;
+constexpr uint32_t kSmemRsmov = 1;
+constexpr uint32_t kSmemRn = 2;
 constexpr uint32_t kRs1 = 0;
 constexpr uint32_t kRs0 = 1;
 
@@ -505,12 +497,13 @@ constexpr uint32_t kSelZero = 1;
 constexpr uint32_t kSelX2 = 2;
 constexpr uint32_t kSelImm = 3;
 constexpr uint32_t kSelNull = 4;
-constexpr uint32_t kSelRs0 = 5;
-constexpr uint32_t kSelRs1 = 6;
+constexpr uint32_t kSelRs1 = 5;
 constexpr uint32_t kC0X2 = 1;
 constexpr uint32_t kC0Imm = 4;
 constexpr uint32_t kBRs1 = 3;
 constexpr uint32_t kBPre = 5;
+constexpr uint32_t kRedMax = 2;
+constexpr uint32_t kScMax = 5;
 
 bool Relation(uint32_t cmp, bool integer, uint32_t a, uint32_t b) {
   bool less = false;
@@ -567,8 +560,8 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
   constexpr uint32_t kImmHalf = 0x3F000000U;
   const uint32_t equal_value = x2[0][3];
   x2[1][17] = equal_value;
-  constexpr uint32_t kRs0Value = 0x40490FDBU;
   constexpr uint32_t kRs1Value = 0xC0000000U;
+  constexpr uint32_t kRs1Word = 40;
   constexpr uint32_t kRegX = 12;
   constexpr uint32_t kRegX2 = 13;
   constexpr uint32_t kRegWords = 16;
@@ -577,8 +570,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
   constexpr uint32_t kRegEqual = 22;
   constexpr uint32_t kRegThirteen = 23;
   constexpr uint32_t kRegFour = 24;
-  constexpr uint32_t kRegRs0 = 25;
-  constexpr uint32_t kRegRs1 = 26;
+  constexpr uint32_t kRegRs1Word = 26;
   constexpr uint32_t kRegZeroFp = 27;
   const Pass base{.rx = kRegX,
                   .rx2 = kRegX2,
@@ -667,10 +659,10 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
          p.rimm2 = kRegFour;
          p.cmp = kCmpGt;
          p.cmp_src = kSrcLane;
-         p.sel = kSelRs0;
+         p.sel = kSelRs1;
        }),
        [](uint32_t a, uint32_t, uint32_t e, uint32_t) {
-         return e % 8 > 4 ? a : kRs0Value;
+         return e % 8 > 4 ? a : kRs1Value;
        }},
       {with([](Pass& p) {
          p.rimm2 = kRegEqual;
@@ -714,12 +706,18 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
       SaluImm(kSaluMov, kRegEqual, 0, equal_value),
       SaluImm(kSaluMov, kRegThirteen, 0, 13),
       SaluImm(kSaluMov, kRegFour, 0, 4),
-      SaluImm(kSaluMov, kRegRs0, 0, kRs0Value),
-      SaluImm(kSaluMov, kRegRs1, 0, kRs1Value),
+      SaluImm(kSaluMov, kRegRs1Word, 0, kRs1Word),
       SaluImm(kSaluMov, kRegZeroFp, 0, kFp32Zero),
-      Encode(Smem{.op = kSmemSmovr, .ra = kRegRs0, .which = kRs0}),
-      Encode(Smem{.op = kSmemSmovr, .ra = kRegRs1, .which = kRs1}),
+      Encode(Pass{.rx = kRegRs1Word,
+                  .rq = kRegOne,
+                  .rnw = kRegOne,
+                  .rn8 = kRegOne,
+                  .red = kRedMax,
+                  .wr = 0,
+                  .sc = kScMax}),
   };
+  FbufWord rs1_word{};
+  rs1_word.fill(kRs1Value);
   for (const LaneCase& lane : cases) {
     program.push_back(Encode(lane.pass));
     program.push_back(SaluImm(kSaluAdd, kRegOut, kRegOut, kWords));
@@ -738,7 +736,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
   const std::vector<FbufWord> out =
       RunProgram({.program = program,
                   .args = args,
-                  .fbuf = {{kX, x}, {kX2, x2}},
+                  .fbuf = {{kX, x}, {kX2, x2}, {kRs1Word, {rs1_word}}},
                   .pbuf = {},
                   .tables = nullptr,
                   .out_base = kOut,
@@ -943,16 +941,7 @@ TEST(VecProgramTest, RowScalarsAndReductions) {
   emit_scalars(kRs0);
   program.push_back(pass_with(1, 4, 0));
   emit_scalars(kRs1);
-  program.push_back(pass_with(1, 5, 0));
-  emit_scalars(kRs1);
-  program.push_back(pass_with(2, 6, 0));
-  emit_scalars(kRs1);
-  program.push_back(Encode(Smem{.op = kSmemRsld,
-                                .ra = kRegX,
-                                .col = 6,
-                                .which = kRs1,
-                                .neg = true,
-                                .imm = 2}));
+  program.push_back(pass_with(2, 5, 0));
   emit_scalars(kRs1);
   program.push_back(Encode(Pass{.rx = kRegX,
                                 .rd = kRegOut,
@@ -977,7 +966,7 @@ TEST(VecProgramTest, RowScalarsAndReductions) {
                                                 .pbuf = {},
                                                 .tables = nullptr,
                                                 .out_base = kOut,
-                                                .out_words = (7 * 4) + kWords},
+                                                .out_words = (5 * 4) + kWords},
                                                75);
   const uint32_t rn = Fp32Recip(Fp32FromInt(kCount, 0));
   for (uint32_t t = 0; t < 4; ++t) {
@@ -996,9 +985,7 @@ TEST(VecProgramTest, RowScalarsAndReductions) {
         Fp32Rsqrt(Fp32Add(Fp32Mul(RowSum(squares), rn), kEps)),
         Fp32Neg(max),
         Fp32Recip(sum),
-        sum,
         max,
-        Fp32Neg(x[2][(t * 8) + 6]),
     };
     for (uint32_t k = 0; k < scalars.size(); ++k) {
       EXPECT_EQ(out[(k * 4) + t], Splat(scalars[k]))
@@ -1006,8 +993,8 @@ TEST(VecProgramTest, RowScalarsAndReductions) {
     }
     for (uint32_t w = 0; w < kWords; ++w) {
       for (uint32_t c = 0; c < 8; ++c) {
-        EXPECT_EQ(out[28 + w][(t * 8) + c],
-                  Fp32Mul(x[w][(t * 8) + c], scalars[6]))
+        EXPECT_EQ(out[20 + w][(t * 8) + c],
+                  Fp32Mul(x[w][(t * 8) + c], scalars[4]))
             << "scaled token " << t << " word " << w;
       }
     }
@@ -1225,6 +1212,7 @@ constexpr uint32_t kRegVecCycles = 0x2C;
 constexpr uint32_t kC0Pbuf = 2;
 constexpr uint32_t kBPbuf = 2;
 constexpr uint32_t kPaRowvec = 1;
+constexpr uint32_t kPaTile = 2;
 
 struct ChainProgram {
   uint32_t words = 1;
@@ -1317,7 +1305,6 @@ TEST(VecProgramTest, RowMaskSkipsTheRowsAMarkingPassFoundZero) {
                   .rn8 = kRegN8,
                   .wr = 0,
                   .ialu = 4,
-                  .nodrain = true,
                   .rm = 2};
   const Pass skip{.rx = kRegSrc,
                   .rd = kRegDst,
@@ -1475,7 +1462,6 @@ TEST(VecProgramTest, OverlappedPassesOrderPbufAndSecondOperandReads) {
                                 .rnw = kRegChainWords,
                                 .rn8 = kRegChainWords,
                                 .pa = kPaRowvec,
-                                .pa_at_mul = true,
                                 .b = kBPbuf}));
   program.push_back(Encode(Pass{.rx = kRegChainB,
                                 .rd = kRegChainA,
@@ -1509,6 +1495,45 @@ TEST(VecProgramTest, OverlappedPassesOrderPbufAndSecondOperandReads) {
     }
   }
   EXPECT_EQ(out, expected);
+}
+
+TEST(VecProgramTest, PbufTilesFeedThePreAdderAndTheMultiplier) {
+  std::mt19937 rng(94);
+  constexpr uint32_t kWords = 4;
+  const std::vector<FbufWord> x = RandomWords(rng, kWords);
+  const std::vector<FbufWord> tiles = RandomWords(rng, kWords);
+  std::vector<Instruction> program = ChainPrologue(kWords);
+  program.push_back(SaluImm(kSaluMov, kRegChainC, 0, kChainB + kWords));
+  program.push_back(Encode(Pass{.rx = kRegChainA,
+                                .rd = kRegChainB,
+                                .rq = kRegOne,
+                                .rnw = kRegChainWords,
+                                .rn8 = kRegChainWords,
+                                .pa = kPaTile,
+                                .c0 = kC0Pbuf}));
+  program.push_back(Encode(Pass{.rx = kRegChainA,
+                                .rd = kRegChainC,
+                                .rq = kRegOne,
+                                .rnw = kRegChainWords,
+                                .rn8 = kRegChainWords,
+                                .pa = kPaTile,
+                                .b = kBPbuf}));
+  program.push_back(Ret());
+  const std::vector<FbufWord> out = RunProgram({.program = program,
+                                                .args = {.rows_q = 1},
+                                                .fbuf = {{kChainA, x}},
+                                                .pbuf = tiles,
+                                                .out_base = kChainB,
+                                                .out_words = 2 * kWords},
+                                               95);
+  for (uint32_t w = 0; w < kWords; ++w) {
+    for (uint32_t e = 0; e < 32; ++e) {
+      EXPECT_EQ(out[w][e], Fp32Add(x[w][e], tiles[w][e]))
+          << "sum word " << w << " element " << e;
+      EXPECT_EQ(out[kWords + w][e], Fp32Mul(x[w][e], tiles[w][e]))
+          << "product word " << w << " element " << e;
+    }
+  }
 }
 
 }  // namespace

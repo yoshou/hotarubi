@@ -50,7 +50,6 @@ Word128 Pass(const PassFields& f) {
   Set(w, 74, 2, f.wx2);
   Set(w, 72, 2, f.wd);
   Set(w, 70, 2, f.pa);
-  Set(w, 69, 1, f.pa_at_mul);
   Set(w, 66, 3, f.c0);
   Set(w, 63, 3, f.b);
   Set(w, 61, 2, f.nl);
@@ -69,7 +68,6 @@ Word128 Pass(const PassFields& f) {
   Set(w, 29, 3, f.ialu);
   Set(w, 28, 1, f.dst_s1);
   Set(w, 27, 1, f.c0_pred);
-  Set(w, 26, 1, f.nodrain);
   Set(w, 25, 1, f.x_s1);
   Set(w, 23, 2, f.ctx);
   return Set(w, 21, 2, f.rm);
@@ -101,7 +99,6 @@ Word128 Smem(const SmemFields& f) {
   Set(w, 105, 1, f.col_imm);
   Set(w, 100, 5, f.col);
   Set(w, 99, 1, f.which);
-  Set(w, 98, 1, f.neg);
   Set(w, 96, 2, f.ctx);
   return Set(w, 0, 32, f.imm);
 }

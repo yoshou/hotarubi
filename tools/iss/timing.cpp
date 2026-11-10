@@ -155,8 +155,9 @@ DmaActivity EstimateDma(const DmaCommand& command) {
   if (units == 0) {
     return activity;
   }
-  const bool indexed = (command.flags & kFlagIndex) != 0;
   const bool rows = (command.flags & kFlagRows) != 0;
+  const bool indexed =
+      !command.store && rows && (command.flags & kFlagIndex) != 0;
   if (!command.store && command.mode != kModeRaw) {
     activity.read_beats = units * 9;
     activity.read_bursts = units;
@@ -182,8 +183,10 @@ DmaActivity EstimateDma(const DmaCommand& command) {
 }
 
 DdrExtent EstimateDdrExtent(const DmaCommand& command) {
-  if ((command.flags & kFlagIndex) != 0 ||
-      (!command.store && command.mode == kModeGather)) {
+  if (!command.store &&
+      (command.mode == kModeGather ||
+       (command.mode == kModeRaw && (command.flags & kFlagRows) != 0 &&
+        (command.flags & kFlagIndex) != 0))) {
     return {.whole = true};
   }
   const uint64_t units = uint64_t{command.rows} * command.row_words;

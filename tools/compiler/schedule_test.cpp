@@ -85,8 +85,13 @@ TEST(ScheduleTest, DdrTransfersConflictOnlyThroughStores) {
   program.Load({.ddr_offset = 0x2000, .mem = Mem::kFbuf, .onchip = 200});
   program.Load({.ddr_offset = 0x3000, .mem = Mem::kFbuf, .onchip = 300});
   program.Store({.ddr_offset = 0x3000, .mem = Mem::kFbuf, .onchip = 400});
-  program.Load(
-      {.ddr_offset = 0x5000, .mem = Mem::kFbuf, .onchip = 500, .index = true});
+  program.Load({.ddr_offset = 0x5000,
+                .mem = Mem::kFbuf,
+                .onchip = 500,
+                .row_words = 4,
+                .index = true,
+                .row_format = true,
+                .tok = 1});
   EXPECT_TRUE(Conflicts(program, 0, 1));
   EXPECT_FALSE(Conflicts(program, 0, 2));
   EXPECT_FALSE(Conflicts(program, 1, 2));

@@ -15,7 +15,7 @@ inline constexpr uint32_t kVecRun = 16;
 inline constexpr uint32_t kContexts = 2;
 inline constexpr uint64_t kOverlapLatencyWords = 10;
 inline constexpr uint64_t kReductionLatencyWords = 16;
-inline constexpr uint32_t kRowScalarKinds = 8;
+inline constexpr uint32_t kRowScalarKinds = 6;
 inline constexpr uint32_t kScalarArithmeticCycles = 11;
 inline constexpr uint32_t kScalarImmediateCycles = 2;
 inline constexpr uint32_t kScalarStartCycles = 2;
@@ -33,9 +33,7 @@ inline constexpr std::array<ScalarProgram, kRowScalarKinds> kScalarPrograms = {
      {.arithmetic = 29, .immediate = 2},
      {.arithmetic = 0, .immediate = 1},
      {.arithmetic = 19, .immediate = 2},
-     {.arithmetic = 7, .immediate = 1},
-     {.arithmetic = 0, .immediate = 1},
-     {.arithmetic = 19, .immediate = 2}}};
+     {.arithmetic = 0, .immediate = 1}}};
 inline constexpr ScalarProgram kCountReciprocalProgram = {.arithmetic = 12,
                                                           .immediate = 2};
 
@@ -119,14 +117,11 @@ class VecEngine {
   std::array<RowState, kContexts> rows_{};
   uint32_t rn_ = 0;
   bool quantize_ = false;
-  std::bitset<kFbufDepth> in_flight_;
   std::bitset<kFbufDepth> pending_;
   std::array<uint64_t, kFbufDepth> pending_slot_{};
   uint64_t slot_ = 0;
   std::array<uint64_t, kContexts> ready_slot_{};
   uint64_t scalar_free_slot_ = 0;
-  bool undrained_ = false;
-  bool undrained_pbuf_at_mul_ = false;
   bool follows_pass_ = false;
   std::bitset<kRowMaskBits> row_mask_;
 };

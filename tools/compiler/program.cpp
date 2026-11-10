@@ -250,6 +250,9 @@ void Program::Reorder(std::span<const size_t> order) {
 
 size_t Program::Load(const Transfer& transfer, std::string_view note) {
   CheckTransfer(transfer);
+  Require(!transfer.index ||
+              (transfer.row_format && transfer.mode == DmaMode::kRaw),
+          "an index list is used only by a row-format load");
   const uint32_t words = OnchipWords(transfer);
   const DmaFields fields{.ddr_addr = DmaAddress(transfer.ddr_offset),
                          .mem = transfer.mem,
@@ -267,6 +270,7 @@ size_t Program::Load(const Transfer& transfer, std::string_view note) {
 
 size_t Program::Store(const Transfer& transfer, std::string_view note) {
   CheckTransfer(transfer);
+  Require(!transfer.index, "a store does not use an index list");
   const uint32_t words = OnchipWords(transfer);
   const DmaFields fields{.ddr_addr = DmaAddress(transfer.ddr_offset),
                          .mem = transfer.mem,

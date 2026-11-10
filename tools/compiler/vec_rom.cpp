@@ -172,7 +172,6 @@ void LayerNorm(vp::Assembler& a) {
                 gamma.rd = s.scratch;
                 gamma.rpb = kPBase;
                 gamma.pa = vp::Pbuf::kRowVec;
-                gamma.pa_at_mul = true;
                 gamma.b = vp::B::kPbuf;
                 gamma.wr = vp::Write::kFbuf;
                 return gamma;
@@ -213,7 +212,6 @@ void RmsNorm(vp::Assembler& a) {
                 gamma.rd = s.dst;
                 gamma.rpb = kPBase;
                 gamma.pa = vp::Pbuf::kRowVec;
-                gamma.pa_at_mul = true;
                 gamma.b = vp::B::kPbuf;
                 gamma.wr = vp::Write::kFinal;
                 return gamma;
@@ -290,7 +288,6 @@ void Rope(vp::Assembler& a) {
     pass.wx = x;
     pass.wd = d;
     pass.pa = vp::Pbuf::kTile;
-    pass.pa_at_mul = true;
     pass.b = vp::B::kPbuf;
     pass.wr = vp::Write::kFbuf;
     return pass;
@@ -304,7 +301,6 @@ void Rope(vp::Assembler& a) {
     pass.wx2 = d;
     pass.wd = d;
     pass.pa = vp::Pbuf::kTile;
-    pass.pa_at_mul = true;
     pass.b = vp::B::kPbuf;
     pass.c1 = vp::C1::kX2;
     pass.neg_c1 = negate;
@@ -345,7 +341,6 @@ void Program(uint32_t op, vp::Assembler& a) {
       vp::Pass pass = Whole();
       pass.rpb = kPBase;
       pass.pa = vp::Pbuf::kRowVec;
-      pass.pa_at_mul = true;
       pass.b = vp::B::kPbuf;
       Elementwise(a, pass);
       break;

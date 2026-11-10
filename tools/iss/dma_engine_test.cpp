@@ -193,48 +193,37 @@ TEST_F(DmaEngineTest, StoresRawRowsFromAbufAndFbuf) {
   }
 }
 
-TEST_F(DmaEngineTest, IndexListsMoveUnitsAndSkipNullEntries) {
-  Randomize(0, 0x4000);
-  const std::array<uint32_t, 6> units = {0x0100, kNull, 0x0800,
-                                         0x0300, kNull, 0x0F00};
-  for (size_t e = 0; e < units.size(); ++e) {
-    Put(0x8000 + (4 * static_cast<uint32_t>(e)),
-        units.at(e) == kNull ? kNull : Entry(units.at(e)), 4);
-  }
-  for (const uint32_t mem : {kAbuf, kFbuf}) {
-    DmaCommand command = Load(mem, 0x8000, 40, 2, 3, 0);
-    command.flags = 1;
-    Execute(command);
-    for (uint32_t e = 0; e < units.size(); ++e) {
-      if (units.at(e) != kNull) {
-        ExpectWord(mem, 40 + e, units.at(e));
-      } else if (mem == kAbuf) {
-        for (uint32_t i = 0; i < kAbufWordBytes; ++i) {
-          ASSERT_EQ(memories_.abuf.at(40 + e).at(i),
-                    i >= kAbufScaleOffset ? 127 : 0);
-        }
-      } else {
-        ASSERT_EQ(memories_.fbuf.at(40 + e), FbufWord{});
-      }
+TEST_F(DmaEngineTest, IgnoresTheIndexFlagWithoutRowFormatAndOnStores) {
+  constexpr uint32_t kStride = 300;
+  Randomize(0, 4096);
+  DmaCommand load = Load(kFbuf, 1024, 10, 3, 2, kStride);
+  load.flags = 1;
+  Execute(load);
+  for (uint32_t r = 0; r < 3; ++r) {
+    for (uint32_t w = 0; w < 2; ++w) {
+      ExpectWord(kFbuf, 10 + (r * 2) + w, 1024 + (r * kStride) + (w * 128));
     }
   }
-  std::ranges::fill(std::span(bytes_).first(0x4000), kUntouched);
-  RandomizeOnChip(40, 6);
-  DmaCommand store = Load(kFbuf, 0x8000, 40, 2, 3, 0);
+  EXPECT_EQ(engine_.Activity().read_beats, 3U * 2 * 8);
+  std::ranges::fill(bytes_, kUntouched);
+  RandomizeOnChip(10, 6);
+  DmaCommand store = Load(kFbuf, 512, 10, 3, 2, kStride);
   store.store = true;
   store.flags = 1;
   Execute(store);
-  std::vector<std::byte> expected(0x4000, kUntouched);
-  for (uint32_t e = 0; e < units.size(); ++e) {
-    if (units.at(e) == kNull) {
-      continue;
-    }
-    for (uint32_t i = 0; i < 128; ++i) {
-      expected.at(units.at(e) + i) = static_cast<std::byte>(
-          (memories_.fbuf.at(40 + e).at(i / 4) >> (8 * (i % 4))) & 0xFFU);
+  std::vector<std::byte> expected(kDdrBytes, kUntouched);
+  for (uint32_t r = 0; r < 3; ++r) {
+    for (uint32_t w = 0; w < 2; ++w) {
+      for (uint32_t i = 0; i < 128; ++i) {
+        expected.at(512 + (r * kStride) + (w * 128) + i) =
+            static_cast<std::byte>(
+                (memories_.fbuf.at(10 + (r * 2) + w).at(i / 4) >>
+                 (8 * (i % 4))) &
+                0xFFU);
+      }
     }
   }
-  ASSERT_TRUE(std::ranges::equal(std::span(bytes_).first(0x4000), expected));
+  ASSERT_TRUE(bytes_ == expected);
 }
 
 struct RowCase {
@@ -346,8 +335,10 @@ TEST_P(RowFormatTest, PacksTokensIntoQuadsAndBack) {
   for (uint32_t u = 0; u < tokens_.size(); ++u) {
     ExpectPacked(u);
   }
+  if (GetParam().indexed) {
+    return;
+  }
   std::ranges::fill(bytes_, kUntouched);
-  WriteList();
   command.store = true;
   Execute(command);
   for (uint32_t u = 0; u < tokens_.size(); ++u) {
@@ -357,9 +348,6 @@ TEST_P(RowFormatTest, PacksTokensIntoQuadsAndBack) {
     for (uint32_t i = 0; i < size_; ++i) {
       ASSERT_EQ(Byte(tokens_.at(u) + i), Stored(u, i))
           << "token " << u << " byte " << i;
-    }
-    if (GetParam().indexed) {
-      ASSERT_EQ(bytes_.at(tokens_.at(u) + size_), kUntouched);
     }
   }
 }

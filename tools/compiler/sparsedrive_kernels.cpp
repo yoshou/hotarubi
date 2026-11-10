@@ -1671,7 +1671,6 @@ vp::Assembler MotionEmbed() {
             .rn8 = 12,
             .rpb = 14,
             .pa = vp::Pbuf::kRowVec,
-            .pa_at_mul = true,
             .b = vp::B::kPbuf,
             .wr = vp::Write::kFbuf,
             .x_s1 = true});
@@ -1704,7 +1703,6 @@ vp::Assembler AnchorProjectKernel(bool box, uint32_t words) {
                 .rn8 = 5,
                 .rpb = 14,
                 .pa = vp::Pbuf::kRowVec,
-                .pa_at_mul = true,
                 .b = vp::B::kPbuf,
                 .wr = vp::Write::kFbuf,
                 .px = vp::Perm::kBcast,
@@ -1718,7 +1716,6 @@ vp::Assembler AnchorProjectKernel(bool box, uint32_t words) {
                 .rn8 = 5,
                 .rpb = 14,
                 .pa = vp::Pbuf::kRowVec,
-                .pa_at_mul = true,
                 .b = vp::B::kPbuf,
                 .c1 = vp::C1::kX2,
                 .wr = vp::Write::kFbuf,
@@ -2046,7 +2043,6 @@ vp::Assembler FrameStartKernel(uint32_t nkp, uint32_t ns) {
     const uint32_t pb = f.Pb(k);
     Pass pass{.rpb = pb,
               .pa = vp::Pbuf::kRowVec,
-              .pa_at_mul = true,
               .b = vp::B::kPbuf,
               .px = vp::Perm::kBcast,
               .pcol = k};

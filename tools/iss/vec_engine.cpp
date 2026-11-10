@@ -26,10 +26,8 @@ constexpr uint32_t kKindRet = 4;
 constexpr uint32_t kKindTranspose = 7;
 
 constexpr uint32_t kSmemLoad = 0;
-constexpr uint32_t kSmemRowLoad = 2;
-constexpr uint32_t kSmemRowMove = 4;
-constexpr uint32_t kSmemMoveRow = 5;
-constexpr uint32_t kSmemCount = 6;
+constexpr uint32_t kSmemRowMove = 1;
+constexpr uint32_t kSmemCount = 2;
 
 constexpr uint32_t kPcMask = kCbufDepth - 1;
 constexpr uint32_t kFbufMask = kFbufDepth - 1;
@@ -82,23 +80,7 @@ uint32_t PbufAddress(PbufAccess access, uint32_t base, uint32_t tile_row,
 }
 
 bool Overlaps(const Pass& pass, const Word128& next) {
-  if (pass.nodrain || pass.rm == RowMask::kSet ||
-      next.Field(124, 4) != kKindPass) {
-    return false;
-  }
-  const bool next_pbuf_pre_adder =
-      next.Field(70, 2) != 0 && next.Field(69, 1) == 0;
-  return !(pass.pa_at_mul && next_pbuf_pre_adder);
-}
-
-void CheckPbufTiming(const Pass& pass) {
-  if (pass.pa == PbufAccess::kNone) {
-    return;
-  }
-  Require(pass.c0 != C0Source::kPbuf || !pass.pa_at_mul,
-          "a PASS adds PBUF at the pre-adder with pa_at_mul set");
-  Require(pass.b != BSource::kPbuf || pass.pa_at_mul,
-          "a PASS multiplies by PBUF without pa_at_mul");
+  return pass.rm != RowMask::kSet && next.Field(124, 4) == kKindPass;
 }
 
 struct WordOperands {
@@ -122,14 +104,13 @@ WordResult ComputeWord(const Pass& pass, const WordOperands& in,
       pass.red == Reduction::kMax ? kFp32NegativeInfinity : 0;
   WordResult result;
   for (uint32_t t = 0; t < kTokens; ++t) {
-    const uint32_t mul_slice = pass.pa == PbufAccess::kTile ? t : slice;
+    const uint32_t pbuf_slice = pass.pa == PbufAccess::kTile ? t : slice;
     for (uint32_t l = 0; l < kLanes; ++l) {
       const uint32_t y =
           LaneOutput(pass,
                      {.x = in.x.at(PermutedIndex(pass.px, pass.pcol, t, l)),
                       .x2 = in.x2.at((t * kLanes) + l),
-                      .pbuf_pre = in.pbuf.at((slice * kLanes) + l),
-                      .pbuf_mul = in.pbuf.at((mul_slice * kLanes) + l),
+                      .pbuf = in.pbuf.at((pbuf_slice * kLanes) + l),
                       .t = t,
                       .l = l,
                       .imm = in.imm,
@@ -189,8 +170,8 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
   ready_slot_.fill(0);
   scalar_free_slot_ = 0;
   Initialize(command);
-  uint32_t pc = command.op == kVecRun ? command.aux & kPcMask
-                                      : kRomStart.at(command.op & 0xFU);
+  uint32_t pc =
+      command.op >= kVecRun ? command.aux & kPcMask : kRomStart.at(command.op);
   while (true) {
     memories.log.Read(Mem::kCbuf, pc);
     const Word128 instruction = memories.cbuf.at(pc);
@@ -209,9 +190,6 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
         break;
       case kKindSmem:
         ++activity_.smem;
-        if (undrained_) {
-          ++activity_.drains;
-        }
         Drain();
         RunSmem(instruction, memories);
         break;
@@ -222,12 +200,8 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
         }
         break;
       case kKindRet:
-        Require(!undrained_, "a VEC program returns after a nodrain PASS");
         return;
       case kKindTranspose:
-        if (undrained_) {
-          ++activity_.drains;
-        }
         Drain();
         RunTranspose(instruction, memories);
         break;
@@ -295,7 +269,7 @@ void VecEngine::Initialize(const VecCommand& command) {
   registers_.at(4) = command.rows_q & 0x1FFU;
   registers_.at(5) = command.n8 & 0xFFU;
   registers_.at(6) = command.p_base & kPbufAddressMask;
-  registers_.at(7) = command.op == kVecRun ? 0 : command.aux & 0x7FFU;
+  registers_.at(7) = command.op >= kVecRun ? 0 : command.aux & 0x7FFU;
   registers_.at(8) = command.imm;
   registers_.at(9) = scratch;
   registers_.at(10) = command.quantize ? 1 : 0;
@@ -310,12 +284,8 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   const uint32_t words = Register(pass.rnw) & 0x3FFU;
   Require(quads != 0 && words != 0,
           std::format("a PASS has {} quads and {} words", quads, words));
-  CheckPbufTiming(pass);
   Require(pass.ctx < kContexts,
           std::format("a PASS uses row context {}", pass.ctx));
-  Require(!undrained_pbuf_at_mul_ || pass.c0 != C0Source::kPbuf,
-          "a PASS adds PBUF after a nodrain PASS that reads PBUF at the "
-          "multiplier");
   const uint32_t d = Register(pass.rd);
   const uint32_t n8 = Register(pass.rn8) & 0xFFU;
   state.src = Register(pass.rx) & kFbufMask;
@@ -327,14 +297,12 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   state.imm2 = Register(pass.rimm2);
   ++activity_.passes;
   const bool reads_rows = pass.c0 == C0Source::kRs0 ||
-                          pass.b == BSource::kRs1 || pass.sel == Select::kRs0 ||
-                          pass.sel == Select::kRs1;
+                          pass.b == BSource::kRs1 || pass.sel == Select::kRs1;
   if (reads_rows || pass.red != Reduction::kNone) {
     AwaitContext(pass.ctx);
   }
-  const bool keeps_writes = pass.nodrain && pass.rm != RowMask::kSet;
-  const bool overlaps = !keeps_writes && Overlaps(pass, next);
-  RunQuads(state, quads, words, n8, !keeps_writes && !overlaps, memories);
+  const bool overlaps = Overlaps(pass, next);
+  RunQuads(state, quads, words, n8, !overlaps, memories);
   Require(state.next_quarter == 0,
           "a PASS ends inside a block of 4 quantized words");
   if (pass.red != Reduction::kNone) {
@@ -352,13 +320,7 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
       ready_slot_.at(pass.ctx) = complete;
     }
   }
-  follows_pass_ = keeps_writes || overlaps;
-  if (keeps_writes) {
-    in_flight_ |= state.written;
-    undrained_ = true;
-    undrained_pbuf_at_mul_ = undrained_pbuf_at_mul_ || pass.pa_at_mul;
-    return;
-  }
+  follows_pass_ = overlaps;
   if (overlaps) {
     ++activity_.overlaps;
     return;
@@ -471,11 +433,6 @@ const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
   if (state.written.test(address)) {
     Fail(std::format("a PASS reads FBUF word {} after writing it", address));
   }
-  if (in_flight_.test(address)) {
-    Fail(std::format(
-        "a PASS reads FBUF word {} written by an undrained nodrain PASS",
-        address));
-  }
   if (pending_.test(address)) {
     const uint64_t ready = pending_slot_.at(address) + kOverlapLatencyWords;
     if (ready > slot_) {
@@ -528,39 +485,20 @@ void VecEngine::RunSmem(const Word128& instruction, Memories& memories) {
                               : Register(instruction.Field(106, 5)) & 31U;
   const uint32_t ctx = instruction.Field(96, 2);
   Require(ctx < kContexts, std::format("an SMEM uses row context {}", ctx));
-  std::array<uint32_t, kTokens>& scalars =
-      instruction.Field(99, 1) != 0 ? rows_.at(ctx).rs0 : rows_.at(ctx).rs1;
-  const uint32_t word_address = (a + instruction.Field(0, 32)) & kFbufMask;
-  const uint32_t smem_op = instruction.Field(121, 3);
-  if (smem_op == kSmemRowLoad || smem_op == kSmemRowMove ||
-      smem_op == kSmemMoveRow) {
-    AwaitContext(ctx);
-  }
-  if (smem_op == kSmemLoad || smem_op == kSmemRowLoad) {
-    memories.log.Read(Mem::kFbuf, word_address);
-  }
-  const FbufWord& word = memories.fbuf.at(word_address);
-  switch (smem_op) {
-    case kSmemLoad:
-      Write(rd, word.at(column));
+  switch (instruction.Field(121, 3)) {
+    case kSmemLoad: {
+      const uint32_t word_address = (a + instruction.Field(0, 32)) & kFbufMask;
+      memories.log.Read(Mem::kFbuf, word_address);
+      Write(rd, memories.fbuf.at(word_address).at(column));
       break;
-    case kSmemRowLoad:
-      for (uint32_t t = 0; t < kTokens; ++t) {
-        uint32_t value = word.at((t * kLanes) + (column & 7U));
-        if (Fp32Exponent(value) == 0) {
-          value = 0;
-        } else if (instruction.Field(98, 1) != 0) {
-          value ^= kFp32SignBit;
-        }
-        scalars.at(t) = value;
-      }
+    }
+    case kSmemRowMove: {
+      AwaitContext(ctx);
+      const RowState& rows = rows_.at(ctx);
+      Write(rd, (instruction.Field(99, 1) != 0 ? rows.rs0 : rows.rs1)
+                    .at(column & 3U));
       break;
-    case kSmemRowMove:
-      Write(rd, scalars.at(column & 3U));
-      break;
-    case kSmemMoveRow:
-      scalars.fill(a);
-      break;
+    }
     case kSmemCount:
       ++activity_.rn;
       rn_ = CountReciprocal(a);
@@ -584,12 +522,7 @@ bool VecEngine::Taken(const Word128& instruction) const {
   }
 }
 
-void VecEngine::Drain() {
-  in_flight_.reset();
-  pending_.reset();
-  undrained_ = false;
-  undrained_pbuf_at_mul_ = false;
-}
+void VecEngine::Drain() { pending_.reset(); }
 
 void VecEngine::Write(uint32_t index, uint32_t value) {
   if (index != 0) {

@@ -181,7 +181,7 @@ FBUF row addressing: word `base + q · n8 + g` for quad q and word g of the row.
 | 14 | RELU | src → dst | max(x, 0) |
 | 15 | MAX | src, src2 → dst | Element-wise max |
 | 16 | RUN | — | Starts the CBUF program at aux |
-| 17–31 | — | — | Runs the program of op − 16; with Q, the scratch area is `imm[11:0]` |
+| 17–31 | — | — | As RUN |
 
 Q flag: the final pass is quantized and written to ABUF; dst is an ABUF address and n8 is a multiple of 4. The FBUF scratch area for intermediate passes is src2 for LAYERNORM, RMSNORM and SCALE, and `imm[11:0]` for the other operations.
 
@@ -240,8 +240,8 @@ A PASS streams `rq` quads × `rnw` words through the lanes, 4 cycles per word. R
 | [83:79] | rimm2 | Register: comparison value, or valid-column count for mask_en (low 16 bits) |
 | [78] | x2_en | Read x2; with x2_en = 0, x2 is x |
 | [77:76] / [75:74] / [73:72] | wx / wx2 / wd | Word-index mapping: 0 NORM `w`; 1 X1 `h·8 + gg`; 2 X2 `h·8 + 4 + gg` (h = w[5:2], gg = w[1:0]); 3 S4 `4·w` |
-| [71:70] | pa | PBUF access: 0 NONE; 1 ROWVEC (word `rpb + w/4`, slice `w mod 4`); 2 TILE (word `rpb + q·4 + gg`); 3 as NONE |
-| [69] | pa_at_mul | PBUF used at the multiplier (0: at the pre-adder) |
+| [71:70] | pa | PBUF value for c0 = PBUF and b = PBUF: 0 NONE; 1 ROWVEC (word `rpb + w/4`, slice `w mod 4` for every token); 2 TILE (word `rpb + q·4 + gg`, slice t for token t); 3 as NONE |
+| [69] | — | Reserved |
 | [68:66] | c0 | 0 ZERO, 1 X2, 2 PBUF, 3 RS0, 4 IMM; 5–7 as ZERO |
 | [65:63] | b | 0 ONE, 1 X2, 2 PBUF, 3 RS1, 4 IMM, 5 PRE (square), 6 LOG2E; 7 as ONE |
 | [62:61] | nl | 0 NONE, 1 ACT, 2 EXP2, 3 TAB01 |
@@ -250,18 +250,18 @@ A PASS streams `rq` quads × `rnw` words through the lanes, 4 cycles per word. R
 | [57] | mask_en | Columns at and beyond the rimm2 value give 0 |
 | [56:55] | red | Reduction: 0 NONE, 1 SUM, 2 MAX; 3 as NONE |
 | [54:53] | wr | Write: 0 NONE, 1 FBUF, 2 ABUF (quantized), 3 FINAL (ABUF if r10 = Q, else FBUF) |
-| [52:50] | sc | Row scalar after the pass: 0 NONE, 1 MEAN, 2 RSTD, 3 NEGMAX, 4 and 7 RECIPSUM, 5 SUM, 6 MAX |
+| [52:50] | sc | Row scalar after the pass: 0 NONE, 1 MEAN, 2 RSTD, 3 NEGMAX, 4 RECIPSUM, 5 MAX; 6 and 7 as NONE |
 | [49:47] | px | Permutation of x: 0 NONE; 1 BCAST (column pcol of each token to all 8 columns); 2 TSWAP1 (token t ↔ t xor 1); 3 TSWAP2 (t ↔ t xor 2); 4 T4 (output lane l ← token `l mod 4`, column `l/4`); 5 T4B (output lane l ← token `(l/4) mod 4`, column `(l mod 4) + 4·(l/16)`); 6 and 7 as NONE |
 | [46:44] | — | Reserved |
 | [43:41] | pcol | Column for BCAST |
 | [40:38] | cmp | 0 NONE, 1 LT, 2 LE, 3 EQ, 4 NE, 5 GT, 6 GE; 7 as NONE |
 | [37:36] | cmp_src | 0 IMM2 (x vs rimm2), 1 X2 (x vs x2), 2 LANE (lane number vs rimm2), 3 X2_IMM2 (x2 vs rimm2) |
 | [35] | cmp_int | Integer comparison (0: FP32) |
-| [34:32] | sel | Value for lanes whose predicate is false: 0 NONE, 1 ZERO, 2 X2, 3 IMM, 4 NULL (0xFFFFFFFF), 5 RS0, 6 RS1; 7 as ZERO |
+| [34:32] | sel | Value for lanes whose predicate is false: 0 NONE, 1 ZERO, 2 X2, 3 IMM, 4 NULL (0xFFFFFFFF), 5 RS1; 6 and 7 as ZERO |
 | [31:29] | ialu | Integer path: 0 NONE, 1 ADD, 2 SUB, 3 AND, 4 OR, 5 XOR, 6 SHR1 (logical shift right by 1), 7 RSUB (c0 − x) |
 | [28] | dst_s1 | FBUF write start advances by 1 word per quad |
 | [27] | c0_pred | c0 is 0 in lanes whose predicate is false |
-| [26] | nodrain | Do not wait for the pipeline to drain before the next instruction |
+| [26] | — | Reserved |
 | [25] | x_s1 | x and x2 read starts advance by 1 word per quad |
 | [24:23] | ctx | Row context of the reduction, the row scalar and the RS0/RS1 reads (0 or 1) |
 | [22:21] | rm | Row mask: 0 NONE, 1 SKIP (quads whose RM bit is 0 are skipped), 2 SET (RM bit q is written for each quad q of the pass); 3 as NONE |
@@ -282,7 +282,7 @@ y    = mask_en && invalid column ? 0 : y2
 - The integer path bypasses the multiplier, the nonlinear table and the post-adder.
 - TAB01 interpolates the first half of TBUF at the fraction of prod in [0, 1).
 - An invalid column is one whose position `8·w + column` in the row is at or beyond the rimm2 value. For a MAX reduction, invalid columns count as −∞; for a SUM reduction, as 0.
-- Row scalars after the pass (rn set by SMEM RN, ε = rimm value): MEAN `RS0 = −(Σ × rn)`; RSTD `RS1 = 1/√(Σ × rn + ε)`; NEGMAX `RS0 = −max`; RECIPSUM `RS1 = 1/Σ`; SUM `RS1 = Σ`; MAX `RS1 = max`. The negation flips the sign bit and gives +0 for ±0.
+- Row scalars after the pass (rn set by SMEM RN, ε = rimm value): MEAN `RS0 = −(Σ × rn)`; RSTD `RS1 = 1/√(Σ × rn + ε)`; NEGMAX `RS0 = −max`; RECIPSUM `RS1 = 1/Σ`; MAX `RS1 = max`. The negation flips the sign bit and gives +0 for ±0.
 - NaN and the value 0xFFFFFFFF must not enter the FP32 path or an FP32 comparison; integer and NULL entries go through the integer path and sel only.
 - Integer–FP32 conversion uses magic constants: `float(i) = bits(0x4B400000 + i) − 12582912.0` for |i| < 2^22; `rint(x) = bits(x + 12582912.0) − 0x4B400000`; `floor(x) = rint(x) − (rint(x) > x)`.
 
@@ -317,17 +317,15 @@ TRANSPOSE8 waits for preceding vector operations to drain and completes all dest
 ### SMEM
 
 ```
-[123:121] op  [120:116] rd  [115:111] ra  [110:106] rb  [105] col_imm  [104:100] col  [99] which (0 RS1, 1 RS0)  [98] neg  [97:96] ctx  [31:0] imm (signed word offset)
+[123:121] op  [120:116] rd  [115:111] ra  [110:106] rb  [105] col_imm  [104:100] col  [99] which (0 RS1, 1 RS0)  [97:96] ctx  [31:0] imm (signed word offset)
 ```
 
 | op | Name | Operation |
 |---|---|---|
 | 0 | SLD | `rd ← FBUF[ra + imm]` lane col (col_imm ? col : rb[4:0]) |
-| 1, 3, 7 | — | No operation |
-| 2 | RSLD | `RS[which][t] ← FBUF[ra + imm]` token t, column col[2:0], t = 0..3, in row context ctx; negated if neg; a value with a zero exponent field becomes +0 |
-| 4 | RSMOV | `rd ← RS[which][col[1:0]]` of row context ctx |
-| 5 | SMOVR | `RS[which][t] ← ra` for all t, in row context ctx |
-| 6 | RN | `rn ← 1 / float(ra)`, ra < 2^14; ra = 0 counts as 1 |
+| 1 | RSMOV | `rd ← RS[which][col[1:0]]` of row context ctx |
+| 2 | RN | `rn ← 1 / float(ra)`, ra < 2^14; ra = 0 counts as 1 |
+| 3–7 | — | No operation |
 
 The FBUF address `ra + imm` wraps at 4,096 words.
 
@@ -341,20 +339,17 @@ RET and NOP have no operands.
 
 ### Execution rules
 
-- A PASS waits for the pipeline to drain at its end unless nodrain is set, or unless the next instruction is a PASS and this PASS does not read PBUF at the multiplier while the next one reads PBUF at the pre-adder. In the latter case the next PASS starts while the writes of this one complete, and a read of an FBUF word whose write is still pending waits for the write.
-- A PASS with rm = SET writes RM bit q, for each quad q < rq, with 1 when any element of the words that quad q produces is nonzero and 0 otherwise; the other RM bits are unchanged. It always waits for the pipeline to drain at its end, regardless of nodrain.
+- A PASS without rm = SET that is followed by a PASS does not wait for the pipeline to drain: the next PASS starts while its writes complete, and a read of an FBUF word whose write is still pending waits for the write. Every other PASS waits for the pipeline to drain at its end.
+- A PASS with rm = SET writes RM bit q, for each quad q < rq, with 1 when any element of the words that quad q produces is nonzero and 0 otherwise; the other RM bits are unchanged.
 - A PASS with rm = SKIP does nothing for a quad q whose RM bit is 0: no reads, no writes, no reduction; the read and write starts advance as usual. The reduction accumulator index counts the words that are issued. RM is unchanged until the next PASS with rm = SET, and its bits are undefined before the first one.
 - The issue stage passes over up to two skipped quads per cycle and ends a PASS as soon as every remaining quad is skipped.
 - A row context is reducing from the start of a PASS with red in that context until every word of the PASS has been reduced; if the PASS has sc, the context then holds the scalar program until its result is written to RS0 or RS1 of the context. The scalar unit runs one program at a time, in the order the reductions complete.
 - A PASS with red waits at its start until its context is neither reducing nor holding a scalar program, then clears the context's accumulators.
-- A PASS that reads RS0 or RS1 (c0 = RS0, b = RS1, sel = RS0 or RS1) waits at its start while a scalar program of its context is outstanding.
-- SMEM waits for preceding passes to drain; RSLD, RSMOV and SMOVR also wait for an outstanding scalar program of their context, and RN waits for the scalar unit to be idle.
+- A PASS that reads RS0 or RS1 (c0 = RS0, b = RS1 or sel = RS1) waits at its start while a scalar program of its context is outstanding.
+- SMEM waits for preceding passes to drain; RSMOV also waits for an outstanding scalar program of its context, and RN waits for the scalar unit to be idle.
 - The rimm and rimm2 values are captured when a PASS is issued.
 - A PASS must not have rq = 0 or rnw = 0.
 - sel = X2 and c1 = SIGNFIX are not used in the same pass.
-- pa = TILE is used with pa_at_mul = 1.
-- A PASS that follows a nodrain PASS reading PBUF at the multiplier does not read PBUF at the pre-adder.
-- The last PASS before RET does not set nodrain.
 
 ## Vector arithmetic
 
@@ -406,7 +401,7 @@ An on-chip word is stored little-endian and padded with zeros to a multiple of 1
 | TBUF | 64 bits | 16 |
 | CBUF | 128 bits | 16 |
 
-`ddr_addr` and `ddr_stride` are multiples of 16 bytes. DMA_ST reads ABUF or FBUF and treats every mode as RAW. DMA_ST reads ABUF through the write port of ABUF in the cycles without a write from VEC or DMA, so it does not wait for the GEMM engine. DMA writes to TBUF and CBUF wait until the VEC engine is idle.
+`ddr_addr` and `ddr_stride` are multiples of 16 bytes. DMA_ST reads ABUF or FBUF, treats every mode as RAW and ignores flag I; DMA_LD ignores flag I without flag R. DMA_ST reads ABUF through the write port of ABUF in the cycles without a write from VEC or DMA, so it does not wait for the GEMM engine. DMA writes to TBUF and CBUF wait until the VEC engine is idle.
 
 ### RAW (2D)
 
@@ -414,7 +409,7 @@ Row r = 0..rows−1, word w = 0..row_words−1: DDR `ddr_addr + r · ddr_stride 
 
 ### Index list (flag I)
 
-`ddr_addr` points to a list of `rows · row_words` 32-bit entries. Entry e is the DDR address, in 16-byte units, of transfer unit e (a word for RAW, a token for row format). On-chip units go to `dst + e` in order. The entry 0xFFFFFFFF reads nothing and writes zero (for MXINT8, an all-zero block with scale byte 127). For DMA_ST, the entries give the write addresses, and the entry 0xFFFFFFFF skips its unit.
+With flags I and R, DMA_LD reads a list of `rows · row_words` 32-bit entries at `ddr_addr`. Entry e is the DDR address, in 16-byte units, of token e, and the tokens are packed in order as in row format. The entry 0xFFFFFFFF reads nothing and writes a zero token (for MXINT8, an all-zero block with scale byte 127).
 
 ### Row format (flag R)
 
@@ -621,7 +616,6 @@ For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_i
 | RSTD | 29 | 2 |
 | NEGMAX, MAX | 0 | 1 |
 | RECIPSUM | 19 | 2 |
-| SUM | 7 | 1 |
 | RN | 12 | 2 |
 
 The statistics of a predicted record are the read and write beats, the cycles between issue and the start of the data phase and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces of both models with statistics records, except vec_word_cycles, vec_transpose_cycles, vec_transpose_tile_cycles and dma_gather_fetch_cycles, which are fitted to Verilator runs of the RTL. `hotarubi_trace predict` and `hotarubi_run --device iss` take `--timing NAME=VALUE,...` to override any parameter. The scheduler estimates the cost of an instruction with the same model from the activity implied by its fields (the activity of a fixed VEC operation by executing its ROM program; a RUN command as one pass over its words).

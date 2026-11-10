@@ -58,7 +58,6 @@ Instruction EncodePass(const Pass& pass) {
   Field(instruction, 75, 2, U(pass.wx2));
   Field(instruction, 73, 2, U(pass.wd));
   Field(instruction, 71, 2, U(pass.pa));
-  Field(instruction, 69, 1, U(pass.pa_at_mul));
   Field(instruction, 68, 3, U(pass.c0));
   Field(instruction, 65, 3, U(pass.b));
   Field(instruction, 62, 2, U(pass.nl));
@@ -77,7 +76,6 @@ Instruction EncodePass(const Pass& pass) {
   Field(instruction, 31, 3, U(pass.ialu));
   Field(instruction, 28, 1, U(pass.dst_s1));
   Field(instruction, 27, 1, U(pass.c0_pred));
-  Field(instruction, 26, 1, U(pass.nodrain));
   Field(instruction, 25, 1, U(pass.x_s1));
   Field(instruction, 24, 2, pass.ctx);
   Field(instruction, 22, 2, U(pass.rm));
@@ -111,7 +109,6 @@ Instruction EncodeSmem(Smem op, const SmemArgs& args) {
     Field(instruction, 104, 5, *args.col);
   }
   Field(instruction, 99, 1, U(args.which));
-  Field(instruction, 98, 1, U(args.neg));
   Field(instruction, 97, 2, args.ctx);
   Field(instruction, 31, 32, args.imm);
   return instruction;
@@ -228,22 +225,6 @@ Assembler& Assembler::StoreScalar(uint32_t rw, uint32_t rlane, uint32_t rcol,
                .cmp_src = CmpSrc::kX2Imm2,
                .cmp_int = true,
                .sel = Sel::kImm});
-}
-
-Assembler& Assembler::StoreRowScalar(uint32_t rw, uint32_t rcol8, uint32_t rcol,
-                                     bool rs0, uint32_t r_one) {
-  return Emit({.rx = rw,
-               .rx2 = rcol8,
-               .rd = rw,
-               .rq = r_one,
-               .rnw = r_one,
-               .rn8 = r_one,
-               .rimm2 = rcol,
-               .wr = Write::kFbuf,
-               .cmp = Cmp::kNe,
-               .cmp_src = CmpSrc::kX2Imm2,
-               .cmp_int = true,
-               .sel = rs0 ? Sel::kRs0 : Sel::kRs1});
 }
 
 Assembler& Assembler::IntToFloat(uint32_t rx, uint32_t rd, uint32_t rq,
