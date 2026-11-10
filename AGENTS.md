@@ -72,4 +72,4 @@ CI (`.github/workflows/ci.yml`) builds and tests with `gcc-release`, `clang-rele
 
 ## Commits
 
-Commit only when the owner asks, on `main`. The message is one line, with no trailers such as Co-Authored-By.
+Commit only when the owner asks, on `main`. The message is one line of fewer than 100 characters, with no trailers such as Co-Authored-By.
