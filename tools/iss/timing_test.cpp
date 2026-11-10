@@ -242,7 +242,9 @@ TEST(EstimateTest, GatherCountsListCoefficientsAndRows) {
                                           .tok = 0});
   EXPECT_EQ(gather.gather_entries, 9U * 16);
   EXPECT_EQ(gather.gather_rows, 9U * 16);
-  EXPECT_EQ(gather.read_beats, 1U + 72 + (2U * 8 * 8) + (144U * 17));
+  EXPECT_EQ(gather.read_beats, 1U + 72 + (2U * 8 * 8));
+  EXPECT_EQ(gather.gather_row_beats, 144U * 17);
+  EXPECT_EQ(gather.gather_fetches, 1U);
 }
 
 TEST(EstimateTest, DdrExtentsCoverEveryRowOfATransfer) {

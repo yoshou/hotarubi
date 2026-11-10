@@ -19,6 +19,8 @@ struct DmaActivity {
   uint64_t null_entries = 0;
   uint64_t gather_entries = 0;
   uint64_t gather_rows = 0;
+  uint64_t gather_row_beats = 0;
+  uint64_t gather_fetches = 0;
 
   friend constexpr bool operator==(const DmaActivity&,
                                    const DmaActivity&) = default;

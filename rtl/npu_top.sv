@@ -101,7 +101,8 @@ module npu_top
   logic [6:0]  dma_tok;
   logic        dma_axi_err;
   logic        gemm_stat_fed, vec_stat_issue, vec_stat_drain, vec_stat_scalar, vec_stat_pass;
-  logic        dma_stat_rd_beat, dma_stat_wr_beat, dma_stat_denied, dma_stat_null;
+  logic        dma_stat_rd_beat, dma_stat_wr_beat, dma_stat_denied;
+  logic [1:0]  dma_stat_null;
 
   logic [31:0]  d_axi_araddr, d_axi_awaddr, q_axi_araddr, q_axi_awaddr;
   logic [7:0]   d_axi_arlen, d_axi_awlen, q_axi_arlen, q_axi_awlen;

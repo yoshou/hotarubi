@@ -354,7 +354,8 @@ uint64_t Streaming(const Instruction& instruction) {
     case kOpDmaStore: {
       const iss::DmaActivity activity =
           iss::EstimateDma(iss::DecodeDma(instruction.word));
-      return activity.read_beats + activity.write_beats;
+      return activity.read_beats + activity.gather_row_beats +
+             activity.write_beats;
     }
     case kOpGemm:
       return iss::GemmArrayCycles(iss::DecodeGemm(instruction.word));

@@ -47,7 +47,9 @@ uint32_t ScaleByPowerOfTwo(uint32_t value, int exponent) {
 
 GaccList MakeList(std::mt19937& rng, Ddr& ddr, uint32_t list_address,
                   uint32_t slots, uint32_t row_words, uint32_t quad,
-                  uint32_t row_pool, uint32_t w_address) {
+                  uint32_t row_pool, uint32_t w_address,
+                  uint32_t null_in_nine = 1,
+                  const std::vector<bool>& null_slots = {}) {
   GaccList list{.list_address = list_address,
                 .w_address = w_address,
                 .w_stride = 0,
@@ -69,7 +71,8 @@ GaccList MakeList(std::mt19937& rng, Ddr& ddr, uint32_t list_address,
   ddr.Write32(list_address + 8, 0);
   ddr.Write32(list_address + 12, 0);
   for (uint32_t e = 0; e < slots * 16; ++e) {
-    const bool null_entry = rng() % 9 == 0;
+    const bool null_slot = !null_slots.empty() && null_slots.at(e / 16);
+    const bool null_entry = rng() % 9 < null_in_nine || null_slot;
     const uint32_t row =
         null_entry
             ? kNull
@@ -296,6 +299,44 @@ TEST(GaccTest, PartialLastSlotGroup) {
       bench,
       {Gacc(kListArea, list.slots, kRowWords, kDst, kQuad, kGaccFlagFlush)},
       kDst, ToWords(acc, kRowWords));
+}
+
+void RunFromZero(uint32_t seed, uint32_t row_words, uint32_t slots,
+                 uint32_t null_in_nine, const std::vector<bool>& null_slots) {
+  std::mt19937 rng(seed);
+  NpuBench bench(seed);
+  Ddr& ddr = bench.Memory();
+  constexpr uint32_t kQuad = 1;
+  constexpr uint32_t kDst = 64;
+  WriteRowPool(rng, ddr, 64, row_words);
+  const GaccList list = MakeList(rng, ddr, kListArea, slots, row_words, kQuad,
+                                 64, kWArea, null_in_nine, null_slots);
+  Accumulators acc;
+  for (std::vector<uint32_t>& token : acc) {
+    token.assign(size_t{32} * row_words, kFp32Zero);
+  }
+  ReferenceGacc(ddr, list, row_words, kQuad, acc);
+  RunAndCompare(
+      bench, {Gacc(kListArea, slots, row_words, kDst, kQuad, kGaccFlagFlush)},
+      kDst, ToWords(acc, row_words));
+}
+
+TEST(GaccTest, ManySlotGroupsWithMostEntriesNull) {
+  RunFromZero(58, 8, 200, 7, {});
+}
+
+TEST(GaccTest, NullSlotGroupsBetweenDenseGroups) {
+  std::vector<bool> null_slots(72, false);
+  for (const uint32_t group : {0U, 2U, 3U, 6U, 8U}) {
+    for (uint32_t s = 0; s < 8; ++s) {
+      null_slots.at((group * 8) + s) = true;
+    }
+  }
+  RunFromZero(59, 3, 72, 0, null_slots);
+}
+
+TEST(GaccTest, ListWithOnlyNullEntries) {
+  RunFromZero(60, 8, 40, 0, std::vector<bool>(40, true));
 }
 
 }  // namespace

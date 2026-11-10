@@ -28,7 +28,7 @@ module dma_gacc (
   output logic [1023:0] out_word_o,
   output logic [12:0]   out_addr_o,
   output logic          idle_o,
-  output logic          null_o
+  output logic [1:0]    null_o
 );
 
   localparam int Nl     = 16;
@@ -44,7 +44,7 @@ module dma_gacc (
   logic [12:0] dst;
   logic [31:0] w_base;
   logic [15:0] w_gstride, w_qwords;
-  logic [31:0] w_qoff, w_grp, pq_addr;
+  logic [31:0] w_qoff, w_grp0, pq_addr;
   logic [4:0]  nd;
   logic [5:0]  row_beats;
 
@@ -57,7 +57,6 @@ module dma_gacc (
     GHdr,
     GWmul,
     GWadd,
-    GWwait,
     GEnt,
     GDrain,
     GFlush
@@ -66,14 +65,13 @@ module dma_gacc (
   st_e          st;
   logic         zeroing, flushing;
   logic [11:0]  s_cur;
-  logic [2:0]   s_in_grp;
   logic [1:0]   e_t, e_k;
   logic         e_half;
   logic [3:0]   pq_kb, rx_kb;
   logic [2:0]   rx_b;
-  logic [8:0]   grp_left;
-  logic         pq_on, rx_on, rx_half, nx_ready, wh_cur, wh_cm;
-  logic         ent_req, pq_fire, w_fire, grp_end, adv;
+  logic [8:0]   ngrp, cur_g, f_g, g_fsm, f_g_new;
+  logic         pq_on, rx_on, rx_half, nx_ready, wh_cur, wh_cm, cur_v;
+  logic         ent_req, pq_fire, w_fire, w_here, need, sw, od, pfx, f_start, dbl;
   logic         wr_we;
   logic [6:0]   wr_wa, wr_ra;
   logic [31:0]  wr_rd [4];
@@ -128,15 +126,26 @@ module dma_gacc (
   logic [63:0] ent_cur;
   logic        ent_null, ent_ok, ent_take;
 
+  assign g_fsm       = s_cur[11:3];
+  assign w_here      = cur_v && (cur_g == g_fsm);
   assign ent_cur     = e_half ? ent_data_i[127:64] : ent_data_i[63:0];
   assign ent_null    = (ent_cur[31:0] == 32'hFFFFFFFF);
-  assign ent_ok      = (st == GEnt) && ent_valid_i &&
-                       (ent_null || (!cm_busy && !cm_pend && !pf_afull && req_ready_i));
+  assign dbl         = (st == GEnt) && ent_valid_i && !e_half && ent_null &&
+                       (ent_data_i[95:64] == 32'hFFFFFFFF);
+  assign ent_ok      = (st == GEnt) && ent_valid_i && !dbl &&
+                       (ent_null || (w_here && !cm_busy && !cm_pend && !pf_afull && req_ready_i));
   assign ent_take    = ent_ok;
-  assign ent_ready_o = (st == GHdr) ? ent_valid_i : (ent_take && e_half);
+  assign ent_ready_o = (st == GHdr) ? ent_valid_i : ((ent_take && e_half) || dbl);
 
-  assign ent_req = (st == GEnt) && ent_valid_i && !ent_null && !cm_busy && !cm_pend && !pf_afull;
+  assign ent_req = (st == GEnt) && ent_valid_i && !dbl && !ent_null && w_here && !cm_busy &&
+                   !cm_pend && !pf_afull;
   assign pq_fire = pq_on && !ent_req && req_ready_i;
+  assign need    = (st == GEnt) && ent_valid_i && !dbl && !ent_null && !w_here;
+  assign sw      = need && nx_ready && (f_g == g_fsm);
+  assign od      = need && !pq_on && !rx_on && !(nx_ready && (f_g == g_fsm));
+  assign pfx     = sw && (g_fsm + 9'd1 < ngrp);
+  assign f_start = od || pfx;
+  assign f_g_new = od ? g_fsm : (g_fsm + 9'd1);
 
   always_comb begin
     req_valid_o = 1'b0;
@@ -158,28 +167,23 @@ module dma_gacc (
 
   assign w_ready_o = rx_on && !(cm_busy && (wh_cm == rx_half));
   assign w_fire    = w_valid_i && w_ready_o;
-  assign grp_end   = ent_take && (e_k == 2'd3) && (e_t == 2'd3) && (s_in_grp == 3'd7) &&
-                     (s_cur != slots - 1'b1);
-  assign adv       = nx_ready && ((st == GWwait) || grp_end);
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni || clear_i) begin
       pq_on    <= 1'b0;
       rx_on    <= 1'b0;
       nx_ready <= 1'b0;
+      cur_v    <= 1'b0;
     end else begin
-      if (st == GWadd) begin
-        pq_on    <= 1'b1;
-        rx_on    <= 1'b1;
+      if (sw) begin
+        cur_v    <= 1'b1;
         nx_ready <= 1'b0;
-      end else if (adv && grp_left != 9'd0) begin
+      end
+      if (f_start) begin
         pq_on    <= 1'b1;
         rx_on    <= 1'b1;
         nx_ready <= 1'b0;
       end else begin
-        if (adv) begin
-          nx_ready <= 1'b0;
-        end
         if (pq_fire && pq_kb == kb - 1'b1) begin
           pq_on <= 1'b0;
         end
@@ -193,21 +197,20 @@ module dma_gacc (
 
   always_ff @(posedge clk_i) begin
     if (st == GWadd) begin
-      w_grp    <= w_base + (w_qoff << 7);
-      pq_addr  <= w_base + (w_qoff << 7);
-      pq_kb    <= '0;
-      rx_kb    <= '0;
-      rx_b     <= '0;
-      rx_half  <= 1'b0;
-      grp_left <= 9'((slots + 12'd7) >> 3) - 9'd1;
-    end else if (adv && grp_left != 9'd0) begin
-      w_grp    <= w_grp + 32'd128;
-      pq_addr  <= w_grp + 32'd128;
-      pq_kb    <= '0;
-      rx_kb    <= '0;
-      rx_b     <= '0;
-      rx_half  <= ~rx_half;
-      grp_left <= grp_left - 9'd1;
+      w_grp0 <= w_base + (w_qoff << 7);
+      ngrp   <= 9'((slots + 12'd7) >> 3);
+    end
+    if (sw) begin
+      wh_cur <= rx_half;
+      cur_g  <= f_g;
+    end
+    if (f_start) begin
+      f_g     <= f_g_new;
+      pq_addr <= w_grp0 + {16'd0, f_g_new, 7'd0};
+      pq_kb   <= '0;
+      rx_kb   <= '0;
+      rx_b    <= '0;
+      rx_half <= od ? ~wh_cur : wh_cur;
     end else begin
       if (pq_fire) begin
         pq_kb   <= pq_kb + 1'b1;
@@ -220,16 +223,12 @@ module dma_gacc (
         end
       end
     end
-    if (adv) begin
-      wh_cur <= rx_half;
-    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni || clear_i) begin
       st        <= GIdle;
       s_cur     <= '0;
-      s_in_grp  <= '0;
       e_t       <= '0;
       e_k       <= '0;
       e_half    <= 1'b0;
@@ -248,7 +247,6 @@ module dma_gacc (
             do_flush  <= cfg_flush_i;
             dst       <= cfg_dst_i;
             s_cur     <= '0;
-            s_in_grp  <= '0;
             e_t       <= '0;
             e_k       <= '0;
             e_half    <= 1'b0;
@@ -278,37 +276,31 @@ module dma_gacc (
           end
         end
         GWmul: st <= GWadd;
-        GWadd: st <= GWwait;
-        GWwait: begin
-          if (adv) begin
-            st       <= GEnt;
-            s_in_grp <= '0;
-          end
-        end
+        GWadd: st <= GEnt;
         GEnt: begin
-          if (ent_take) begin
-            e_half <= ~e_half;
-            if (e_k == 2'd3) begin
+          if (dbl || ent_take) begin
+            if (!dbl) begin
+              e_half <= ~e_half;
+            end
+            if (e_k == 2'd3 || (dbl && e_k == 2'd2)) begin
               e_k <= '0;
               if (e_t == 2'd3) begin
-                e_t      <= '0;
-                s_cur    <= s_cur + 1'b1;
-                s_in_grp <= s_in_grp + 1'b1;
+                e_t   <= '0;
+                s_cur <= s_cur + 1'b1;
                 if (s_cur == slots - 1'b1) begin
                   st <= GDrain;
-                end else if (s_in_grp == 3'd7 && !nx_ready) begin
-                  st <= GWwait;
                 end
               end else begin
                 e_t <= e_t + 1'b1;
               end
             end else begin
-              e_k <= e_k + 1'b1;
+              e_k <= dbl ? e_k + 2'd2 : e_k + 1'b1;
             end
           end
         end
         GDrain: begin
-          if (pf_empty && rfull == 2'b00 && !mac_busy && pipe_empty && !cm_busy && !cm_pend) begin
+          if (pf_empty && rfull == 2'b00 && !mac_busy && pipe_empty && !cm_busy && !cm_pend &&
+              !pq_on && !rx_on) begin
             drain_cnt <= drain_cnt + 1'b1;
             if (drain_cnt == 4'd3) begin
               drain_cnt <= '0;
@@ -734,7 +726,7 @@ module dma_gacc (
   end
 
   assign idle_o = (st == GIdle);
-  assign null_o = ent_take && ent_null;
+  assign null_o = dbl ? 2'd2 : {1'b0, ent_take && ent_null};
 
   logic unused_gacc;
 

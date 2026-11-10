@@ -167,8 +167,11 @@ module vec_engine
 
   assign can_issue = !wf_afull & !df_afull & !af_afull & !pend_full;
 
-  logic        cur_skip, rm_q, rm_we, rm_wd;
-  logic [8:0]  rm_ra, rm_wa;
+  logic        cur_skip, rm_q, rm_q2, rm_we, rm_wd;
+  logic [8:0]  rm_ra, rm_ra2, rm_wa;
+  logic [11:0] step_x, step_d;
+  logic [11:0] src_d1, src_d2, src_t1, src_t2;
+  logic        sk_last1, sk_last2, sk_go1, sk_go2, sk_end;
   logic        rd_v, rd_is_entry, rd_is_hold;
   logic [11:0] rd_addr;
   ctrl_t       rd_ctrl;
@@ -230,8 +233,22 @@ module vec_engine
 
   (* ram_style = "distributed" *) logic rm_mem [512];
 
-  assign rm_ra = (st == StIssue) ? (q + 9'd1) : 9'd0;
-  assign rm_q  = rm_mem[rm_ra];
+  assign rm_ra  = (st == StIssue) ? (q + 9'd1) : 9'd0;
+  assign rm_ra2 = q + 9'd2;
+  assign rm_q   = rm_mem[rm_ra];
+  assign rm_q2  = rm_mem[rm_ra2];
+
+  assign step_x   = pd.x_s1 ? 12'd1 : 12'(p_n8);
+  assign step_d   = pd.dst_s1 ? 12'd1 : 12'(p_n8);
+  assign src_d1   = rb_src + step_x;
+  assign src_d2   = rb_src + {step_x[10:0], 1'b0};
+  assign src_t1   = src_d1 + 12'(wa_word);
+  assign src_t2   = src_d2 + 12'(wa_word);
+  assign sk_last1 = (q + 9'd1 == p_rq - 9'd1);
+  assign sk_last2 = (q + 9'd2 == p_rq - 9'd1);
+  assign sk_go1   = (pd.rm != RmSkip) | rm_q;
+  assign sk_go2   = !sk_go1 & !sk_last1 & rm_q2;
+  assign sk_end   = !sk_go1 & (sk_last1 | (!rm_q2 & sk_last2));
 
   always_ff @(posedge clk_i) begin
     if (rm_we) begin
@@ -722,17 +739,25 @@ module vec_engine
         end
         StIssue: begin
           if (cur_skip) begin
-            if (q == p_rq - 9'd1) begin
+            if ((q == p_rq - 9'd1) || sk_end) begin
               cur_skip <= 1'b0;
               st       <= (pd.nodrain || overlap_ok) ? StNext : StDrain;
-            end else begin
+            end else if (sk_go1) begin
               q        <= q + 9'd1;
-              rb_src   <= rb_src + (pd.x_s1 ? 12'd1 : 12'(p_n8));
-              rb_src2  <= rb_src2 + (pd.x_s1 ? 12'd1 : 12'(p_n8));
-              rb_dst   <= rb_dst + (pd.dst_s1 ? 12'd1 : 12'(p_n8));
+              rb_src   <= src_d1;
+              rb_src2  <= rb_src2 + step_x;
+              rb_dst   <= rb_dst + step_d;
               rb_abuf  <= rb_abuf + 13'(p_n8[7:2]);
               pt_row   <= pt_row + 10'd4;
-              cur_skip <= (pd.rm == RmSkip) & !rm_q;
+              cur_skip <= 1'b0;
+            end else begin
+              q        <= q + 9'd2;
+              rb_src   <= src_d2;
+              rb_src2  <= rb_src2 + {step_x[10:0], 1'b0};
+              rb_dst   <= rb_dst + {step_d[10:0], 1'b0};
+              rb_abuf  <= rb_abuf + 13'({p_n8[7:2], 1'b0});
+              pt_row   <= pt_row + 10'd8;
+              cur_skip <= !sk_go2;
             end
           end else if (rd_fire) begin
             if (rd_is_hold) begin
@@ -742,16 +767,24 @@ module vec_engine
               slot_j  <= slot_j + 3'd1;
               if (w == p_nw - 10'd1) begin
                 w <= 10'd0;
-                if (q == p_rq - 9'd1) begin
+                if ((q == p_rq - 9'd1) || sk_end) begin
                   st <= ((pd.nodrain && (pd.rm != RmSet)) || overlap_ok) ? StNext : StDrain;
-                end else begin
+                end else if (sk_go1) begin
                   q        <= q + 9'd1;
-                  rb_src   <= rb_src + (pd.x_s1 ? 12'd1 : 12'(p_n8));
-                  rb_src2  <= rb_src2 + (pd.x_s1 ? 12'd1 : 12'(p_n8));
-                  rb_dst   <= rb_dst + (pd.dst_s1 ? 12'd1 : 12'(p_n8));
+                  rb_src   <= src_d1;
+                  rb_src2  <= rb_src2 + step_x;
+                  rb_dst   <= rb_dst + step_d;
                   rb_abuf  <= rb_abuf + 13'(p_n8[7:2]);
                   pt_row   <= pt_row + 10'd4;
-                  cur_skip <= (pd.rm == RmSkip) & !rm_q;
+                  cur_skip <= 1'b0;
+                end else begin
+                  q        <= q + 9'd2;
+                  rb_src   <= src_d2;
+                  rb_src2  <= rb_src2 + {step_x[10:0], 1'b0};
+                  rb_dst   <= rb_dst + {step_d[10:0], 1'b0};
+                  rb_abuf  <= rb_abuf + 13'({p_n8[7:2], 1'b0});
+                  pt_row   <= pt_row + 10'd8;
+                  cur_skip <= !sk_go2;
                 end
               end else begin
                 w <= w + 10'd1;
@@ -1432,6 +1465,10 @@ module vec_engine
   logic [PendAw-1:0]    pend_wp, pend_rp;
   logic [PendAw:0]      pend_count;
   logic                 pend_push, pend_pop, pend_hit, pend_hit_r, pend_known, pend_empty_r;
+  logic                 pend_hit_e, pend_hit_t1, pend_hit_t2;
+  logic [11:0]          rd_addr_e;
+
+  assign rd_addr_e = rb_src2 + 12'(wb_word);
 
   assign pend_push  = rd_fire & rd_is_entry & (wr_eff == WrFbuf);
   assign pend_pop   = wf_pop;
@@ -1439,9 +1476,15 @@ module vec_engine
   assign pend_clear = pend_empty_r | (pend_known & !pend_hit_r);
 
   always_comb begin
-    pend_hit = 1'b0;
+    pend_hit    = 1'b0;
+    pend_hit_e  = 1'b0;
+    pend_hit_t1 = 1'b0;
+    pend_hit_t2 = 1'b0;
     for (int i = 0; i < PendDepth; i++) begin
-      pend_hit |= pend_v[i] & (pend_addr[i] == rd_addr);
+      pend_hit    |= pend_v[i] & (pend_addr[i] == rd_addr);
+      pend_hit_e  |= pend_v[i] & (pend_addr[i] == rd_addr_e);
+      pend_hit_t1 |= pend_v[i] & (pend_addr[i] == src_t1);
+      pend_hit_t2 |= pend_v[i] & (pend_addr[i] == src_t2);
     end
   end
 
@@ -1455,8 +1498,10 @@ module vec_engine
       pend_known   <= 1'b0;
       pend_empty_r <= 1'b1;
     end else begin
-      pend_hit_r   <= pend_hit;
-      pend_known   <= (st == StIssue) & !rd_fire & !cur_skip;
+      pend_hit_r   <= cur_skip ? (sk_go1 ? pend_hit_t1 : pend_hit_t2) :
+                      (rd_fire & rd_is_hold) ? pend_hit_e : pend_hit;
+      pend_known   <= (st == StIssue) &
+                      (cur_skip ? (sk_go1 | sk_go2) : (!rd_fire | rd_is_hold));
       pend_empty_r <= (pend_count == '0) & !pend_push;
       if (pend_push) begin
         pend_v[pend_wp] <= 1'b1;

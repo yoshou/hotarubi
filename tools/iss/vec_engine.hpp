@@ -127,6 +127,7 @@ class VecEngine {
   uint64_t scalar_free_slot_ = 0;
   bool undrained_ = false;
   bool undrained_pbuf_at_mul_ = false;
+  bool follows_pass_ = false;
   std::bitset<kRowMaskBits> row_mask_;
 };
 

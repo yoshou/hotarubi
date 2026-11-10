@@ -449,5 +449,63 @@ TEST(DmaTest, AbufRowFormatIndexListWithNullToken) {
   }
 }
 
+TEST(DmaTest, FbufStoreWhileGemmAccumulatesInFbuf) {
+  constexpr uint32_t kRows = 32;
+  for (uint32_t seed = 40; seed < 52; ++seed) {
+    std::mt19937 rng(seed);
+    NpuBench bench(seed);
+    Ddr& ddr = bench.Memory();
+    const uint32_t row_words = 1 + (seed % 3);
+    const uint32_t store_stride = (row_words + 1) * kFbufWordBytes;
+    std::vector<FbufWord> words;
+    for (uint32_t i = 0; i < kRows * row_words; ++i) {
+      words.push_back(RandomFbufWord(rng));
+      WriteFbuf(ddr, kSrcArea + (i * kFbufWordBytes), words.back());
+    }
+    FillGarbage(ddr, kDstArea, kRows * store_stride, rng);
+    std::vector<Instruction> program = {
+        DmaLoad({.ddr_addr = kSrcArea,
+                 .mem = Mem::kFbuf,
+                 .onchip = 0,
+                 .rows = 1,
+                 .row_words = kRows * row_words}),
+        Gemm({.a_base = 0,
+              .a_stride = 1,
+              .kb = 1,
+              .m = 32,
+              .w_base = 0,
+              .w_stride = 1,
+              .n8 = 4,
+              .c_base = 2000,
+              .acc = true,
+              .wait = kWaitDma}),
+        DmaStore({.ddr_addr = kDstArea,
+                  .mem = Mem::kFbuf,
+                  .onchip = 0,
+                  .rows = kRows,
+                  .row_words = row_words,
+                  .ddr_stride = store_stride})};
+    for (uint32_t i = 0; i < 200; ++i) {
+      program.push_back(Gemm({.a_base = 0,
+                              .a_stride = 1,
+                              .kb = 1 + static_cast<uint32_t>(rng() % 3),
+                              .m = 32,
+                              .w_base = 0,
+                              .w_stride = 1,
+                              .n8 = 1 + static_cast<uint32_t>(rng() % 12),
+                              .c_base = 2000,
+                              .acc = true}));
+    }
+    program.push_back(Halt());
+    RunProgram(bench, program);
+    for (uint32_t i = 0; i < words.size(); ++i) {
+      const uint32_t address = kDstArea + ((i / row_words) * store_stride) +
+                               ((i % row_words) * kFbufWordBytes);
+      EXPECT_EQ(ReadFbuf(ddr, address), words[i])
+          << "seed " << seed << " word " << i;
+    }
+  }
+}
+
 }  // namespace
 }  // namespace hotarubi::tb

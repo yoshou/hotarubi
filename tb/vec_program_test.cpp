@@ -1419,6 +1419,13 @@ TEST(VecProgramTest, SkippedRowsDoNotBypassThePendingWriteCheck) {
   }
 }
 
+TEST(VecProgramTest, PassesSkipToTheirLastQuadOrSkipEveryQuad) {
+  for (const uint32_t rows : {2U, 3U, 4U, 5U, 18U}) {
+    CheckSkippedRowsWaitForPendingWrites(rows, rows);
+    CheckSkippedRowsWaitForPendingWrites(rows, rows + 1);
+  }
+}
+
 TEST(VecProgramTest, DependentPassesOverlapTheDrain) {
   std::mt19937 rng(91);
   const std::vector<ChainProgram> chains = {

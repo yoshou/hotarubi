@@ -95,7 +95,7 @@ module npu_seq #(
   input  logic         dma_stat_rd_beat_i,
   input  logic         dma_stat_wr_beat_i,
   input  logic         dma_stat_denied_i,
-  input  logic         dma_stat_null_i
+  input  logic [1:0]   dma_stat_null_i
 );
 
   localparam logic [7:0] OpDmaLd    = 8'd1;
@@ -451,7 +451,7 @@ module npu_seq #(
   logic         st_in_a [3];
   logic         st_in_b [3];
   logic         st_in_c [3];
-  logic         st_in_d [3];
+  logic [1:0]   st_in_d [3];
   logic         st_clr  [3];
   logic         tr_pend_v;
   logic [127:0] tr_pend_d;
@@ -467,11 +467,11 @@ module npu_seq #(
   assign st_in_a[SrcGemm] = gemm_stat_fed_i;
   assign st_in_b[SrcGemm] = 1'b0;
   assign st_in_c[SrcGemm] = 1'b0;
-  assign st_in_d[SrcGemm] = 1'b0;
+  assign st_in_d[SrcGemm] = 2'd0;
   assign st_in_a[SrcVec]  = vec_stat_issue_i;
   assign st_in_b[SrcVec]  = vec_stat_drain_i;
   assign st_in_c[SrcVec]  = vec_stat_scalar_i;
-  assign st_in_d[SrcVec]  = vec_stat_pass_i;
+  assign st_in_d[SrcVec]  = {1'b0, vec_stat_pass_i};
   assign st_clr[SrcDma]   = dma_cmd_valid_o;
   assign st_clr[SrcGemm]  = gemm_cmd_valid_o;
   assign st_clr[SrcVec]   = vec_cmd_valid_o;
@@ -501,8 +501,8 @@ module npu_seq #(
           if (st_in_c[i] && st_c[i] != 24'hFFFFFF) begin
             st_c[i] <= st_c[i] + 24'd1;
           end
-          if (st_in_d[i] && st_d[i] != 8'hFF) begin
-            st_d[i] <= st_d[i] + 8'd1;
+          if (st_in_d[i] != 2'd0) begin
+            st_d[i] <= (st_d[i] > 8'hFF - 8'(st_in_d[i])) ? 8'hFF : st_d[i] + 8'(st_in_d[i]);
           end
         end
       end

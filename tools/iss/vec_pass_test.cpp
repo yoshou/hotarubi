@@ -155,6 +155,27 @@ class VecPassTest : public testing::Test {
                     memories_);
   }
 
+  void RunMarkAndSkip(uint32_t quads, uint32_t invisible, bool overlap) {
+    Fill(0, quads);
+    for (uint32_t q = 0; q < invisible; ++q) {
+      memories_.fbuf.at(q).fill(0);
+    }
+    PassFields mark = Copy();
+    mark.wr = 0;
+    mark.ialu = 4;
+    mark.rm = 2;
+    PassFields skip = Copy();
+    skip.rm = 1;
+    std::vector<Word128> program = {encoding::Pass(mark), encoding::Pass(skip)};
+    if (overlap) {
+      PassFields second = skip;
+      second.rd = kSrc2;
+      program.push_back(encoding::Pass(second));
+    }
+    program.push_back(encoding::Ret());
+    Run(program, {0, 400}, 200, quads, 1);
+  }
+
   [[nodiscard]] uint32_t Before(uint32_t word, uint32_t element) const {
     return before_.at(word).at(element);
   }
@@ -757,16 +778,16 @@ TEST_F(VecPassTest, RowMaskSkipsTheRowsAMarkingPassFoundZero) {
     }
   }
   EXPECT_EQ(engine_.Activity().skipped_rows, kQuads - 1);
-  EXPECT_EQ(engine_.Activity().skip_cycles, 2U);
+  EXPECT_EQ(engine_.Activity().skip_cycles, 1U);
   EXPECT_EQ(engine_.Activity().words, (kQuads * kWords) + kWords);
   EXPECT_EQ(engine_.Activity().drains, 2U);
   EXPECT_EQ(engine_.Activity().overlaps, 0U);
 }
 
-TEST_F(VecPassTest, SkipRunsAfterAnIssuedWordCostTheRestartOfTheNextWord) {
+TEST_F(VecPassTest, SkipRunsAfterAnIssuedWordCostHalfTheirQuadsAndTheReads) {
   for (const uint32_t x2 : {0U, 1U}) {
     for (const uint32_t wr : {0U, 1U}) {
-      for (const uint32_t k : {1U, 2U, 3U, 6U}) {
+      for (const uint32_t k : {1U, 2U, 3U, 6U, 10U, 21U}) {
         const uint32_t quads = k + 2;
         Fill(0, quads);
         Fill(50, quads);
@@ -785,10 +806,10 @@ TEST_F(VecPassTest, SkipRunsAfterAnIssuedWordCostTheRestartOfTheNextWord) {
         skip.rm = 1;
         Run({encoding::Pass(mark), encoding::Pass(skip), encoding::Ret()},
             {0, 50}, 100, quads, 1);
-        const uint32_t restart = (1 + x2) * (1 + wr);
+        const uint32_t reads = 1 + x2;
         EXPECT_EQ(engine_.Activity().skipped_rows, k);
         EXPECT_EQ(engine_.Activity().skip_cycles,
-                  std::max(k + restart, kWordCycles) - kWordCycles)
+                  std::max((k / 2) + reads, kWordCycles) - kWordCycles)
             << "x2 " << x2 << " wr " << wr << " run " << k;
       }
     }
@@ -798,7 +819,7 @@ TEST_F(VecPassTest, SkipRunsAfterAnIssuedWordCostTheRestartOfTheNextWord) {
 TEST_F(VecPassTest, TrailingSkipRunsAreHiddenOnlyByADrain) {
   constexpr auto kDrainHidden =
       static_cast<uint32_t>(kOverlapLatencyWords * kWordCycles);
-  for (const uint32_t run : {5U, kDrainHidden + 7}) {
+  for (const uint32_t run : {5U, kDrainHidden + 7, (2 * kDrainHidden) + 15}) {
     for (const bool overlap : {false, true}) {
       const uint32_t quads = run + 1;
       Fill(0, quads);
@@ -820,9 +841,43 @@ TEST_F(VecPassTest, TrailingSkipRunsAreHiddenOnlyByADrain) {
       }
       program.push_back(encoding::Ret());
       Run(program, {0, 300}, 100, quads, 1);
-      const uint32_t drained = std::max(run, kDrainHidden) - kDrainHidden;
+      const uint32_t tail = (run - 1) / 2;
+      const uint32_t drained = std::max(tail, kDrainHidden) - kDrainHidden;
       EXPECT_EQ(engine_.Activity().skip_cycles,
-                overlap ? run + drained : drained)
+                overlap ? tail + drained : drained)
+          << "run " << run << " overlap " << overlap;
+    }
+  }
+}
+
+TEST_F(VecPassTest, SkipRunsAtTheStartOfAPassCostHalfTheirQuads) {
+  for (const uint32_t run : {1U, 2U, 5U, 8U, 101U}) {
+    for (const bool overlap : {false, true}) {
+      RunMarkAndSkip(run + 1, run, overlap);
+      const uint32_t start = (run + 1) / 2;
+      EXPECT_EQ(engine_.Activity().skipped_rows,
+                overlap ? 2 * uint64_t{run} : run);
+      EXPECT_EQ(engine_.Activity().skip_cycles,
+                overlap ? (2 * start) - 1 : start)
+          << "run " << run << " overlap " << overlap;
+    }
+  }
+}
+
+TEST_F(VecPassTest,
+       PassesWithEveryQuadSkippedCostTheStartRunUnlessADrainHidesIt) {
+  constexpr auto kDrainHidden =
+      static_cast<uint32_t>(kOverlapLatencyWords * kWordCycles);
+  for (const uint32_t run : {1U, 2U, 5U, 100U, 101U}) {
+    for (const bool overlap : {false, true}) {
+      RunMarkAndSkip(run, run, overlap);
+      const uint32_t start = (run + 1) / 2;
+      const uint32_t last = overlap ? start - 1 : start;
+      EXPECT_EQ(engine_.Activity().skipped_rows,
+                overlap ? 2 * uint64_t{run} : run);
+      EXPECT_EQ(
+          engine_.Activity().skip_cycles,
+          (overlap ? start : 0) + (std::max(last, kDrainHidden) - kDrainHidden))
           << "run " << run << " overlap " << overlap;
     }
   }

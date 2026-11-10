@@ -463,14 +463,19 @@ struct GatherWeights {
 
 using GatherCoefficients = std::array<FbufWord, kGatherMaxBlocks>;
 
+void CountGatherCoefficients(const GatherWeights& weights,
+                             DmaActivity& activity) {
+  for (uint32_t i = 0; i < weights.blocks; ++i) {
+    CountRead(activity, uint64_t{kFbufElements} * 4 / kBeatBytes);
+  }
+}
+
 GatherCoefficients LoadGatherCoefficients(const Ddr& ddr,
                                           const GatherWeights& weights,
-                                          uint32_t group,
-                                          DmaActivity& activity) {
+                                          uint32_t group) {
   GatherCoefficients w{};
   for (uint32_t i = 0; i < weights.blocks; ++i) {
     std::array<std::byte, size_t{kFbufElements} * 4> chunk{};
-    CountRead(activity, chunk.size() / kBeatBytes);
     ddr.Read(weights.base + (group * 128) + (i * weights.stride), chunk);
     for (uint32_t e = 0; e < kFbufElements; ++e) {
       w.at(i).at(e) = static_cast<uint32_t>(
@@ -479,6 +484,44 @@ GatherCoefficients LoadGatherCoefficients(const Ddr& ddr,
   }
   return w;
 }
+
+class GatherCoefficientBanks {
+ public:
+  GatherCoefficientBanks(const Ddr& ddr, const GatherWeights& weights,
+                         uint32_t groups, DmaActivity& activity)
+      : ddr_(ddr),
+        weights_(weights),
+        groups_(groups),
+        current_(groups),
+        prefetched_(groups),
+        activity_(activity) {}
+
+  const GatherCoefficients& For(uint32_t group) {
+    if (current_ == group) {
+      return coefficients_;
+    }
+    if (prefetched_ != group) {
+      CountGatherCoefficients(weights_, activity_);
+      ++activity_.gather_fetches;
+    }
+    coefficients_ = LoadGatherCoefficients(ddr_, weights_, group);
+    current_ = group;
+    prefetched_ = group + 1 < groups_ ? group + 1 : groups_;
+    if (prefetched_ != groups_) {
+      CountGatherCoefficients(weights_, activity_);
+    }
+    return coefficients_;
+  }
+
+ private:
+  const Ddr& ddr_;
+  GatherWeights weights_;
+  uint32_t groups_;
+  uint32_t current_;
+  uint32_t prefetched_;
+  DmaActivity& activity_;
+  GatherCoefficients coefficients_{};
+};
 
 void AccumulateGatherBlock(uint32_t w, uint32_t bw,
                            std::span<const std::byte> row, uint32_t block,
@@ -613,12 +656,12 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
       .stride = static_cast<uint32_t>((header >> 32) & 0xFFFFU) << 7,
       .blocks = blocks,
   };
-  GatherCoefficients w{};
+  GatherCoefficientBanks banks(
+      ddr, weights, (command.rows + kGatherSlotGroup - 1) / kGatherSlotGroup,
+      activity_);
   std::vector<std::byte> row(((size_t{2} * blocks) + 1) * kBeatBytes);
   for (uint32_t s = 0; s < command.rows; ++s) {
-    if (s % kGatherSlotGroup == 0) {
-      w = LoadGatherCoefficients(ddr, weights, s / kGatherSlotGroup, activity_);
-    }
+    const uint32_t group = s / kGatherSlotGroup;
     for (uint32_t t = 0; t < kTokens; ++t) {
       for (uint32_t k = 0; k < kTokens; ++k) {
         const uint64_t entry =
@@ -628,7 +671,8 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
           ++activity_.null_entries;
           continue;
         }
-        CountRead(activity_, row.size() / kBeatBytes);
+        const GatherCoefficients& w = banks.For(group);
+        activity_.gather_row_beats += row.size() / kBeatBytes;
         ++activity_.gather_rows;
         ddr.Read(UnitAddress(static_cast<uint32_t>(entry)), row);
         for (uint32_t i = 0; i < blocks; ++i) {

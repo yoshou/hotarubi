@@ -444,15 +444,15 @@ void CollectDmaRest(const Event& event, const iss::Statistics& st,
   const double denied = st.c;
   if (event.category == "GACC") {
     const double entries = 16.0 * static_cast<double>(command.rows);
-    const double bursts =
-        Scaled(estimate.read_bursts, estimate.read_beats, st.a);
     const double row_beats = (2.0 * command.row_words) + 1.0;
-    const double groups = std::ceil(command.rows / 8.0);
-    const double other =
-        1.0 + (entries / 2.0) + (groups * command.row_words * 8.0);
+    const auto other = static_cast<double>(estimate.read_beats);
     const double rows = std::max(0.0, (st.a - other) / row_beats);
-    m.gather.Add({entries, rows}, span - fixed - denied - (st.a * read_beat) -
-                                      (bursts * p.dma_read_burst_cycles));
+    m.gather.Add({entries, rows},
+                 span - fixed - denied - (other * read_beat) -
+                     (static_cast<double>(estimate.read_bursts) *
+                      p.dma_read_burst_cycles) -
+                     (static_cast<double>(estimate.gather_fetches) *
+                      p.dma_gather_fetch_cycles));
     return;
   }
   if (command.store && st.b > 0) {
@@ -588,19 +588,20 @@ std::string Residuals(const Analysis& analysis, const Stream& stream,
       const iss::DmaCommand command =
           iss::DecodeDma(stream.instructions.at(event.index).word);
       iss::DmaActivity activity = iss::EstimateDma(command);
-      activity.read_bursts = static_cast<uint64_t>(
-          Scaled(activity.read_bursts, activity.read_beats, st.a));
       activity.write_bursts = static_cast<uint64_t>(
           Scaled(activity.write_bursts, activity.write_beats, st.b));
       if (activity.gather_entries > 0) {
-        const double row_beats = (2.0 * command.row_words) + 1.0;
-        const double other =
-            static_cast<double>(activity.read_beats) -
-            (static_cast<double>(activity.gather_rows) * row_beats);
-        activity.gather_rows = static_cast<uint64_t>(
-            std::max(0.0, (static_cast<double>(st.a) - other) / row_beats));
+        const uint64_t row_beats = (2 * uint64_t{command.row_words}) + 1;
+        const uint64_t rows = st.a > activity.read_beats
+                                  ? (st.a - activity.read_beats) / row_beats
+                                  : 0;
+        activity.gather_rows = rows;
+        activity.gather_row_beats = rows * row_beats;
+      } else {
+        activity.read_bursts = static_cast<uint64_t>(
+            Scaled(activity.read_bursts, activity.read_beats, st.a));
+        activity.read_beats = st.a;
       }
-      activity.read_beats = st.a;
       activity.write_beats = st.b;
       predicted = static_cast<double>(model.Dma(activity).cycles + st.c);
     } else if (event.opcode == kOpVec) {

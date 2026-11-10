@@ -47,7 +47,10 @@ The PL clock is 250 MHz (pl_clk0, IOPLL 2,000 MHz / 8).
 
 - One AXI4 master, 128 bits, INCR bursts of at most 16 beats that do not cross a 4 KB boundary.
 - One instruction at a time.
+- Index lists are read up to 48 beats ahead of their use.
+- Stores issue up to four write bursts ahead of their data beats.
 - The gather-accumulate datapath has 16 lanes.
+- Gather-accumulate requests the coefficients of a slot group when an entry that is not null needs them and none are pending, and requests the next group's coefficients when it starts to use a group's; null entries do not wait for coefficients, and two null entries of one list beat are consumed in one cycle.
 
 ### On-chip memories
 
@@ -341,6 +344,7 @@ RET and NOP have no operands.
 - A PASS waits for the pipeline to drain at its end unless nodrain is set, or unless the next instruction is a PASS and this PASS does not read PBUF at the multiplier while the next one reads PBUF at the pre-adder. In the latter case the next PASS starts while the writes of this one complete, and a read of an FBUF word whose write is still pending waits for the write.
 - A PASS with rm = SET writes RM bit q, for each quad q < rq, with 1 when any element of the words that quad q produces is nonzero and 0 otherwise; the other RM bits are unchanged. It always waits for the pipeline to drain at its end, regardless of nodrain.
 - A PASS with rm = SKIP does nothing for a quad q whose RM bit is 0: no reads, no writes, no reduction; the read and write starts advance as usual. The reduction accumulator index counts the words that are issued. RM is unchanged until the next PASS with rm = SET, and its bits are undefined before the first one.
+- The issue stage passes over up to two skipped quads per cycle and ends a PASS as soon as every remaining quad is skipped.
 - A row context is reducing from the start of a PASS with red in that context until every word of the PASS has been reduced; if the PASS has sc, the context then holds the scalar program until its result is written to RS0 or RS1 of the context. The scalar unit runs one program at a time, in the order the reductions complete.
 - A PASS with red waits at its start until its context is neither reducing nor holding a scalar program, then clears the context's accumulators.
 - A PASS that reads RS0 or RS1 (c0 = RS0, b = RS1, sel = RS0 or RS1) waits at its start while a scalar program of its context is outstanding.
@@ -604,10 +608,12 @@ The simulator assigns each instruction an issue cycle and a completion cycle wit
 | Engine | Cycles |
 |---|---|
 | GEMM | `n8 · (m/32) · kb · 8 + gemm_fixed_cycles` |
-| DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles` |
+| DMA | `dma_fixed_cycles + read beats · dma_read_cycles_per_kilobeat / 1024 + read bursts · dma_read_burst_cycles + write beats · dma_write_cycles_per_kilobeat / 1024 + write bursts · dma_write_burst_cycles + gather entries · dma_gather_entry_cycles + gathered rows · dma_gather_row_cycles + coefficient fetches · dma_gather_fetch_cycles` |
 | VEC | `vec_fixed_cycles + passes · vec_pass_cycles + issue + drain + scalar + SALU · vec_salu_cycles + SMEM · vec_smem_cycles + branches · vec_branch_cycles` |
 
-For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles + skip cycles`, where words counts the issued words, a run of k skipped quads costs k cycles at the start of a PASS, max(0, k + c − 4) cycles between two issued words, where c is the number of FBUF reads of a word (2 with a second operand), doubled when the PASS writes FBUF, and at the end of a PASS k cycles when the PASS does not drain and max(0, k − 40) cycles when it drains, a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit, with the micro-operation counts of the RTL; a PASS or SMEM that needs the context waits the remaining words:
+For gather-accumulate, read beats and bursts count the index list and the coefficients, the beats of gathered rows are counted only in the statistics record, and coefficient fetches are the coefficient requests made while an entry waits for them.
+
+For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles + skip cycles`, where words counts the issued words, a run of k skipped quads costs ⌈k/2⌉ cycles at the start of a PASS, one less when the PASS directly follows a PASS that did not drain, max(0, ⌊k/2⌋ + c − 4) cycles between two issued words, where c is the number of FBUF reads of a word (2 with a second operand), and ⌊(k − 1)/2⌋ cycles at the end of a PASS that does not drain, less 40 and at least 0 at the end of a PASS that drains (a PASS whose quads are all skipped costs the start amount, less 40 and at least 0 when it drains), a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit, with the micro-operation counts of the RTL; a PASS or SMEM that needs the context waits the remaining words:
 
 | Program | Arithmetic | Immediate |
 |---|---:|---:|
@@ -618,7 +624,7 @@ For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_i
 | SUM | 7 | 1 |
 | RN | 12 | 2 |
 
-The statistics of a predicted record are the read and write beats, the cycles between issue and the start of the data phase and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces with statistics records. `hotarubi_trace predict` and `hotarubi_run --device iss` take `--timing NAME=VALUE,...` to override any parameter. The scheduler estimates the cost of an instruction with the same model from the activity implied by its fields (the activity of a fixed VEC operation by executing its ROM program; a RUN command as one pass over its words).
+The statistics of a predicted record are the read and write beats, the cycles between issue and the start of the data phase and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces of both models with statistics records, except vec_word_cycles, vec_transpose_cycles, vec_transpose_tile_cycles and dma_gather_fetch_cycles, which are fitted to Verilator runs of the RTL. `hotarubi_trace predict` and `hotarubi_run --device iss` take `--timing NAME=VALUE,...` to override any parameter. The scheduler estimates the cost of an instruction with the same model from the activity implied by its fields (the activity of a fixed VEC operation by executing its ROM program; a RUN command as one pass over its words).
 
 ### Hazard check
 

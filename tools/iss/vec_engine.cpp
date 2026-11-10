@@ -144,6 +144,24 @@ WordResult ComputeWord(const Pass& pass, const WordOperands& in,
   return result;
 }
 
+uint32_t LeadingSkipCycles(uint32_t run, bool follows_pass) {
+  if (run == 0) {
+    return 0;
+  }
+  return ((run + 1) / 2) - (follows_pass ? 1 : 0);
+}
+
+uint32_t InteriorSkipCycles(uint32_t run, uint32_t reads) {
+  if (run == 0) {
+    return 0;
+  }
+  return std::max((run / 2) + reads, kWordCycles) - kWordCycles;
+}
+
+uint32_t TrailingSkipCycles(uint32_t run) {
+  return run == 0 ? 0 : (run - 1) / 2;
+}
+
 }  // namespace
 
 struct VecEngine::PassState {
@@ -167,6 +185,7 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
   activity_ = {};
   pending_.reset();
   slot_ = 0;
+  follows_pass_ = false;
   ready_slot_.fill(0);
   scalar_free_slot_ = 0;
   Initialize(command);
@@ -176,7 +195,11 @@ void VecEngine::Execute(const VecCommand& command, Memories& memories) {
     memories.log.Read(Mem::kCbuf, pc);
     const Word128 instruction = memories.cbuf.at(pc);
     pc = (pc + 1) & kPcMask;
-    switch (instruction.Field(124, 4)) {
+    const uint32_t kind = instruction.Field(124, 4);
+    if (kind != kKindPass) {
+      follows_pass_ = false;
+    }
+    switch (kind) {
       case kKindPass:
         RunPass(instruction, memories.cbuf.at(pc), memories);
         break;
@@ -329,6 +352,7 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
       ready_slot_.at(pass.ctx) = complete;
     }
   }
+  follows_pass_ = keeps_writes || overlaps;
   if (keeps_writes) {
     in_flight_ |= state.written;
     undrained_ = true;
@@ -350,8 +374,6 @@ void VecEngine::RunQuads(PassState& state, uint32_t quads, uint32_t words,
                          uint32_t n8, bool drains, Memories& memories) {
   const Pass& pass = state.pass;
   const uint32_t reads = pass.x2_en ? 2 : 1;
-  const uint32_t restart =
-      Target(pass.wr) == WriteTarget::kFbuf ? 2 * reads : reads;
   uint64_t skip_cycles = 0;
   uint32_t run = 0;
   bool issued = false;
@@ -360,8 +382,8 @@ void VecEngine::RunQuads(PassState& state, uint32_t quads, uint32_t words,
       ++run;
       ++activity_.skipped_rows;
     } else {
-      skip_cycles +=
-          issued ? std::max(run + restart, kWordCycles) - kWordCycles : run;
+      skip_cycles += issued ? InteriorSkipCycles(run, reads)
+                            : LeadingSkipCycles(run, follows_pass_);
       run = 0;
       issued = true;
       activity_.words += words;
@@ -382,8 +404,9 @@ void VecEngine::RunQuads(PassState& state, uint32_t quads, uint32_t words,
   }
   constexpr auto kDrainHidden =
       static_cast<uint32_t>(kOverlapLatencyWords * kWordCycles);
-  skip_cycles +=
-      issued && drains ? std::max(run, kDrainHidden) - kDrainHidden : run;
+  const uint32_t tail =
+      issued ? TrailingSkipCycles(run) : LeadingSkipCycles(run, follows_pass_);
+  skip_cycles += drains ? std::max(tail, kDrainHidden) - kDrainHidden : tail;
   activity_.skip_cycles += skip_cycles;
   slot_ += (skip_cycles + kWordCycles - 1) / kWordCycles;
 }

@@ -52,12 +52,12 @@ module dma_engine (
   output logic          stat_rd_beat_o,
   output logic          stat_wr_beat_o,
   output logic          stat_denied_o,
-  output logic          stat_null_o
+  output logic [1:0]    stat_null_o
 );
 
   localparam int RfDepth = 128;
   localparam int WbDepth = 64;
-  localparam int IbDepth = 32;
+  localparam int IbDepth = 64;
   localparam int UfDepth = 64;
   localparam int WqDepth = 64;
 
@@ -98,12 +98,12 @@ module dma_engine (
   assign cmd_ready_o = (st == SIdle);
   assign busy_o      = (st != SIdle);
 
-  logic ga_null;
+  logic [1:0] ga_null;
 
   assign stat_rd_beat_o = m_axi_rvalid_i;
   assign stat_wr_beat_o = m_axi_wvalid_o && m_axi_wready_i;
   assign stat_denied_o  = (rd_req_o && !rd_grant_i) || (wr_req_o && !wr_grant_i);
-  assign stat_null_o    = ga_null || (gi_step && gi_null);
+  assign stat_null_o    = ga_null + {1'b0, gi_step && gi_null};
 
   always_comb begin
     case (c_mem)
@@ -261,7 +261,7 @@ module dma_engine (
   logic                     lf_valid, lf_ready, lf_done;
   logic [31:0]              lf_pc;
   logic [13:0]              lf_left;
-  logic [5:0]               lf_inflight;
+  logic [6:0]               lf_inflight;
   logic [4:0]               lf_beats;
   logic [8:0]               lf_to4k;
   logic                     ib_push, ib_pop, ib_empty, ibr_load, ib_afull;
@@ -278,7 +278,7 @@ module dma_engine (
   end
 
   assign lf_valid = run && (c_idx || c_gacc) && !lf_done &&
-                    (6'(ib_count) + lf_inflight <= 6'(IbDepth - 16));
+                    (7'(ib_count) + lf_inflight <= 7'(IbDepth - 16));
 
   sfifo #(
     .Width      (128),
@@ -332,7 +332,7 @@ module dma_engine (
       lf_inflight <= '0;
       lf_left     <= c_gacc ? 14'({c_rows, 3'b000} + 15'd1) : 14'((rows_w + 24'd3) >> 2);
     end else begin
-      lf_inflight <= lf_inflight + ((lf_valid && lf_ready) ? 6'(lf_beats) : 6'd0) - 6'(ib_push);
+      lf_inflight <= lf_inflight + ((lf_valid && lf_ready) ? 7'(lf_beats) : 7'd0) - 7'(ib_push);
       if (lf_valid && lf_ready) begin
         lf_pc   <= lf_pc + 32'({lf_beats, 4'b0});
         lf_left <= lf_left - 14'(lf_beats);
@@ -980,7 +980,7 @@ module dma_engine (
   logic                     wb_push, wb_pop, wb_empty, wb_afull;
   logic [127:0]             wb_din, wb_dout;
   logic [$clog2(WbDepth):0] wb_count;
-  logic                     rd_can;
+  logic                     rd_can, ser_take;
 
   assign st_word_idx = c_st && c_idx && !c_row;
   assign st_tok_idx  = c_st && c_idx && c_row;
@@ -991,6 +991,7 @@ module dma_engine (
   assign rd_skip     = st_word_idx && rd_can && !ufs_empty && ufs_dout;
   assign rd_req_o    = rd_can && (!st_word_idx || (!ufs_empty && !ufs_dout));
   assign rd_mem_o    = c_mem;
+  assign ser_take    = !c_row && hold_v && (!ser_v || (wb_push && scnt == bpw - 1'b1));
 
   logic [19:0] rd_addr_r;
 
@@ -1029,7 +1030,7 @@ module dma_engine (
         inflight <= 1'b0;
       end
       if (!c_row) begin
-        if (!ser_v && hold_v) begin
+        if (ser_take) begin
           ser_v  <= 1'b1;
           scnt   <= '0;
           hold_v <= 1'b0;
@@ -1051,7 +1052,7 @@ module dma_engine (
     if (!setup_pulse && rdv[2]) begin
       hold <= rd_data_i;
     end
-    if (!setup_pulse && !c_row && !ser_v && hold_v) begin
+    if (!setup_pulse && ser_take) begin
       ser <= {96'd0, hold};
     end
   end
@@ -1114,15 +1115,23 @@ module dma_engine (
     .count_o(wb_count)
   );
 
-  logic       w_active;
+  logic       w_active, wl_full, aw_fire;
   logic [3:0] w_len, w_cnt;
   logic [7:0] aw_cnt, b_cnt;
+  logic [3:0] wl_mem [4];
+  logic [2:0] wl_wp, wl_rp;
+  logic [6:0] w_avail;
 
+  assign w_active        = wl_wp != wl_rp;
+  assign wl_full         = (wl_wp[1:0] == wl_rp[1:0]) && (wl_wp[2] != wl_rp[2]);
+  assign w_len           = wl_mem[wl_rp[1:0]];
+  assign aw_fire         = m_axi_awvalid_o && m_axi_awready_i;
   assign m_axi_awaddr_o  = b_addr;
   assign m_axi_awlen_o   = {4'b0, b_len};
   assign m_axi_awsize_o  = 3'b100;
   assign m_axi_awburst_o = 2'b01;
-  assign m_axi_awvalid_o = b_valid && c_st && !w_active && (wb_count > {3'b0, b_len});
+  assign m_axi_awvalid_o = b_valid && c_st && !wl_full &&
+                           (w_avail > {3'b0, b_len});
   assign b_ready         = c_st ? (m_axi_awvalid_o && m_axi_awready_i) : (ar_data && m_axi_arready_i);
   assign m_axi_wvalid_o  = w_active;
   assign m_axi_wdata_o   = wb_dout;
@@ -1133,32 +1142,42 @@ module dma_engine (
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      w_active <= 1'b0;
-      w_len    <= '0;
-      w_cnt    <= '0;
-      aw_cnt   <= '0;
-      b_cnt    <= '0;
+      wl_wp   <= '0;
+      wl_rp   <= '0;
+      w_cnt   <= '0;
+      w_avail <= '0;
+      aw_cnt  <= '0;
+      b_cnt   <= '0;
     end else if (setup_pulse) begin
-      w_active <= 1'b0;
-      w_cnt    <= '0;
-      aw_cnt   <= '0;
-      b_cnt    <= '0;
+      wl_wp   <= '0;
+      wl_rp   <= '0;
+      w_cnt   <= '0;
+      w_avail <= '0;
+      aw_cnt  <= '0;
+      b_cnt   <= '0;
     end else begin
-      if (m_axi_awvalid_o && m_axi_awready_i) begin
-        w_active <= 1'b1;
-        w_len    <= b_len;
-        w_cnt    <= '0;
-        aw_cnt   <= aw_cnt + 1'b1;
+      if (aw_fire) begin
+        wl_wp  <= wl_wp + 3'd1;
+        aw_cnt <= aw_cnt + 1'b1;
       end
+      w_avail <= w_avail + 7'(wb_push) - (aw_fire ? 7'(b_len) + 7'd1 : 7'd0);
       if (wb_pop) begin
-        w_cnt <= w_cnt + 1'b1;
         if (m_axi_wlast_o) begin
-          w_active <= 1'b0;
+          w_cnt <= '0;
+          wl_rp <= wl_rp + 3'd1;
+        end else begin
+          w_cnt <= w_cnt + 1'b1;
         end
       end
       if (m_axi_bvalid_i) begin
         b_cnt <= b_cnt + 1'b1;
       end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (aw_fire) begin
+      wl_mem[wl_wp[1:0]] <= b_len;
     end
   end
 
@@ -1170,6 +1189,6 @@ module dma_engine (
   logic unused_dma;
 
   assign unused_dma = ^{m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, ufs_count, rf_afull,
-                        rf_count, tf_count, wq_afull, wq_count, wf_count, list_beats};
+                        rf_count, tf_count, wq_afull, wq_count, wf_count, list_beats, wb_count};
 
 endmodule

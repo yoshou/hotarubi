@@ -78,11 +78,13 @@ Cost CostModel::Dma(const DmaActivity& activity) const {
       ScaledCycles(activity.write_beats, p.dma_write_cycles_per_kilobeat) +
       (activity.write_bursts * p.dma_write_burst_cycles) +
       (activity.gather_entries * p.dma_gather_entry_cycles) +
-      (activity.gather_rows * p.dma_gather_row_cycles);
-  cost.statistics = {.a = Clamp32(activity.read_beats),
-                     .b = Clamp32(activity.write_beats),
-                     .c = 0,
-                     .d = Clamp32(activity.null_entries)};
+      (activity.gather_rows * p.dma_gather_row_cycles) +
+      (activity.gather_fetches * p.dma_gather_fetch_cycles);
+  cost.statistics = {
+      .a = Clamp32(activity.read_beats + activity.gather_row_beats),
+      .b = Clamp32(activity.write_beats),
+      .c = 0,
+      .d = Clamp32(activity.null_entries)};
   return cost;
 }
 
@@ -143,11 +145,11 @@ DmaActivity EstimateDma(const DmaCommand& command) {
     const uint64_t row_beats = (2 * command.row_words) + 1;
     activity.gather_entries = entries;
     activity.gather_rows = entries;
-    activity.read_beats = 1 + (entries / 2) + (groups * command.row_words * 8) +
-                          (entries * row_beats);
-    activity.read_bursts = Bursts(1 + (entries / 2)) +
-                           (groups * command.row_words) +
-                           (entries * Bursts(row_beats));
+    activity.gather_row_beats = entries * row_beats;
+    activity.gather_fetches = entries == 0 ? 0 : 1;
+    activity.read_beats = 1 + (entries / 2) + (groups * command.row_words * 8);
+    activity.read_bursts =
+        Bursts(1 + (entries / 2)) + (groups * command.row_words);
     return activity;
   }
   if (units == 0) {
@@ -203,7 +205,7 @@ DdrExtent EstimateDdrExtent(const DmaCommand& command) {
 std::expected<TimingParameters, std::string> ParseTiming(
     std::string_view assignments, TimingParameters base) {
   TimingParameters p = base;
-  const std::array<std::pair<std::string_view, uint32_t*>, 24> fields = {
+  const std::array<std::pair<std::string_view, uint32_t*>, 25> fields = {
       {{"start_cycles", &p.start_cycles},
        {"gemm_fixed_cycles", &p.gemm_fixed_cycles},
        {"dma_fixed_cycles", &p.dma_fixed_cycles},
@@ -213,6 +215,7 @@ std::expected<TimingParameters, std::string> ParseTiming(
        {"dma_write_burst_cycles", &p.dma_write_burst_cycles},
        {"dma_gather_entry_cycles", &p.dma_gather_entry_cycles},
        {"dma_gather_row_cycles", &p.dma_gather_row_cycles},
+       {"dma_gather_fetch_cycles", &p.dma_gather_fetch_cycles},
        {"vec_fixed_cycles", &p.vec_fixed_cycles},
        {"vec_pass_cycles", &p.vec_pass_cycles},
        {"vec_word_cycles", &p.vec_word_cycles},

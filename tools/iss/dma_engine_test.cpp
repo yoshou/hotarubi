@@ -642,6 +642,34 @@ TEST_F(GatherTest, AccumulatesWeightedRows) {
   }
 }
 
+TEST_F(GatherTest, ReadsCoefficientsOnlyForSlotGroupsWithRows) {
+  WriteFeatures();
+  const List list{.offset = 0x30000,
+                  .slots = 24,
+                  .w_area = 0x40000,
+                  .stride = 4,
+                  .quad_words = 3};
+  WriteList(list);
+  for (uint32_t s = 0; s < list.slots; ++s) {
+    for (uint32_t e = 0; e < 16; ++e) {
+      const uint32_t entry =
+          s / 8 == 1 ? Entry(kFeatures + ((e % kFeatureRows) * kRowBytes))
+                     : kNull;
+      Put(list.offset + 16 + (((s * 16) + e) * 8), entry, 4);
+    }
+  }
+  DmaCommand command = Load(0, list.offset, kDst, list.slots, kBlocks, kQuad);
+  command.mode = 3;
+  Execute(command);
+  const DmaActivity& activity = engine_.Activity();
+  EXPECT_EQ(activity.gather_entries, 24U * 16);
+  EXPECT_EQ(activity.gather_rows, 8U * 16);
+  EXPECT_EQ(activity.null_entries, 16U * 16);
+  EXPECT_EQ(activity.gather_row_beats, 8U * 16 * ((2 * kBlocks) + 1));
+  EXPECT_EQ(activity.gather_fetches, 1U);
+  EXPECT_EQ(activity.read_beats, 1U + (24 * 8) + (2 * kBlocks * 8));
+}
+
 TEST_F(DmaEngineTest, EmptyTransfersChangeNothing) {
   Randomize(0, 4096);
   const Memories before = memories_;
