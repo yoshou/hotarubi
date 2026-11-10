@@ -56,7 +56,8 @@ enum class CompareLeft : uint8_t {
   kX = 0,
   kX2 = 1,
   kColumn = 2,
-  kPosition = 3
+  kPosition = 3,
+  kRowColumn = 4,
 };
 enum class Select : uint8_t {
   kNone = 0,
@@ -105,7 +106,6 @@ struct Pass {
   Nonlinear nl = Nonlinear::kNone;
   PostOp po = PostOp::kAdd;
   bool pv = false;
-  bool mask_en = false;
   Reduction red = Reduction::kNone;
   WriteTarget wr = WriteTarget::kNone;
   ScalarFn sf = ScalarFn::kNone;
@@ -142,6 +142,7 @@ struct LaneInputs {
   uint32_t pbuf = 0;
   uint32_t t = 0;
   uint32_t l = 0;
+  uint32_t w = 0;
   uint32_t imm = 0;
   uint32_t imm2 = 0;
 };

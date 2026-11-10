@@ -10,6 +10,7 @@
 #include <tuple>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "isa.hpp"
 #include "machine.hpp"
 #include "program.hpp"
@@ -19,11 +20,7 @@
 namespace hotarubi::compiler {
 namespace {
 
-constexpr int kEngines = 3;
-constexpr uint32_t kOpDmaLoad = 1;
-constexpr uint32_t kOpDmaStore = 2;
-constexpr uint32_t kOpVec = 5;
-constexpr uint32_t kModeGather = 3;
+constexpr int kEngines = isa::kEngines;
 
 struct Node {
   int engine = 0;
@@ -47,11 +44,11 @@ class Estimator {
   explicit Estimator(const iss::TimingParameters& timing) : model_(timing) {}
 
   uint64_t Cycles(const iss::Word128& word) {
-    if (word.Field(120, 8) != kOpVec) {
+    if (word.Field(isa::kOpcode) != isa::kOpVec) {
       return iss::EstimateCycles(word, model_);
     }
     const iss::VecCommand command = iss::DecodeVec(word);
-    const auto key = std::make_tuple(command.op, command.quantize,
+    const auto key = std::make_tuple(command.entry, command.quantize,
                                      command.rows_q, command.n8, command.aux);
     auto found = vec_.find(key);
     if (found == vec_.end()) {
@@ -72,15 +69,15 @@ Node Describe(const Program& program, size_t index, Estimator* estimator) {
   Node node;
   node.engine = static_cast<int>(engine);
   node.barrier = engine == Engine::kCtrl || engine == Engine::kWait;
-  const uint32_t opcode = word.Field(120, 8);
-  if (opcode == kOpDmaLoad || opcode == kOpDmaStore) {
+  const uint32_t opcode = word.Field(isa::kOpcode);
+  if (opcode == isa::kOpDmaLoad || opcode == isa::kOpDmaStore) {
     const iss::DmaCommand command = iss::DecodeDma(word);
     node.dma = true;
     node.store = command.store;
-    node.gather = !command.store && command.mode == kModeGather;
+    node.gather = command.kind == isa::dma::kKindGacc;
     node.extent = iss::EstimateDdrExtent(command);
-  } else if (opcode == kOpVec) {
-    node.run = iss::DecodeVec(word).op >= iss::kVecRun;
+  } else if (opcode == isa::kOpVec) {
+    node.run = !iss::RunsLibraryProgram(iss::DecodeVec(word));
   }
   if (estimator != nullptr && !node.barrier) {
     node.cost = std::max<uint64_t>(estimator->Cycles(word), 1);

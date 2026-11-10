@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "hotarubi/runtime.hpp"
 #include "trace_record.hpp"
@@ -221,13 +222,12 @@ std::expected<Stream, std::string> LoadStream(const LoadedProgram& loaded,
       bytes.at(j) = program.image.at(at + j);
     }
     const iss::Word128 word = iss::LoadWord128(bytes);
-    const uint32_t opcode = word.Field(120, 8);
+    const uint32_t opcode = word.Field(isa::kOpcode);
     stream.instructions.push_back({.index = i,
                                    .word = word,
                                    .opcode = opcode,
                                    .source = iss::SourceOf(opcode),
-                                   .wait = word.Field(116, 4),
-                                   .flags = word.Field(112, 4),
+                                   .wait = word.Field(isa::kWait),
                                    .tag = {},
                                    .note = {},
                                    .reads = {},

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "bench_bus.hpp"
+#include "hotarubi/isa.hpp"
 #include "npu_bench.hpp"
 #include "npu_isa.hpp"
 #include "scripted_bus.hpp"
@@ -131,7 +132,7 @@ TEST(UioBusTest, AccessesRegistersAs32BitWords) {
 
 constexpr uint32_t kInput = tb::Ddr::kBase + 0x1000U;
 constexpr uint32_t kOutput = tb::Ddr::kBase + 0x2000U;
-constexpr uint32_t kScale = 4;
+constexpr uint32_t kScale = isa::library::kScale;
 constexpr uint32_t kTwo = 0x40000000U;
 
 std::vector<tb::Instruction> DoubleWord() {
@@ -141,7 +142,7 @@ std::vector<tb::Instruction> DoubleWord() {
                        .rows = 1,
                        .row_words = 1,
                        .ddr_stride = 128}),
-          tb::Vec({.op = kScale,
+          tb::Vec({.entry = kScale,
                    .src = 0,
                    .dst = 1,
                    .rows_q = 1,
@@ -266,7 +267,7 @@ TEST(DeviceTest, ReportsAnIllegalInstruction) {
   tb::NpuBench bench;
   BenchBus bus(bench);
   Device device(bus);
-  const std::vector<tb::Instruction> program = {tb::Nop(), tb::Header(3, 0, 0),
+  const std::vector<tb::Instruction> program = {tb::Nop(), tb::Header(3, 0),
                                                 tb::Halt()};
   bench.LoadProgram(program, tb::Ddr::kBase);
   const auto counters =

@@ -150,8 +150,8 @@ TEST(DmaTest, FbufRowFormatIndexListWithNullTokens) {
                               .onchip = 20,
                               .rows = 3,
                               .row_words = 4,
-                              .tok = kTok,
-                              .flags = kDmaFlagIndex | kDmaFlagRow}),
+                              .kind = DmaKind::kRowIndexed,
+                              .tok = kTok}),
                      DmaStore({.ddr_addr = kDstArea,
                                .mem = Mem::kFbuf,
                                .onchip = 20,
@@ -166,64 +166,6 @@ TEST(DmaTest, FbufRowFormatIndexListWithNullTokens) {
                 tokens[i][ch])
           << "token " << i << " channel " << ch;
     }
-  }
-}
-
-TEST(DmaTest, StoreIgnoresTheIndexFlag) {
-  std::mt19937 rng(24);
-  NpuBench bench(24);
-  Ddr& ddr = bench.Memory();
-  constexpr uint32_t kStride = 0x400;
-  std::vector<FbufWord> words;
-  for (uint32_t e = 0; e < 6; ++e) {
-    words.push_back(RandomFbufWord(rng));
-    WriteFbuf(ddr, kSrcArea + (e * kFbufWordBytes), words.back());
-  }
-  RunProgram(bench, {DmaLoad({.ddr_addr = kSrcArea,
-                              .mem = Mem::kFbuf,
-                              .onchip = 50,
-                              .rows = 1,
-                              .row_words = 6}),
-                     DmaStore({.ddr_addr = kDstArea,
-                               .mem = Mem::kFbuf,
-                               .onchip = 50,
-                               .rows = 2,
-                               .row_words = 3,
-                               .ddr_stride = kStride,
-                               .flags = kDmaFlagIndex}),
-                     Halt()});
-  for (uint32_t e = 0; e < words.size(); ++e) {
-    EXPECT_EQ(ReadFbuf(ddr, kDstArea + ((e / 3) * kStride) +
-                                ((e % 3) * kFbufWordBytes)),
-              words[e])
-        << "word " << e;
-  }
-}
-
-TEST(DmaTest, LoadIgnoresTheIndexFlagWithoutRowFormat) {
-  std::mt19937 rng(25);
-  NpuBench bench(25);
-  Ddr& ddr = bench.Memory();
-  std::vector<AbufWord> words;
-  for (uint32_t e = 0; e < 2; ++e) {
-    words.push_back(RandomAbufWord(rng));
-    WriteAbuf(ddr, kSrcArea + (e * kAbufWordBytes), words.back());
-  }
-  RunProgram(bench, {DmaLoad({.ddr_addr = kSrcArea,
-                              .mem = Mem::kAbuf,
-                              .onchip = 10,
-                              .rows = 1,
-                              .row_words = 2,
-                              .flags = kDmaFlagIndex}),
-                     DmaStore({.ddr_addr = kDstArea,
-                               .mem = Mem::kAbuf,
-                               .onchip = 10,
-                               .rows = 1,
-                               .row_words = 2}),
-                     Halt()});
-  for (uint32_t e = 0; e < words.size(); ++e) {
-    EXPECT_EQ(ReadAbuf(ddr, kDstArea + (e * kAbufWordBytes)), words[e])
-        << "word " << e;
   }
 }
 
@@ -299,8 +241,8 @@ TEST(DmaTest, AbufRowFormatLoadPacksTokensIntoQuads) {
                        .rows = kRows,
                        .row_words = kTokensPerRow,
                        .ddr_stride = kStride,
-                       .tok = kTok,
-                       .flags = kDmaFlagRow}),
+                       .kind = DmaKind::kRow,
+                       .tok = kTok}),
               DmaStore({.ddr_addr = kDstArea,
                         .mem = Mem::kAbuf,
                         .onchip = 33,
@@ -341,8 +283,8 @@ TEST(DmaTest, AbufRowFormatStoreUnpacksQuads) {
                         .onchip = 0,
                         .rows = 1,
                         .row_words = kTokens,
-                        .tok = kTok,
-                        .flags = kDmaFlagRow}),
+                        .kind = DmaKind::kRow,
+                        .tok = kTok}),
               Halt()});
   for (uint32_t i = 0; i < kTokens; ++i) {
     const uint32_t base = kDstArea + (i * token_bytes);
@@ -385,8 +327,8 @@ TEST(DmaTest, FbufRowFormatLoadAndStore) {
                               .rows = kRows,
                               .row_words = kTokensPerRow,
                               .ddr_stride = kStride,
-                              .tok = kTok,
-                              .flags = kDmaFlagRow}),
+                              .kind = DmaKind::kRow,
+                              .tok = kTok}),
                      DmaStore({.ddr_addr = kDstArea,
                                .mem = Mem::kFbuf,
                                .onchip = 20,
@@ -398,8 +340,8 @@ TEST(DmaTest, FbufRowFormatLoadAndStore) {
                                .rows = 2,
                                .row_words = 6,
                                .ddr_stride = 0x800,
-                               .tok = kTok,
-                               .flags = kDmaFlagRow}),
+                               .kind = DmaKind::kRow,
+                               .tok = kTok}),
                      Halt()});
   for (uint32_t i = 0; i < tokens.size(); ++i) {
     const uint32_t quad = i / 4;
@@ -445,8 +387,8 @@ TEST(DmaTest, AbufRowFormatIndexListWithNullToken) {
                        .onchip = 64,
                        .rows = 2,
                        .row_words = 4,
-                       .tok = kTok,
-                       .flags = kDmaFlagIndex | kDmaFlagRow}),
+                       .kind = DmaKind::kRowIndexed,
+                       .tok = kTok}),
               DmaStore({.ddr_addr = kDstArea,
                         .mem = Mem::kAbuf,
                         .onchip = 64,

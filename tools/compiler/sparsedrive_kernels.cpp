@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "hotarubi/exact.hpp"
+#include "hotarubi/isa.hpp"
 #include "isa.hpp"
 #include "tensors.hpp"
 #include "vprog.hpp"
@@ -1082,9 +1083,11 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
           .rnw = 12,
           .rn8 = 12,
           .rimm2 = 5,
-          .mask_en = true,
           .red = vp::Reduce::kMax,
-          .sc = vp::kMax});
+          .sc = vp::kMax,
+          .cmp = vp::Cmp::kLt,
+          .cmp_left = vp::CmpLeft::kRowColumn,
+          .sel = vp::Sel::kNull});
   a.Alu(vp::Salu::kAnd, 18, 14, 0, 7);
   a.Emit({.rx = 13,
           .rd = 17,
@@ -1413,9 +1416,11 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
           .rnw = 12,
           .rn8 = 12,
           .rimm2 = 5,
-          .mask_en = true,
           .red = vp::Reduce::kMax,
-          .sc = vp::kMax});
+          .sc = vp::kMax,
+          .cmp = vp::Cmp::kLt,
+          .cmp_left = vp::CmpLeft::kRowColumn,
+          .sel = vp::Sel::kNull});
   a.Emit({.rx = 18,
           .rd = 22,
           .rq = 11,
@@ -2223,9 +2228,11 @@ vp::Assembler IqueueState(uint32_t ncls) {
           .rnw = 28,
           .rn8 = 12,
           .rimm2 = 5,
-          .mask_en = true,
           .red = vp::Reduce::kMax,
-          .sc = vp::kMax});
+          .sc = vp::kMax,
+          .cmp = vp::Cmp::kLt,
+          .cmp_left = vp::CmpLeft::kRowColumn,
+          .sel = vp::Sel::kNull});
   a.Emit({.rx = 31,
           .rd = 31,
           .rq = 11,
@@ -2484,6 +2491,9 @@ vp::Assembler IqueueEgo() {
 
 uint32_t CbufImage::Add(const std::string& name,
                         const vprog::Assembler& program) {
+  while (words_.size() % isa::vec::kEntryWords != 0) {
+    words_.push_back(vprog::EncodeNop());
+  }
   const auto pc = static_cast<uint32_t>(vprog::kRomWords + words_.size());
   const std::vector<Instruction> words = program.Words(pc);
   words_.insert(words_.end(), words.begin(), words.end());

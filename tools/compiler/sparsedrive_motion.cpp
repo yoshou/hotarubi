@@ -531,11 +531,12 @@ void MotionHead::QuantRows(const Rows& rows, uint32_t n, uint32_t abuf,
       LoadRows(*second, tile.i0, 4 * rq, kSecond[tile.t % 2],
                std::format("{} ld 2nd t{}", note, tile.t));
       if (abuf_plain.has_value()) {
-        program_->Vec({.op = VecOp::kQuant,
+        program_->Vec({.op = VecOp::kCopy,
                        .src = slot,
                        .dst = *abuf_plain + ((tile.i0 / 4) * blocks),
                        .rows_q = rq,
-                       .n8 = words},
+                       .n8 = words,
+                       .q = true},
                       std::format("{} Q(plain) t{}", note, tile.t));
       }
       program_->Vec({.op = VecOp::kAdd,
@@ -546,11 +547,12 @@ void MotionHead::QuantRows(const Rows& rows, uint32_t n, uint32_t abuf,
                      .n8 = words},
                     std::format("{} add t{}", note, tile.t));
     }
-    program_->Vec({.op = VecOp::kQuant,
+    program_->Vec({.op = VecOp::kCopy,
                    .src = slot,
                    .dst = abuf + ((tile.i0 / 4) * blocks),
                    .rows_q = rq,
-                   .n8 = words},
+                   .n8 = words,
+                   .q = true},
                   std::format("{} quant t{}", note, tile.t));
   }
 }
@@ -599,33 +601,36 @@ void MotionHead::ProjStream(const Lin& lin, const Rows& rows_a,
     const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
     LoadRows(rows_a, tile.i0, tile.m, slot,
              std::format("{} ld a t{}", note, tile.t));
-    program_->Vec({.op = VecOp::kQuant,
+    program_->Vec({.op = VecOp::kCopy,
                    .src = slot,
                    .dst = kA1,
                    .rows_q = rq,
-                   .n8 = kNwD},
+                   .n8 = kNwD,
+                   .q = true},
                   std::format("{} Q(a) t{}", note, tile.t));
     std::vector<Piece> pieces;
     uint32_t astride = kKbD;
     if (pre != nullptr) {
       pre->Gemm(*program_, kA1, kKbD, tile.m, 2048, 1024,
                 std::format("{} pre t{}", note, tile.t));
-      program_->Vec({.op = VecOp::kQuant,
+      program_->Vec({.op = VecOp::kCopy,
                      .src = 2048,
                      .dst = kAf,
                      .rows_q = rq,
-                     .n8 = pre->Groups()},
+                     .n8 = pre->Groups(),
+                     .q = true},
                     std::format("{} Q(pre) t{}", note, tile.t));
       astride = pre->Groups() / 4;
       pieces = {{.a_offset = kAf, .kb_offset = 0, .kb = astride}};
     } else if (rows_b != nullptr) {
       LoadRows(*rows_b, tile.i0, tile.m, 2048,
                std::format("{} ld b t{}", note, tile.t));
-      program_->Vec({.op = VecOp::kQuant,
+      program_->Vec({.op = VecOp::kCopy,
                      .src = 2048,
                      .dst = kA2,
                      .rows_q = rq,
-                     .n8 = kNwD},
+                     .n8 = kNwD,
+                     .q = true},
                     std::format("{} Q(b) t{}", note, tile.t));
       pieces = {{.a_offset = kA1, .kb_offset = 0, .kb = kKbD},
                 {.a_offset = kA2, .kb_offset = kKbD, .kb = kKbD}};
@@ -685,11 +690,12 @@ void MotionHead::OutProj(const MotionLayer& layer, std::string_view note,
     program_->Load(Words(ob_ + (uint64_t{q0} * nwq * kWordF), Mem::kFbuf, slot,
                          (tile.m / 4) * nwq),
                    std::format("{} ld O t{}", note, tile.t));
-    program_->Vec({.op = VecOp::kQuant,
+    program_->Vec({.op = VecOp::kCopy,
                    .src = slot,
                    .dst = ao + (q0 * kbq),
                    .rows_q = tile.m / 4,
-                   .n8 = nwq},
+                   .n8 = nwq,
+                   .q = true},
                   std::format("{} Q(O) t{}", note, tile.t));
   }
   const Lin& op = layer.attn[3];
@@ -731,11 +737,12 @@ void MotionHead::OutProj(const MotionLayer& layer, std::string_view note,
                        .rows_q = tile.m / 4,
                        .n8 = kNwD},
                       std::format("{} + identity h{} t{}", note, half, tile.t));
-        program_->Vec({.op = VecOp::kQuant,
+        program_->Vec({.op = VecOp::kCopy,
                        .src = c,
                        .dst = af[half] + (q0 * kKbD),
                        .rows_q = tile.m / 4,
-                       .n8 = kNwD},
+                       .n8 = kNwD,
+                       .q = true},
                       std::format("{} Q h{} t{}", note, half, tile.t));
       }
     }
@@ -1008,11 +1015,12 @@ void MotionHead::Refine(const MotionLayer& layer, std::string_view note) {
       const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
       LoadRows(sine, chunk.i0 + tile.i0, tile.m, slot,
                std::format("{} ld sine ch{} t{}", note, chunk.t, tile.t));
-      program_->Vec({.op = VecOp::kQuant,
+      program_->Vec({.op = VecOp::kCopy,
                      .src = slot,
                      .dst = 4096 + ((tile.i0 / 4) * kKbD),
                      .rows_q = tile.m / 4,
-                     .n8 = kNwD},
+                     .n8 = kNwD,
+                     .q = true},
                     std::format("{} Q(sine) t{}", note, tile.t));
     }
     p_.mae0.Load(*program_, 0, std::format("{} mae0", note));
@@ -1062,11 +1070,12 @@ void MotionHead::Refine(const MotionLayer& layer, std::string_view note) {
                      .rows_q = rq,
                      .n8 = kNwD},
                     std::format("{} + xE t{}", note, tile.t));
-      program_->Vec({.op = VecOp::kQuant,
+      program_->Vec({.op = VecOp::kCopy,
                      .src = 0,
                      .dst = q0 * kKbD,
                      .rows_q = rq,
-                     .n8 = kNwD},
+                     .n8 = kNwD,
+                     .q = true},
                     std::format("{} Q(motion_query) t{}", note, tile.t));
     }
     Mlp(0, chunk.m, layer, "mcls", true, mcls, chunk.i0, std::string(note));
@@ -1084,19 +1093,21 @@ void MotionHead::Refine(const MotionLayer& layer, std::string_view note) {
                  .rows_q = kPlanQueriesPadded / 4,
                  .n8 = kNwD},
                 std::format("{} plan_query", note));
-  program_->Vec({.op = VecOp::kQuant,
+  program_->Vec({.op = VecOp::kCopy,
                  .src = 0,
                  .dst = 0,
                  .rows_q = kPlanQueriesPadded / 4,
-                 .n8 = kNwD},
+                 .n8 = kNwD,
+                 .q = true},
                 std::format("{} Q(plan_query)", note));
   Mlp(0, kPlanQueriesPadded, layer, "pcls", true, pcls, 0, std::string(note));
   Mlp(0, kPlanQueriesPadded, layer, "preg", false, preg, 0, std::string(note));
-  program_->Vec({.op = VecOp::kQuant,
+  program_->Vec({.op = VecOp::kCopy,
                  .src = 1024,
                  .dst = 0,
                  .rows_q = kPlanQueriesPadded / 4,
-                 .n8 = kNwD},
+                 .n8 = kNwD,
+                 .q = true},
                 std::format("{} Q(xE[900])", note));
   Mlp(0, 32, layer, "pst", false, pst, 0, std::string(note));
 }
@@ -1173,9 +1184,7 @@ void MotionHead::AnchorEncoderOn(const Rows& a_rows, const Rows& e_out,
                .rows = tile.m,
                .row_words = 1,
                .ddr_stride = static_cast<uint32_t>(e_out.Tb()),
-               .mode = DmaMode::kRaw,
-               .index = false,
-               .row_format = true,
+               .kind = DmaKind::kRow,
                .tok = lin.Rows() / 32},
               std::format("{} {} st E t{}", note, branch.name, tile.t));
         }

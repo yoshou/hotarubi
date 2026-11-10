@@ -6,6 +6,7 @@
 
 #include "dma_engine.hpp"
 #include "gemm_array.hpp"
+#include "hotarubi/isa.hpp"
 #include "timeline.hpp"
 #include "trace_record.hpp"
 #include "vec_engine.hpp"
@@ -20,8 +21,7 @@ TEST(TraceRecordTest, CompletionRecordsRoundTrip) {
                            .completion = 0x00000010,
                            .source = Source::kVec,
                            .opcode = 5,
-                           .wait = 0xD,
-                           .flags = 0x1,
+                           .wait = 0x7,
                            .type = RecordType::kCompletion,
                            .statistics = {}};
   const Word128 word = EncodeRecord(record);
@@ -30,9 +30,8 @@ TEST(TraceRecordTest, CompletionRecordsRoundTrip) {
   EXPECT_EQ(word.Field(64, 32), 0x10U);
   EXPECT_EQ(word.Field(96, 4), 2U);
   EXPECT_EQ(word.Field(100, 8), 5U);
-  EXPECT_EQ(word.Field(108, 4), 0xDU);
-  EXPECT_EQ(word.Field(112, 4), 1U);
-  EXPECT_EQ(word.Field(116, 12), 0U);
+  EXPECT_EQ(word.Field(108, 4), 0x7U);
+  EXPECT_EQ(word.Field(112, 16), 0U);
   EXPECT_EQ(DecodeRecord(word), record);
 }
 
@@ -43,7 +42,6 @@ TEST(TraceRecordTest, StatisticsRecordsRoundTripAndSaturate) {
                      .source = Source::kDma,
                      .opcode = 0,
                      .wait = 0,
-                     .flags = 0,
                      .type = RecordType::kStatistics,
                      .statistics = {.a = 0x123456, .b = 1, .c = 2, .d = 3}};
   const Word128 word = EncodeRecord(record);
@@ -177,8 +175,7 @@ TEST(EstimateTest, RawLoadsCountBeatsPerWord) {
                                         .rows = 3,
                                         .row_words = 5,
                                         .ddr_stride = 0,
-                                        .mode = 0,
-                                        .flags = 0,
+                                        .kind = isa::dma::kKindRaw,
                                         .tok = 0});
   EXPECT_EQ(fbuf.read_beats, 3U * 5 * 8);
   EXPECT_EQ(fbuf.write_beats, 0U);
@@ -191,8 +188,7 @@ TEST(EstimateTest, RawLoadsCountBeatsPerWord) {
                                               .rows = 2,
                                               .row_words = 2,
                                               .ddr_stride = 0,
-                                              .mode = 0,
-                                              .flags = 0,
+                                              .kind = isa::dma::kKindRaw,
                                               .tok = 0});
   EXPECT_EQ(abuf_store.write_beats, 2U * 2 * 9);
   EXPECT_EQ(abuf_store.write_bursts, 2U * 2);
@@ -207,8 +203,7 @@ TEST(EstimateTest, IndexedAndRowFormatTransfersIncludeTheList) {
                                            .rows = 1,
                                            .row_words = 9,
                                            .ddr_stride = 0,
-                                           .mode = 0,
-                                           .flags = 3,
+                                           .kind = isa::dma::kKindRowIndexed,
                                            .tok = 1});
   EXPECT_EQ(indexed.read_beats, 3U + (9U * 8));
   const DmaActivity rows = EstimateDma({.store = false,
@@ -218,8 +213,7 @@ TEST(EstimateTest, IndexedAndRowFormatTransfersIncludeTheList) {
                                         .rows = 2,
                                         .row_words = 2,
                                         .ddr_stride = 0,
-                                        .mode = 0,
-                                        .flags = 2,
+                                        .kind = isa::dma::kKindRow,
                                         .tok = 24});
   EXPECT_EQ(rows.read_beats, 4U * 50);
   const DmaActivity split = EstimateDma({.store = false,
@@ -229,8 +223,7 @@ TEST(EstimateTest, IndexedAndRowFormatTransfersIncludeTheList) {
                                          .rows = 4,
                                          .row_words = 3,
                                          .ddr_stride = 0,
-                                         .mode = 1,
-                                         .flags = 0,
+                                         .kind = isa::dma::kKindSplit8,
                                          .tok = 0});
   EXPECT_EQ(split.read_beats, 12U * 9);
 }
@@ -243,8 +236,7 @@ TEST(EstimateTest, GatherCountsListCoefficientsAndRows) {
                                           .rows = 9,
                                           .row_words = 8,
                                           .ddr_stride = 0,
-                                          .mode = 3,
-                                          .flags = 2,
+                                          .kind = isa::dma::kKindGacc,
                                           .tok = 0});
   EXPECT_EQ(gather.gather_entries, 9U * 16);
   EXPECT_EQ(gather.gather_rows, 9U * 16);
@@ -254,97 +246,102 @@ TEST(EstimateTest, GatherCountsListCoefficientsAndRows) {
 }
 
 TEST(EstimateTest, DdrExtentsCoverEveryRowOfATransfer) {
-  const DmaCommand raw{.ddr_addr = 0x100000,
+  const DmaCommand raw{.ddr_addr = 0x100000 / 16,
                        .mem = 2,
                        .rows = 4,
                        .row_words = 2,
-                       .ddr_stride = 0x1000};
+                       .ddr_stride = 0x1000 / 16};
   EXPECT_EQ(EstimateDdrExtent(raw),
             (DdrExtent{.lo = 0x100000, .hi = 0x100000 + (3 * 0x1000) + 256}));
-  const DmaCommand abuf_store{
-      .store = true, .ddr_addr = 0x2000, .mem = 0, .rows = 1, .row_words = 3};
+  const DmaCommand abuf_store{.store = true,
+                              .ddr_addr = 0x2000 / 16,
+                              .mem = 0,
+                              .rows = 1,
+                              .row_words = 3};
   EXPECT_EQ(EstimateDdrExtent(abuf_store),
             (DdrExtent{.lo = 0x2000, .hi = 0x2000 + (3 * 9 * 16)}));
-  const DmaCommand split{
-      .ddr_addr = 0x3000, .mem = 1, .rows = 2, .row_words = 4, .mode = 1};
+  const DmaCommand split{.ddr_addr = 0x3000 / 16,
+                         .mem = 1,
+                         .rows = 2,
+                         .row_words = 4,
+                         .kind = isa::dma::kKindSplit8};
   EXPECT_EQ(EstimateDdrExtent(split),
             (DdrExtent{.lo = 0x3000, .hi = 0x3000 + (4 * 9 * 16)}));
-  const DmaCommand rows{.ddr_addr = 0x4000,
+  const DmaCommand rows{.ddr_addr = 0x4000 / 16,
                         .mem = 2,
                         .rows = 1,
                         .row_words = 4,
-                        .flags = 2,
+                        .kind = isa::dma::kKindRow,
                         .tok = 8};
   EXPECT_EQ(EstimateDdrExtent(rows),
             (DdrExtent{.lo = 0x4000, .hi = 0x4000 + (4 * 8 * 8 * 16)}));
-  const DmaCommand indexed{.ddr_addr = 0x5000, .rows = 1, .flags = 3};
+  const DmaCommand indexed{
+      .ddr_addr = 0x5000 / 16, .rows = 1, .kind = isa::dma::kKindRowIndexed};
   EXPECT_TRUE(EstimateDdrExtent(indexed).whole);
-  const DmaCommand ignored{.ddr_addr = 0x5000, .rows = 1, .flags = 1};
-  EXPECT_FALSE(EstimateDdrExtent(ignored).whole);
-  const DmaCommand gather{.ddr_addr = 0x6000, .rows = 1, .mode = 3};
+  const DmaCommand gather{
+      .ddr_addr = 0x6000 / 16, .rows = 1, .kind = isa::dma::kKindGacc};
   EXPECT_TRUE(EstimateDdrExtent(gather).whole);
-  const DmaCommand empty{.ddr_addr = 0x7000, .rows = 0, .row_words = 1};
-  EXPECT_EQ(EstimateDdrExtent(empty), (DdrExtent{.lo = 0x7000, .hi = 0x7000}));
 }
 
-TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
-  const VecActivity add = FixedOperationActivity({.op = 0,
-                                                  .quantize = false,
-                                                  .src = 0,
-                                                  .src2 = 0,
-                                                  .dst = 0,
-                                                  .rows_q = 32,
-                                                  .n8 = 32,
-                                                  .p_base = 0,
-                                                  .aux = 0,
-                                                  .imm = 0});
+TEST(EstimateTest, LibraryActivityExecutesTheRomProgram) {
+  const VecActivity add = LibraryActivity({.entry = isa::library::kAdd,
+                                           .quantize = false,
+                                           .src = 0,
+                                           .src2 = 0,
+                                           .dst = 0,
+                                           .rows_q = 32,
+                                           .n8 = 32,
+                                           .p_base = 0,
+                                           .aux = 0,
+                                           .imm = 0});
   EXPECT_EQ(add.passes, 1U);
   EXPECT_EQ(add.words, 1024U);
   EXPECT_EQ(add.drains, 1U);
   EXPECT_EQ(add.drains_quantized, 0U);
   EXPECT_EQ(add.overlaps, 0U);
-  const VecActivity softmax = FixedOperationActivity({.op = 11,
-                                                      .quantize = true,
-                                                      .src = 0,
-                                                      .src2 = 0,
-                                                      .dst = 0,
-                                                      .rows_q = 8,
-                                                      .n8 = 128,
-                                                      .p_base = 0,
-                                                      .aux = 1024,
-                                                      .imm = 2048});
+  const VecActivity softmax = LibraryActivity({.entry = isa::library::kSoftmax,
+                                               .quantize = true,
+                                               .src = 0,
+                                               .src2 = 0,
+                                               .dst = 0,
+                                               .rows_q = 8,
+                                               .n8 = 128,
+                                               .p_base = 0,
+                                               .aux = 1024,
+                                               .imm = 2048});
   EXPECT_EQ(softmax.passes, 24U);
   EXPECT_EQ(softmax.words, 24U * 128);
   EXPECT_EQ(softmax.drains_quantized, 4U);
   EXPECT_EQ(softmax.drains, 4U);
   EXPECT_EQ(softmax.overlaps, 20U);
   EXPECT_EQ(softmax.scalars, 16U);
-  const VecActivity layernorm = FixedOperationActivity({.op = 6,
-                                                        .quantize = true,
-                                                        .src = 0,
-                                                        .src2 = 1536,
-                                                        .dst = 0,
-                                                        .rows_q = 8,
-                                                        .n8 = 96,
-                                                        .p_base = 0,
-                                                        .aux = 0,
-                                                        .imm = 0x358637BD});
+  const VecActivity layernorm =
+      LibraryActivity({.entry = isa::library::kLayerNorm,
+                       .quantize = true,
+                       .src = 0,
+                       .src2 = 1536,
+                       .dst = 0,
+                       .rows_q = 8,
+                       .n8 = 96,
+                       .p_base = 0,
+                       .aux = 768,
+                       .imm = 0x358637BD});
   EXPECT_EQ(layernorm.passes, 40U);
   EXPECT_EQ(layernorm.drains, 4U);
   EXPECT_EQ(layernorm.overlaps, 36U);
   EXPECT_EQ(layernorm.overlap_stall_words, 0U);
   EXPECT_EQ(layernorm.scalars, 16U);
   EXPECT_EQ(layernorm.rn, 1U);
-  const VecActivity run = FixedOperationActivity({.op = 16,
-                                                  .quantize = false,
-                                                  .src = 0,
-                                                  .src2 = 0,
-                                                  .dst = 0,
-                                                  .rows_q = 8,
-                                                  .n8 = 96,
-                                                  .p_base = 0,
-                                                  .aux = 300,
-                                                  .imm = 0});
+  const VecActivity run = LibraryActivity({.entry = 75,
+                                           .quantize = false,
+                                           .src = 0,
+                                           .src2 = 0,
+                                           .dst = 0,
+                                           .rows_q = 8,
+                                           .n8 = 96,
+                                           .p_base = 0,
+                                           .aux = 0,
+                                           .imm = 0});
   EXPECT_EQ(run.passes, 0U);
 }
 
@@ -371,12 +368,12 @@ TEST(TimelineTest, IssuesInOrderAndHonoursWaitBits) {
   const Span gemm = timeline.Issue(Source::kGemm, 0, 50);
   EXPECT_EQ(gemm.issue, 11U);
   EXPECT_EQ(gemm.completion, 61U);
-  const Span vec = timeline.Issue(Source::kVec, 0x1, 20);
+  const Span vec = timeline.Issue(Source::kVec, isa::kWaitDma, 20);
   EXPECT_EQ(vec.issue, 111U);
   EXPECT_EQ(vec.completion, 131U);
   const Span gemm2 = timeline.Issue(Source::kGemm, 0, 5);
   EXPECT_EQ(gemm2.issue, 112U);
-  const Span halt = timeline.Issue(Source::kSequencer, 0xD, 0);
+  const Span halt = timeline.Issue(Source::kSequencer, 0x7, 0);
   EXPECT_EQ(halt.issue, 132U);
   EXPECT_EQ(halt.completion, 132U);
   EXPECT_EQ(timeline.Cycles(), 133U);

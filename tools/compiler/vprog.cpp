@@ -9,22 +9,13 @@
 #include <variant>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "isa.hpp"
 
 namespace hotarubi::compiler::vprog {
 namespace {
 
-constexpr uint32_t kKindPass = 0;
-constexpr uint32_t kKindSalu = 1;
-constexpr uint32_t kKindSmem = 2;
-constexpr uint32_t kKindBranch = 3;
-constexpr uint32_t kKindRet = 4;
-constexpr uint32_t kKindNop = 5;
-
-void Field(Instruction& instruction, uint32_t hi, uint32_t width,
-           uint32_t value) {
-  instruction.Set(hi - width + 1, width, value);
-}
+namespace pg = isa::program;
 
 template <typename E>
 uint32_t U(E value) {
@@ -42,101 +33,99 @@ bool Arithmetic(const Pass& pass) {
 }  // namespace
 
 Instruction EncodePass(const Pass& pass) {
+  namespace f = isa::pass;
   Instruction instruction;
-  Field(instruction, 127, 4, kKindPass);
-  Field(instruction, 123, 5, pass.rx);
-  Field(instruction, 118, 5, pass.rx2);
-  Field(instruction, 113, 5, pass.rd);
-  Field(instruction, 108, 5, pass.rq);
-  Field(instruction, 103, 5, pass.rnw);
-  Field(instruction, 98, 5, pass.rn8);
-  Field(instruction, 93, 5, pass.rpb);
-  Field(instruction, 88, 5, pass.rimm);
-  Field(instruction, 83, 5, pass.rimm2);
-  Field(instruction, 78, 1, U(pass.x2_en));
-  Field(instruction, 77, 2, pass.map.group);
-  Field(instruction, 75, 2, pass.map.stride);
-  Field(instruction, 73, 2, U(pass.map.x));
-  Field(instruction, 71, 2, U(pass.map.x2));
-  Field(instruction, 69, 2, U(pass.map.dst));
-  Field(instruction, 67, 2, U(pass.pa));
-  Field(instruction, 65, 3, U(pass.c0));
-  Field(instruction, 62, 3, U(pass.b));
-  Field(instruction, 59, 2, U(pass.nl));
-  Field(instruction, 57, 2, U(pass.post));
-  Field(instruction, 55, 1, U(pass.post_x2));
-  Field(instruction, 54, 1, U(pass.mask_en));
-  Field(instruction, 53, 2, U(pass.red));
-  Field(instruction, 51, 2, U(pass.wr));
-  Field(instruction, 49, 3, U(pass.sc.fn));
-  Field(instruction, 46, 1, U(pass.sc.rs0));
-  Field(instruction, 45, 1, U(pass.sc.rn));
-  Field(instruction, 44, 1, U(pass.sc.eps));
-  Field(instruction, 43, 20, pass.px);
-  Field(instruction, 23, 3, U(pass.cmp));
-  Field(instruction, 20, 2, U(pass.cmp_left));
-  Field(instruction, 18, 1, U(pass.cmp_right_x2));
-  Field(instruction, 17, 1, U(pass.cmp_int));
-  Field(instruction, 16, 3, U(pass.sel));
-  Field(instruction, 13, 3, U(pass.ialu));
-  Field(instruction, 10, 1, U(pass.c0_pred));
-  Field(instruction, 9, 1, U(pass.x_s1));
-  Field(instruction, 8, 1, U(pass.dst_s1));
-  Field(instruction, 7, 2, pass.ctx);
-  Field(instruction, 5, 2, U(pass.rm));
+  instruction.Set(pg::kKind, pg::kKindPass)
+      .Set(f::kRx, pass.rx)
+      .Set(f::kRx2, pass.rx2)
+      .Set(f::kRd, pass.rd)
+      .Set(f::kRq, pass.rq)
+      .Set(f::kRnw, pass.rnw)
+      .Set(f::kRn8, pass.rn8)
+      .Set(f::kRpb, pass.rpb)
+      .Set(f::kRimm, pass.rimm)
+      .Set(f::kRimm2, pass.rimm2)
+      .Set(f::kX2En, U(pass.x2_en))
+      .Set(f::kMg, pass.map.group)
+      .Set(f::kMs, pass.map.stride)
+      .Set(f::kMx, U(pass.map.x))
+      .Set(f::kMx2, U(pass.map.x2))
+      .Set(f::kMd, U(pass.map.dst))
+      .Set(f::kPa, U(pass.pa))
+      .Set(f::kC0, U(pass.c0))
+      .Set(f::kB, U(pass.b))
+      .Set(f::kNl, U(pass.nl))
+      .Set(f::kPo, U(pass.post))
+      .Set(f::kPv, U(pass.post_x2))
+      .Set(f::kRed, U(pass.red))
+      .Set(f::kWr, U(pass.wr))
+      .Set(f::kSf, U(pass.sc.fn))
+      .Set(f::kSt, U(pass.sc.rs0))
+      .Set(f::kSrn, U(pass.sc.rn))
+      .Set(f::kSeps, U(pass.sc.eps))
+      .Set(f::kPx, pass.px)
+      .Set(f::kCmp, U(pass.cmp))
+      .Set(f::kCl, U(pass.cmp_left))
+      .Set(f::kCr, U(pass.cmp_right_x2))
+      .Set(f::kCmpInt, U(pass.cmp_int))
+      .Set(f::kSel, U(pass.sel))
+      .Set(f::kIalu, U(pass.ialu))
+      .Set(f::kC0Pred, U(pass.c0_pred))
+      .Set(f::kXS1, U(pass.x_s1))
+      .Set(f::kDstS1, U(pass.dst_s1))
+      .Set(f::kCtx, pass.ctx)
+      .Set(f::kRm, U(pass.rm));
   return instruction;
 }
 
 Instruction EncodeSalu(Salu op, uint32_t rd, uint32_t ra, uint32_t rb,
                        std::optional<uint32_t> imm) {
   Instruction instruction;
-  Field(instruction, 127, 4, kKindSalu);
-  Field(instruction, 123, 5, U(op));
-  Field(instruction, 118, 5, rd);
-  Field(instruction, 113, 5, ra);
-  Field(instruction, 108, 5, rb);
+  instruction.Set(pg::kKind, pg::kKindSalu)
+      .Set(pg::kOp, U(op))
+      .Set(pg::kRd, rd)
+      .Set(pg::kRa, ra)
+      .Set(pg::kRb, rb);
   if (imm.has_value()) {
-    Field(instruction, 103, 1, 1);
-    Field(instruction, 31, 32, *imm);
+    instruction.Set(pg::kUseImm, 1).Set(pg::kImm, *imm);
   }
   return instruction;
 }
 
 Instruction EncodeSmem(Smem op, const SmemArgs& args) {
   Instruction instruction;
-  Field(instruction, 127, 4, kKindSmem);
-  Field(instruction, 123, 3, U(op));
-  Field(instruction, 120, 5, args.rd);
-  Field(instruction, 115, 5, args.ra);
-  Field(instruction, 110, 5, args.rb);
+  instruction.Set(pg::kKind, pg::kKindSmem)
+      .Set(pg::kOp, U(op))
+      .Set(pg::kRd, args.rd)
+      .Set(pg::kRa, args.ra)
+      .Set(pg::kRb, args.rb);
   if (args.col.has_value()) {
-    Field(instruction, 105, 1, 1);
-    Field(instruction, 104, 5, *args.col);
+    instruction.Set(pg::kUseImm, 1).Set(pg::kSmemCol, *args.col);
   }
-  Field(instruction, 99, 1, U(args.which));
-  Field(instruction, 97, 2, args.ctx);
-  Field(instruction, 31, 32, args.imm);
+  instruction.Set(pg::kSmemWhich, U(args.which))
+      .Set(pg::kSmemCtx, args.ctx)
+      .Set(pg::kImm, args.imm);
   return instruction;
 }
 
 Instruction EncodeBranch(Cond cond, uint32_t ra, uint32_t target) {
   Instruction instruction;
-  Field(instruction, 127, 4, kKindBranch);
-  Field(instruction, 123, 2, U(cond));
-  Field(instruction, 121, 5, ra);
-  Field(instruction, 15, 16, target);
+  instruction.Set(pg::kKind, pg::kKindBranch)
+      .Set(pg::kOp, U(cond))
+      .Set(pg::kRa, ra)
+      .Set(pg::kImm, target);
   return instruction;
 }
 
 Instruction EncodeRet() {
   Instruction instruction;
-  Field(instruction, 127, 4, kKindRet);
+  instruction.Set(pg::kKind, pg::kKindRet);
   return instruction;
 }
 
 Instruction EncodeNop() {
   Instruction instruction;
-  Field(instruction, 127, 4, kKindNop);
+  instruction.Set(pg::kKind, pg::kKindNop);
   return instruction;
 }
 
@@ -208,16 +197,17 @@ Assembler& Assembler::Transpose8(uint32_t src, uint32_t dst, uint32_t tiles,
                                  uint32_t src_word_stride,
                                  uint32_t dst_tile_stride,
                                  uint32_t dst_word_stride, uint32_t rotation) {
+  namespace tr = isa::transpose;
   Instruction word;
-  word.Set(124, 4, 7)
-      .Set(119, 5, src)
-      .Set(114, 5, src_word_stride)
-      .Set(109, 5, dst)
-      .Set(104, 5, tiles)
-      .Set(99, 5, dst_tile_stride)
-      .Set(94, 5, src_tile_stride)
-      .Set(89, 5, dst_word_stride)
-      .Set(87, 2, rotation);
+  word.Set(pg::kKind, pg::kKindTranspose)
+      .Set(tr::kRx, src)
+      .Set(tr::kRsw, src_word_stride)
+      .Set(tr::kRd, dst)
+      .Set(tr::kRt, tiles)
+      .Set(tr::kRdt, dst_tile_stride)
+      .Set(tr::kRst, src_tile_stride)
+      .Set(tr::kRdw, dst_word_stride)
+      .Set(tr::kRor, rotation);
   items_.emplace_back(word);
   ++size_;
   return *this;

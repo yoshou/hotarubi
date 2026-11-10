@@ -40,7 +40,6 @@ struct TraceRecord {
   Source source = Source::kSequencer;
   uint32_t opcode = 0;
   uint32_t wait = 0;
-  uint32_t flags = 0;
   RecordType type = RecordType::kCompletion;
   Statistics statistics;
 

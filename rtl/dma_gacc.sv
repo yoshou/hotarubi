@@ -5,6 +5,7 @@ module dma_gacc (
   input  logic          start_i,
   input  logic [11:0]   cfg_slots_i,
   input  logic [3:0]    cfg_kb_i,
+  input  logic [19:0]   cfg_stride_i,
   input  logic          cfg_acc_i,
   input  logic          cfg_flush_i,
   input  logic [12:0]   cfg_dst_i,
@@ -40,7 +41,7 @@ module dma_gacc (
   logic [3:0]  kb;
   logic        do_flush;
   logic [12:0] dst;
-  logic [15:0] w_gstride;
+  logic [19:0] w_stride;
   logic [31:0] w_grp0, pq_addr;
   logic [4:0]  nd;
   logic [5:0]  row_beats;
@@ -206,7 +207,7 @@ module dma_gacc (
     end else begin
       if (pq_fire) begin
         pq_kb   <= pq_kb + 1'b1;
-        pq_addr <= pq_addr + 32'({w_gstride, 7'b0});
+        pq_addr <= pq_addr + 32'({w_stride, 4'b0});
       end
       if (w_fire) begin
         rx_b <= rx_b + 1'b1;
@@ -234,6 +235,7 @@ module dma_gacc (
           if (start_i) begin
             slots     <= cfg_slots_i;
             kb        <= cfg_kb_i;
+            w_stride  <= cfg_stride_i;
             do_flush  <= cfg_flush_i;
             dst       <= cfg_dst_i;
             s_cur     <= '0;
@@ -255,12 +257,7 @@ module dma_gacc (
         end
         GHdr: begin
           if (ent_valid_i) begin
-            w_gstride <= ent_data_i[47:32];
-            if (slots == 12'd0) begin
-              st <= GDrain;
-            end else begin
-              st <= GEnt;
-            end
+            st <= GEnt;
           end
         end
         GEnt: begin

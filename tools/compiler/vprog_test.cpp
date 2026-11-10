@@ -34,13 +34,12 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
        .nl = Nl::kTab01,
        .post = Post::kSignfix,
        .post_x2 = true,
-       .mask_en = true,
        .red = Reduce::kMax,
        .wr = Write::kFinal,
        .sc = {.fn = ScalarFn::kRsqrt, .rs0 = true, .rn = true, .eps = true},
        .px = 0xABCDE,
        .cmp = Cmp::kGe,
-       .cmp_left = CmpLeft::kPosition,
+       .cmp_left = CmpLeft::kRowColumn,
        .cmp_right_x2 = true,
        .cmp_int = true,
        .sel = Sel::kRs1,
@@ -72,16 +71,15 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
   EXPECT_EQ(word.Get(58, 2), 3U);
   EXPECT_EQ(word.Get(56, 2), 3U);
   EXPECT_EQ(word.Get(55, 1), 1U);
-  EXPECT_EQ(word.Get(54, 1), 1U);
-  EXPECT_EQ(word.Get(52, 2), 2U);
-  EXPECT_EQ(word.Get(50, 2), 3U);
-  EXPECT_EQ(word.Get(47, 3), 4U);
+  EXPECT_EQ(word.Get(53, 2), 2U);
+  EXPECT_EQ(word.Get(51, 2), 3U);
+  EXPECT_EQ(word.Get(48, 3), 4U);
+  EXPECT_EQ(word.Get(47, 1), 1U);
   EXPECT_EQ(word.Get(46, 1), 1U);
   EXPECT_EQ(word.Get(45, 1), 1U);
-  EXPECT_EQ(word.Get(44, 1), 1U);
-  EXPECT_EQ(word.Get(24, 20), 0xABCDEU);
-  EXPECT_EQ(word.Get(21, 3), 6U);
-  EXPECT_EQ(word.Get(19, 2), 3U);
+  EXPECT_EQ(word.Get(25, 20), 0xABCDEU);
+  EXPECT_EQ(word.Get(22, 3), 6U);
+  EXPECT_EQ(word.Get(19, 3), 4U);
   EXPECT_EQ(word.Get(18, 1), 1U);
   EXPECT_EQ(word.Get(17, 1), 1U);
   EXPECT_EQ(word.Get(14, 3), 5U);
@@ -89,9 +87,9 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
   EXPECT_EQ(word.Get(10, 1), 1U);
   EXPECT_EQ(word.Get(9, 1), 1U);
   EXPECT_EQ(word.Get(8, 1), 1U);
-  EXPECT_EQ(word.Get(6, 2), 1U);
-  EXPECT_EQ(word.Get(4, 2), 2U);
-  EXPECT_EQ(word.Get(0, 4), 0U);
+  EXPECT_EQ(word.Get(7, 1), 1U);
+  EXPECT_EQ(word.Get(5, 2), 2U);
+  EXPECT_EQ(word.Get(0, 5), 0U);
 }
 
 TEST(VprogTest, PermutationHelpersSelectTheSourceBits) {
@@ -122,22 +120,22 @@ TEST(VprogTest, ScalarInstructionsPlaceTheirFieldsAsSpecified) {
                                                      .ctx = 1,
                                                      .imm = 0xFFFFFFF0U});
   EXPECT_EQ(smem.Get(124, 4), 2U);
-  EXPECT_EQ(smem.Get(121, 3), 1U);
-  EXPECT_EQ(smem.Get(116, 5), 4U);
-  EXPECT_EQ(smem.Get(111, 5), 5U);
-  EXPECT_EQ(smem.Get(106, 5), 6U);
-  EXPECT_EQ(smem.Get(105, 1), 1U);
-  EXPECT_EQ(smem.Get(100, 5), 19U);
-  EXPECT_EQ(smem.Get(99, 1), 1U);
-  EXPECT_EQ(smem.Get(98, 1), 0U);
-  EXPECT_EQ(smem.Get(96, 2), 1U);
+  EXPECT_EQ(smem.Get(119, 5), 1U);
+  EXPECT_EQ(smem.Get(114, 5), 4U);
+  EXPECT_EQ(smem.Get(109, 5), 5U);
+  EXPECT_EQ(smem.Get(104, 5), 6U);
+  EXPECT_EQ(smem.Get(103, 1), 1U);
+  EXPECT_EQ(smem.Get(98, 5), 19U);
+  EXPECT_EQ(smem.Get(97, 1), 1U);
+  EXPECT_EQ(smem.Get(96, 1), 1U);
   EXPECT_EQ(smem.Get(0, 32), 0xFFFFFFF0U);
-  EXPECT_EQ(EncodeSmem(Smem::kRn, {}).Get(121, 3), 2U);
+  EXPECT_EQ(EncodeSmem(Smem::kRn, {}).Get(119, 5), 2U);
   const Instruction branch = EncodeBranch(Cond::kNz, 13, 700);
   EXPECT_EQ(branch.Get(124, 4), 3U);
-  EXPECT_EQ(branch.Get(122, 2), 2U);
-  EXPECT_EQ(branch.Get(117, 5), 13U);
-  EXPECT_EQ(branch.Get(0, 16), 700U);
+  EXPECT_EQ(branch.Get(119, 5), 2U);
+  EXPECT_EQ(branch.Get(114, 5), 0U);
+  EXPECT_EQ(branch.Get(109, 5), 13U);
+  EXPECT_EQ(branch.Get(0, 32), 700U);
   EXPECT_EQ(EncodeRet().Get(124, 4), 4U);
   EXPECT_EQ(EncodeNop().Get(124, 4), 5U);
 }
@@ -172,9 +170,9 @@ TEST(VprogTest, AssemblerEnablesX2AndRawCopies) {
 TEST(VprogTest, PassPlacesTheContextAndRowMask) {
   const Instruction word =
       EncodePass({.wr = Write::kNone, .ctx = 1, .rm = RowMask::kSet});
-  EXPECT_EQ(word.Get(6, 2), 1U);
-  EXPECT_EQ(word.Get(4, 2), 2U);
-  EXPECT_EQ(word.Get(0, 4), 0U);
+  EXPECT_EQ(word.Get(7, 1), 1U);
+  EXPECT_EQ(word.Get(5, 2), 2U);
+  EXPECT_EQ(word.Get(0, 5), 0U);
 }
 
 TEST(VprogTest, AssemblerSkipsMaskedRowsInsideARegion) {
@@ -186,10 +184,10 @@ TEST(VprogTest, AssemblerSkipsMaskedRowsInsideARegion) {
   a.SkipMaskedRows(false);
   a.Emit({.rx = 1, .rd = 3, .wr = Write::kFbuf});
   const std::vector<Instruction> words = a.Words();
-  EXPECT_EQ(words[0].Get(4, 2), 0U);
-  EXPECT_EQ(words[1].Get(4, 2), static_cast<uint64_t>(RowMask::kSkip));
-  EXPECT_EQ(words[2].Get(4, 2), static_cast<uint64_t>(RowMask::kSet));
-  EXPECT_EQ(words[3].Get(4, 2), 0U);
+  EXPECT_EQ(words[0].Get(5, 2), 0U);
+  EXPECT_EQ(words[1].Get(5, 2), static_cast<uint64_t>(RowMask::kSkip));
+  EXPECT_EQ(words[2].Get(5, 2), static_cast<uint64_t>(RowMask::kSet));
+  EXPECT_EQ(words[3].Get(5, 2), 0U);
 }
 
 TEST(VprogTest, Transpose8PlacesItsRegistersAndRotation) {

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "hotarubi/require.hpp"
 
 namespace hotarubi::compiler {
@@ -16,7 +17,13 @@ struct Instruction {
   std::array<uint32_t, 4> words{};
 
   Instruction& Set(uint32_t lsb, uint32_t width, uint64_t value);
+  Instruction& Set(isa::Field field, uint64_t value) {
+    return Set(field.lsb, field.width, value);
+  }
   [[nodiscard]] uint64_t Get(uint32_t lsb, uint32_t width) const;
+  [[nodiscard]] uint64_t Get(isa::Field field) const {
+    return Get(field.lsb, field.width);
+  }
   [[nodiscard]] std::string Hex() const;
 };
 
@@ -33,11 +40,13 @@ inline constexpr int kMemCount = 6;
 inline constexpr std::array<uint32_t, kMemCount> kMemDepth = {8192, 2048, 4096,
                                                               512,  1024, 1024};
 
-enum class DmaMode : uint8_t {
-  kRaw = 0,
-  kSplit8 = 1,
-  kT32Split8 = 2,
-  kGacc = 3,
+enum class DmaKind : uint8_t {
+  kRaw = isa::dma::kKindRaw,
+  kRow = isa::dma::kKindRow,
+  kRowIndexed = isa::dma::kKindRowIndexed,
+  kSplit8 = isa::dma::kKindSplit8,
+  kT32Split8 = isa::dma::kKindT32Split8,
+  kGacc = isa::dma::kKindGacc,
 };
 
 enum class WeightMode : uint8_t {
@@ -47,28 +56,26 @@ enum class WeightMode : uint8_t {
 };
 
 enum class VecOp : uint8_t {
-  kAdd = 0,
-  kMul = 1,
-  kAddP = 2,
-  kMulP = 3,
-  kScale = 4,
-  kCopy = 5,
-  kLayerNorm = 6,
-  kRmsNorm = 7,
-  kGelu = 8,
-  kSilu = 9,
-  kSiluMul = 10,
-  kSoftmax = 11,
-  kRope = 12,
-  kQuant = 13,
-  kRelu = 14,
-  kMax = 15,
-  kRun = 16,
+  kAdd = isa::library::kAdd,
+  kMul = isa::library::kMul,
+  kMax = isa::library::kMax,
+  kAddP = isa::library::kAddP,
+  kMulP = isa::library::kMulP,
+  kScale = isa::library::kScale,
+  kCopy = isa::library::kCopy,
+  kRelu = isa::library::kRelu,
+  kAct = isa::library::kAct,
+  kActMul = isa::library::kActMul,
+  kRope = isa::library::kRope,
+  kSoftmax = isa::library::kSoftmax,
+  kLayerNorm = isa::library::kLayerNorm,
+  kRmsNorm = isa::library::kRmsNorm,
 };
 
-inline constexpr uint32_t kWaitDma = 0x1;
-inline constexpr uint32_t kWaitGemm = 0x4;
-inline constexpr uint32_t kWaitVec = 0x8;
+using isa::kWaitAll;
+using isa::kWaitDma;
+using isa::kWaitGemm;
+using isa::kWaitVec;
 
 struct DmaFields {
   uint32_t ddr_addr = 0;
@@ -77,9 +84,10 @@ struct DmaFields {
   uint32_t rows = 1;
   uint32_t row_words = 1;
   uint32_t ddr_stride = 0;
-  DmaMode mode = DmaMode::kRaw;
+  DmaKind kind = DmaKind::kRaw;
   uint32_t tok = 0;
-  uint32_t flags = 0;
+  bool acc = false;
+  bool flush = false;
 };
 
 struct GemmFields {
@@ -96,7 +104,7 @@ struct GemmFields {
 };
 
 struct VecFields {
-  VecOp op = VecOp::kCopy;
+  uint32_t entry = 0;
   uint32_t src = 0;
   uint32_t src2 = 0;
   uint32_t dst = 0;

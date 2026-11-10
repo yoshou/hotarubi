@@ -3,14 +3,10 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "hotarubi/isa.hpp"
 #include "trace_record.hpp"
 
 namespace hotarubi::iss {
-namespace {
-
-constexpr std::array<uint32_t, Timeline::kEngines> kWaitBits = {0x1, 0x4, 0x8};
-
-}  // namespace
 
 void Timeline::Start() {
   last_issue_ = 0;
@@ -22,7 +18,7 @@ void Timeline::Start() {
 Span Timeline::Issue(Source source, uint32_t wait, uint64_t cost) {
   uint64_t issue = issued_ == 0 ? start_cycles_ : last_issue_ + 1;
   for (int e = 0; e < kEngines; ++e) {
-    if ((wait & kWaitBits.at(e)) != 0) {
+    if ((wait & isa::WaitBit(static_cast<uint32_t>(e))) != 0) {
       issue = std::max(issue, free_.at(e) + 1);
     }
   }

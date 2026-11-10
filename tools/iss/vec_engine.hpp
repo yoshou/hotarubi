@@ -11,7 +11,6 @@
 
 namespace hotarubi::iss {
 
-inline constexpr uint32_t kVecRun = 16;
 inline constexpr uint32_t kContexts = 2;
 inline constexpr uint64_t kOverlapLatencyWords = 10;
 inline constexpr uint64_t kReductionLatencyWords = 16;
@@ -69,7 +68,7 @@ struct VecActivity {
 };
 
 struct VecCommand {
-  uint32_t op = 0;
+  uint32_t entry = 0;
   bool quantize = false;
   uint32_t src = 0;
   uint32_t src2 = 0;

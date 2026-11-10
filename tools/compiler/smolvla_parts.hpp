@@ -110,7 +110,7 @@ struct Expert {
 
 size_t Ld(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
           uint32_t rows, uint32_t row_words, uint64_t stride,
-          std::string_view note, DmaMode mode = DmaMode::kRaw);
+          std::string_view note, DmaKind kind = DmaKind::kRaw);
 size_t St(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
           uint32_t rows, uint32_t row_words, uint64_t stride,
           std::string_view note);

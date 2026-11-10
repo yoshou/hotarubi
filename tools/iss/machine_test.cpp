@@ -12,6 +12,7 @@
 
 #include "encoding.hpp"
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "iss_bus.hpp"
 #include "memories.hpp"
 #include "reference.hpp"
@@ -37,9 +38,9 @@ constexpr uint32_t kSignal = 0x18;
 constexpr uint32_t kSignalValue = 0x1C;
 constexpr uint32_t kIssued = 0x20;
 constexpr uint32_t kCycles = 0x24;
-constexpr uint32_t kGemmCycles = 0x28;
-constexpr uint32_t kVecCycles = 0x2C;
-constexpr uint32_t kDmaCycles = 0x30;
+constexpr uint32_t kDmaCycles = 0x28;
+constexpr uint32_t kGemmCycles = 0x2C;
+constexpr uint32_t kVecCycles = 0x30;
 constexpr uint32_t kStallCycles = 0x34;
 constexpr uint32_t kStarveCycles = 0x38;
 constexpr uint32_t kTraceBase = 0x3C;
@@ -52,54 +53,61 @@ uint32_t Address(uint32_t offset) {
   return static_cast<uint32_t>(kBase + offset);
 }
 
-Word128 Header(uint32_t opcode, uint32_t wait = 0, uint32_t flags = 0) {
+constexpr uint32_t kAdd = isa::library::kAdd;
+constexpr uint32_t kCopy = isa::library::kCopy;
+constexpr uint32_t kAct = isa::library::kAct;
+constexpr uint32_t kLoadedProgram = 75;
+
+Word128 Header(uint32_t opcode, uint32_t wait = 0) {
   Word128 word;
-  encoding::Set(word, 120, 8, opcode);
-  encoding::Set(word, 116, 4, wait);
-  return encoding::Set(word, 112, 4, flags);
+  encoding::Set(word, isa::kOpcode, opcode);
+  return encoding::Set(word, isa::kWait, wait);
 }
 
 Word128 Dma(uint32_t opcode, uint32_t ddr, uint32_t mem, uint32_t onchip,
             uint32_t rows, uint32_t row_words, uint32_t stride) {
-  Word128 word = Header(opcode, 0x8);
-  encoding::Set(word, 80, 32, Address(ddr));
-  encoding::Set(word, 77, 3, mem);
-  encoding::Set(word, 57, 20, onchip);
-  encoding::Set(word, 45, 12, rows);
-  encoding::Set(word, 33, 12, row_words);
-  return encoding::Set(word, 9, 24, stride);
+  namespace d = isa::dma;
+  Word128 word = Header(opcode, isa::kWaitVec);
+  encoding::Set(word, d::kDdrAddr, Address(ddr) / 16);
+  encoding::Set(word, d::kMem, mem);
+  encoding::Set(word, d::kAddr, onchip);
+  encoding::Set(word, d::kRows, rows);
+  encoding::Set(word, d::kRowWords, row_words);
+  return encoding::Set(word, d::kDdrStride, stride / 16);
 }
 
-Word128 Vec(uint32_t op, uint32_t src, uint32_t src2, uint32_t dst,
-            uint32_t rows_q, uint32_t n8, uint32_t wait = 0x1) {
-  Word128 word = Header(5, wait);
-  encoding::Set(word, 107, 5, op);
-  encoding::Set(word, 95, 12, src);
-  encoding::Set(word, 83, 12, src2);
-  encoding::Set(word, 70, 13, dst);
-  encoding::Set(word, 61, 9, rows_q);
-  return encoding::Set(word, 53, 8, n8);
+Word128 Vec(uint32_t entry, uint32_t src, uint32_t src2, uint32_t dst,
+            uint32_t rows_q, uint32_t n8, uint32_t wait = isa::kWaitDma) {
+  namespace v = isa::vec;
+  Word128 word = Header(isa::kOpVec, wait);
+  encoding::Set(word, v::kEntry, entry);
+  encoding::Set(word, v::kSrc, src);
+  encoding::Set(word, v::kSrc2, src2);
+  encoding::Set(word, v::kDst, dst);
+  encoding::Set(word, v::kRowsQ, rows_q);
+  return encoding::Set(word, v::kN8, n8);
 }
 
 Word128 GemmOp(uint32_t wait = 0) {
-  Word128 word = Header(4, wait);
-  encoding::Set(word, 82, 10, 1);
-  encoding::Set(word, 72, 10, 1);
-  encoding::Set(word, 62, 10, 32);
-  encoding::Set(word, 32, 10, 1);
-  encoding::Set(word, 24, 8, 1);
-  return encoding::Set(word, 4, 20, 64);
+  namespace g = isa::gemm;
+  Word128 word = Header(isa::kOpGemm, wait);
+  encoding::Set(word, g::kAStride, 1);
+  encoding::Set(word, g::kKb, 1);
+  encoding::Set(word, g::kM, 32);
+  encoding::Set(word, g::kWStride, 1);
+  encoding::Set(word, g::kN8, 1);
+  return encoding::Set(word, g::kCBase, 64);
 }
 
 Word128 SignalOp(uint32_t id, uint32_t value) {
-  Word128 word = Header(6, 0xD);
-  encoding::Set(word, 104, 8, id);
-  return encoding::Set(word, 0, 32, value);
+  Word128 word = Header(isa::kOpSignal, isa::kWaitAll);
+  encoding::Set(word, isa::signal::kId, id);
+  return encoding::Set(word, isa::signal::kValue, value);
 }
 
 Word128 WaitHost(uint32_t value) {
-  Word128 word = Header(8);
-  return encoding::Set(word, 0, 32, value);
+  Word128 word = Header(isa::kOpWaitHost);
+  return encoding::Set(word, isa::wait_host::kValue, value);
 }
 
 class MachineTest : public testing::Test {
@@ -146,8 +154,9 @@ class MachineTest : public testing::Test {
 
   [[nodiscard]] static std::vector<Word128> AddStream() {
     return {Dma(1, kInput, 2, 0, 1, 4, 512),
-            Dma(1, kInput + 512, 2, 4, 1, 4, 512), Vec(0, 0, 4, 8, 1, 4),
-            Dma(2, kOutput, 2, 8, 1, 4, 512), Header(7, 0xD)};
+            Dma(1, kInput + 512, 2, 4, 1, 4, 512), Vec(kAdd, 0, 4, 8, 1, 4),
+            Dma(2, kOutput, 2, 8, 1, 4, 512),
+            Header(isa::kOpHalt, isa::kWaitAll)};
   }
 
   void ExpectSum() const {
@@ -344,9 +353,9 @@ TEST_F(MachineTest, WritesStatisticsRecordsForEngineInstructions) {
 }
 
 TEST_F(MachineTest, AbufStoresDoNotWaitForGemm) {
-  Load({Dma(1, kInput, 0, 0, 1, 1, 0), GemmOp(0x1),
+  Load({Dma(1, kInput, 0, 0, 1, 1, 0), GemmOp(isa::kWaitDma),
         Dma(2, kOutput, 0, 0, 1, 1, 0), GemmOp(), GemmOp(),
-        Dma(1, kInput, 2, 0, 1, 1, 0), Header(7, 0xD)});
+        Dma(1, kInput, 2, 0, 1, 1, 0), Header(isa::kOpHalt, isa::kWaitAll)});
   machine_.WriteRegister(kTraceBase, Address(kTrace));
   machine_.WriteRegister(kTraceCtrl, 5);
   machine_.WriteRegister(kCtrl, 1);
@@ -372,8 +381,8 @@ TEST_F(MachineTest, AbufStoresDoNotWaitForGemm) {
 TEST_F(MachineTest, DetectsAccessesThatNoWaitOrders) {
   FillInput(8);
   Load({Dma(1, kInput, 2, 0, 1, 4, 512), Dma(1, kInput + 512, 2, 4, 1, 4, 512),
-        Vec(0, 0, 4, 8, 1, 4, 0), Vec(0, 0, 4, 12, 1, 4, 0),
-        Dma(2, kOutput, 2, 8, 1, 4, 512), Header(7, 0xD)});
+        Vec(kAdd, 0, 4, 8, 1, 4, 0), Vec(kAdd, 0, 4, 12, 1, 4, 0),
+        Dma(2, kOutput, 2, 8, 1, 4, 512), Header(isa::kOpHalt, isa::kWaitAll)});
   machine_.WriteRegister(kCtrl, 1);
   EXPECT_EQ(machine_.Run(), Stop::kHalt);
   ASSERT_EQ(machine_.Hazards().size(), 2U);
@@ -394,8 +403,9 @@ TEST_F(MachineTest, DetectsAccessesThatNoWaitOrders) {
 
 TEST_F(MachineTest, OrderingKnowledgeCarriesAcrossLaterInstructions) {
   FillInput(8);
-  Load({Dma(1, kInput, 2, 0, 1, 4, 512), Vec(5, 0, 0, 8, 1, 4, 0x1),
-        Vec(5, 0, 0, 16, 1, 4, 0), GemmOp(0x8), Header(7, 0xD)});
+  Load({Dma(1, kInput, 2, 0, 1, 4, 512),
+        Vec(kCopy, 0, 0, 8, 1, 4, isa::kWaitDma), Vec(kCopy, 0, 0, 16, 1, 4, 0),
+        GemmOp(isa::kWaitVec), Header(isa::kOpHalt, isa::kWaitAll)});
   machine_.WriteRegister(kCtrl, 1);
   EXPECT_EQ(machine_.Run(), Stop::kHalt);
   EXPECT_TRUE(machine_.Hazards().empty());
@@ -403,9 +413,10 @@ TEST_F(MachineTest, OrderingKnowledgeCarriesAcrossLaterInstructions) {
 
 TEST_F(MachineTest, TableWritesAfterVecAreOrderedByHardware) {
   FillInput(8);
-  Load({Dma(1, kInput, 4, 0, 1, 4, 512), Vec(8, 0, 0, 8, 1, 4, 0x1),
-        Dma(1, kInput, 4, 0, 1, 4, 512), Vec(8, 0, 0, 8, 1, 4, 0),
-        Header(7, 0xD)});
+  Load({Dma(1, kInput, 4, 0, 1, 4, 512),
+        Vec(kAct, 0, 0, 8, 1, 4, isa::kWaitDma),
+        Dma(1, kInput, 4, 0, 1, 4, 512), Vec(kAct, 0, 0, 8, 1, 4, 0),
+        Header(isa::kOpHalt, isa::kWaitAll)});
   machine_.WriteRegister(kCtrl, 1);
   EXPECT_EQ(machine_.Run(), Stop::kHalt);
   ASSERT_EQ(machine_.Hazards().size(), 1U);
@@ -445,13 +456,13 @@ TEST(EstimateCyclesTest, MatchesTheCostModelOfEachEngine) {
             model.Dma(EstimateDma(DecodeDma(load))).cycles);
   const Word128 gemm = GemmOp();
   EXPECT_EQ(EstimateCycles(gemm, model), model.Gemm(DecodeGemm(gemm)).cycles);
-  const Word128 copy = Vec(5, 0, 0, 8, 2, 4);
+  const Word128 copy = Vec(kCopy, 0, 0, 8, 2, 4);
   EXPECT_EQ(EstimateCycles(copy, model),
-            model.Vec(FixedOperationActivity(DecodeVec(copy))).cycles);
+            model.Vec(LibraryActivity(DecodeVec(copy))).cycles);
   EXPECT_GT(EstimateCycles(copy, model), 23U);
-  const Word128 run = Vec(16, 0, 0, 8, 2, 4);
+  const Word128 run = Vec(kLoadedProgram, 0, 0, 8, 2, 4);
   EXPECT_GT(EstimateCycles(run, model), 23U);
-  EXPECT_EQ(EstimateCycles(Header(7, 0xD), model), 0U);
+  EXPECT_EQ(EstimateCycles(Header(isa::kOpHalt, isa::kWaitAll), model), 0U);
   EXPECT_EQ(EstimateCycles(SignalOp(1, 2), model), 0U);
 }
 

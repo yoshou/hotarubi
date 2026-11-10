@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "npu_bench.hpp"
 #include "npu_isa.hpp"
 
@@ -19,9 +21,9 @@ constexpr uint32_t kRegSignal = 0x18;
 constexpr uint32_t kRegSignalValue = 0x1C;
 constexpr uint32_t kRegIssued = 0x20;
 constexpr uint32_t kRegCycles = 0x24;
-constexpr uint32_t kRegGemmCycles = 0x28;
-constexpr uint32_t kRegVecCycles = 0x2C;
-constexpr uint32_t kRegDmaCycles = 0x30;
+constexpr uint32_t kRegDmaCycles = 0x28;
+constexpr uint32_t kRegGemmCycles = 0x2C;
+constexpr uint32_t kRegVecCycles = 0x30;
 constexpr uint32_t kRegTraceBase = 0x3C;
 constexpr uint32_t kRegTraceCtrl = 0x40;
 constexpr uint32_t kRegTraceCount = 0x44;
@@ -39,7 +41,7 @@ constexpr uint32_t kIrqIllegal = 0x4;
 
 constexpr uint32_t kTraceArea = Ddr::kBase + 0x200000U;
 
-Instruction Illegal(uint32_t opcode) { return Header(opcode, 0, 0); }
+Instruction Illegal(uint32_t opcode) { return Header(opcode, 0); }
 
 TEST(SequencerTest, RegistersReadBack) {
   NpuBench bench(61);
@@ -185,6 +187,45 @@ TEST(SequencerTest, SoftResetDuringAFetchLeavesTheIbufEmpty) {
   EXPECT_EQ(bench.ReadReg(kRegStatus), kStatusIbufEmpty);
 }
 
+TEST(SequencerTest, StatusShowsEachEngineBusyAtItsIndex) {
+  const std::array<Instruction, 3> commands = {
+      DmaLoad({.ddr_addr = Ddr::kBase + 0x100000U,
+               .mem = Mem::kFbuf,
+               .onchip = 0,
+               .rows = 8,
+               .row_words = 8,
+               .ddr_stride = 0x400}),
+      Gemm({.a_base = 0,
+            .a_stride = 1,
+            .kb = 1,
+            .m = 256,
+            .w_base = 0,
+            .w_stride = 1,
+            .n8 = 8,
+            .c_base = 512}),
+      Vec({.entry = isa::library::kCopy,
+           .src = 0,
+           .dst = 256,
+           .rows_q = 16,
+           .n8 = 8})};
+  for (uint32_t e = 0; e < commands.size(); ++e) {
+    NpuBench bench(80 + e);
+    const std::vector<Instruction> program = {commands.at(e), Halt()};
+    bench.LoadProgram(program, NpuBench::kProgramBase);
+    bench.Start(NpuBench::kProgramBase, static_cast<uint32_t>(program.size()));
+    uint32_t busy = 0;
+    ASSERT_TRUE(bench.WaitStatus(
+        [&](uint32_t status) {
+          busy = status & 0x70U;
+          return busy != 0;
+        },
+        100000));
+    EXPECT_EQ(busy, 0x10U << e) << "engine " << e;
+    ASSERT_TRUE(bench.WaitStatus(
+        [](uint32_t status) { return (status & kStatusHalted) != 0; }, 100000));
+  }
+}
+
 TEST(SequencerTest, BusyCountersFollowEngines) {
   NpuBench bench(68);
   const std::vector<Instruction> program = {
@@ -223,7 +264,6 @@ struct TraceRecord {
   uint32_t source = 0;
   uint32_t opcode = 0;
   uint32_t wait = 0;
-  uint32_t flags = 0;
   uint32_t zero = 0;
 };
 
@@ -235,8 +275,7 @@ TraceRecord ReadRecord(const Ddr& ddr, uint32_t address) {
           .source = word3 & 0xFU,
           .opcode = (word3 >> 4) & 0xFFU,
           .wait = (word3 >> 12) & 0xFU,
-          .flags = (word3 >> 16) & 0xFU,
-          .zero = word3 >> 20};
+          .zero = word3 >> 16};
 }
 
 TEST(SequencerTest, TraceRecordsEveryInstruction) {
@@ -260,7 +299,7 @@ TEST(SequencerTest, TraceRecordsEveryInstruction) {
             .wmode = 0,
             .acc = false,
             .wait = kWaitDma}),
-      Vec({.op = 0,
+      Vec({.entry = 0,
            .src = 0,
            .src2 = 0,
            .dst = 16,
@@ -292,7 +331,6 @@ TEST(SequencerTest, TraceRecordsEveryInstruction) {
     EXPECT_EQ(record.source, sources[i]) << "record " << i;
     EXPECT_EQ(record.opcode, opcodes[i]) << "record " << i;
     EXPECT_EQ(record.wait, waits[i]) << "record " << i;
-    EXPECT_EQ(record.flags, 0U) << "record " << i;
     EXPECT_EQ(record.zero, 0U) << "record " << i;
     EXPECT_LE(record.issue, record.completion) << "record " << i;
     EXPECT_GE(record.issue, last_issue) << "record " << i;
@@ -356,7 +394,7 @@ TEST(SequencerTest, StatisticsRecordsFollowEngineCompletions) {
             .wmode = 0,
             .acc = false,
             .wait = kWaitDma}),
-      Vec({.op = 0,
+      Vec({.entry = 0,
            .src = 0,
            .src2 = 0,
            .dst = 16,
@@ -378,8 +416,8 @@ TEST(SequencerTest, StatisticsRecordsFollowEngineCompletions) {
                .onchip = 32,
                .rows = 1,
                .row_words = 4,
-               .tok = 1,
-               .flags = kDmaFlagIndex | kDmaFlagRow}),
+               .kind = DmaKind::kRowIndexed,
+               .tok = 1}),
       Signal(11, 22, kWaitDma),
       Halt()};
   ASSERT_TRUE(bench.Run(program));
@@ -437,7 +475,7 @@ TEST(SequencerTest, StatisticsRecordsSurviveTraceBackPressure) {
   bench.WriteReg(kRegTraceCtrl, kTraceStatistics);
   std::vector<Instruction> program;
   for (uint32_t i = 0; i < 40; ++i) {
-    program.push_back(Vec({.op = 5,
+    program.push_back(Vec({.entry = 5,
                            .src = 0,
                            .src2 = 0,
                            .dst = 64,

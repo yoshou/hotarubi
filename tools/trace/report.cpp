@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "analysis.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "machine.hpp"
 #include "timing.hpp"
@@ -21,10 +22,10 @@
 namespace hotarubi::trace {
 namespace {
 
-constexpr uint32_t kOpDmaLoad = 1;
-constexpr uint32_t kOpDmaStore = 2;
-constexpr uint32_t kOpGemm = 4;
-constexpr uint32_t kOpVec = 5;
+using isa::kOpDmaLoad;
+using isa::kOpDmaStore;
+using isa::kOpGemm;
+using isa::kOpVec;
 
 double Ms(uint64_t cycles, uint64_t clock_hz) {
   return static_cast<double>(cycles) * 1000.0 / static_cast<double>(clock_hz);
@@ -465,10 +466,10 @@ void CollectDmaRest(const Event& event, const iss::Statistics& st,
 void CollectVec(const Event& event, const iss::Statistics& st,
                 const iss::VecCommand& command, Mechanisms& m) {
   const auto span = static_cast<double>(event.Duration());
-  if (command.op >= 16) {
+  if (!iss::RunsLibraryProgram(command)) {
     return;
   }
-  const iss::VecActivity activity = iss::FixedOperationActivity(command);
+  const iss::VecActivity activity = iss::LibraryActivity(command);
   if (activity.passes == 0) {
     return;
   }
@@ -607,12 +608,12 @@ std::string Residuals(const Analysis& analysis, const Stream& stream,
     } else if (event.opcode == kOpVec) {
       const iss::VecCommand command =
           iss::DecodeVec(stream.instructions.at(event.index).word);
-      if (command.op >= 16) {
+      if (!iss::RunsLibraryProgram(command)) {
         predicted = p.vec_fixed_cycles + st.a + st.b + st.c +
                     (static_cast<double>(st.d) * p.vec_pass_cycles);
       } else {
         predicted = static_cast<double>(
-            model.Vec(iss::FixedOperationActivity(command)).cycles);
+            model.Vec(iss::LibraryActivity(command)).cycles);
       }
     } else {
       continue;

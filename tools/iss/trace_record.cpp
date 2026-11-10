@@ -3,15 +3,11 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "hotarubi/isa.hpp"
 #include "word.hpp"
 
 namespace hotarubi::iss {
 namespace {
-
-constexpr uint32_t kOpDmaLoad = 1;
-constexpr uint32_t kOpDmaStore = 2;
-constexpr uint32_t kOpGemm = 4;
-constexpr uint32_t kOpVec = 5;
 
 void Set(Word128& word, uint32_t lsb, uint32_t width, uint64_t value) {
   const uint64_t mask = width == 64 ? ~uint64_t{0} : (uint64_t{1} << width) - 1;
@@ -36,12 +32,12 @@ uint32_t Clamp(uint32_t value, uint32_t bits) {
 
 Source SourceOf(uint32_t opcode) {
   switch (opcode) {
-    case kOpDmaLoad:
-    case kOpDmaStore:
+    case isa::kOpDmaLoad:
+    case isa::kOpDmaStore:
       return Source::kDma;
-    case kOpGemm:
+    case isa::kOpGemm:
       return Source::kGemm;
-    case kOpVec:
+    case isa::kOpVec:
       return Source::kVec;
     default:
       return Source::kSequencer;
@@ -65,7 +61,6 @@ Word128 EncodeRecord(const TraceRecord& record) {
     Set(word, 96, 4, static_cast<uint32_t>(record.source));
     Set(word, 100, 8, record.opcode);
     Set(word, 108, 4, record.wait);
-    Set(word, 112, 4, record.flags);
     return word;
   }
   const Statistics statistics = Saturate(record.statistics);
@@ -87,7 +82,6 @@ TraceRecord DecodeRecord(const Word128& word) {
     record.source = static_cast<Source>(word.Field(96, 4));
     record.opcode = word.Field(100, 8);
     record.wait = word.Field(108, 4);
-    record.flags = word.Field(112, 4);
     return record;
   }
   record.source = static_cast<Source>(word.Field(32, 4));

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "input.hpp"
 #include "machine.hpp"
 #include "timing.hpp"
@@ -23,26 +24,30 @@ namespace hotarubi::trace {
 namespace {
 
 constexpr uint64_t kWrap = uint64_t{1} << 32;
-constexpr std::array<uint32_t, kEngines> kWaitBits = {0x1, 0x4, 0x8};
 constexpr std::array<std::string_view, 6> kMemNames = {"ABUF", "WBUF", "FBUF",
                                                        "PBUF", "TBUF", "CBUF"};
-constexpr std::array<std::string_view, 4> kDmaModes = {"", " SPLIT8",
-                                                       " T32_SPLIT8", " GACC"};
+constexpr std::array<std::string_view, 8> kDmaKinds = {
+    "", " R", " I R", " SPLIT8", " T32_SPLIT8", " GACC", " ?", " ?"};
 constexpr std::array<std::string_view, 3> kWeightModes = {"FP4", "W8_HI",
                                                           "W8_LO"};
-constexpr std::array<std::string_view, 17> kVecOps = {
-    "ADD",       "MUL",     "ADDP", "MULP", "SCALE",    "COPY",
-    "LAYERNORM", "RMSNORM", "GELU", "SILU", "SILU_MUL", "SOFTMAX",
-    "ROPE",      "QUANT",   "RELU", "MAX",  "RUN"};
 
-constexpr uint32_t kOpNop = 0;
-constexpr uint32_t kOpDmaLoad = 1;
-constexpr uint32_t kOpDmaStore = 2;
-constexpr uint32_t kOpGemm = 4;
-constexpr uint32_t kOpVec = 5;
-constexpr uint32_t kOpSignal = 6;
-constexpr uint32_t kOpHalt = 7;
-constexpr uint32_t kOpWaitHost = 8;
+using isa::kOpDmaLoad;
+using isa::kOpDmaStore;
+using isa::kOpGemm;
+using isa::kOpHalt;
+using isa::kOpNop;
+using isa::kOpSignal;
+using isa::kOpVec;
+using isa::kOpWaitHost;
+
+std::string_view LibraryName(uint32_t entry) {
+  for (const isa::library::Program& program : isa::library::kPrograms) {
+    if (program.entry == entry) {
+      return program.name;
+    }
+  }
+  return "?";
+}
 
 std::string Mask(const std::array<bool, kEngines>& active) {
   std::string name;
@@ -108,13 +113,13 @@ std::expected<Unwrapped, std::string> Unwrap(
     }
     seen[record.index] = true;
     if (record.opcode != instruction.opcode ||
-        record.wait != instruction.wait || record.flags != instruction.flags ||
+        record.wait != instruction.wait ||
         record.source != instruction.source) {
       return std::unexpected(std::format(
-          "record {} (opcode {}, wait {:#x}, flags {:#x}) does not match "
-          "the instruction (opcode {}, wait {:#x}, flags {:#x})",
-          record.index, record.opcode, record.wait, record.flags,
-          instruction.opcode, instruction.wait, instruction.flags));
+          "record {} (opcode {}, wait {:#x}) does not match the instruction "
+          "(opcode {}, wait {:#x})",
+          record.index, record.opcode, record.wait, instruction.opcode,
+          instruction.wait));
     }
     event.index = record.index;
     event.issue = record.issue;
@@ -122,7 +127,6 @@ std::expected<Unwrapped, std::string> Unwrap(
     event.source = instruction.source;
     event.opcode = instruction.opcode;
     event.wait = instruction.wait;
-    event.flags = instruction.flags;
     event.category = Category(instruction);
     event.tag = instruction.tag;
     event.note = instruction.note;
@@ -214,7 +218,7 @@ void Attribute(std::vector<Event>& events, std::map<std::string, uint64_t>& out,
       uint64_t ready = 0;
       for (int e = 0; e < kEngines; ++e) {
         const bool needs =
-            (event.wait & kWaitBits.at(e)) != 0 ||
+            (event.wait & isa::WaitBit(static_cast<uint32_t>(e))) != 0 ||
             (event.IsEngine() && static_cast<int>(event.source) == e);
         if (needs && end.at(e) >= ready && end.at(e) > previous) {
           ready = end.at(e);
@@ -308,19 +312,11 @@ std::string Category(const Instruction& instruction) {
       const iss::DmaCommand command = iss::DecodeDma(instruction.word);
       const std::string_view mem =
           command.mem < kMemNames.size() ? kMemNames.at(command.mem) : "?";
-      if (!command.store && command.mode == 3) {
+      if (command.kind == isa::dma::kKindGacc) {
         return "GACC";
       }
-      std::string name =
-          std::format("{} {}{}", command.store ? "ST" : "LD", mem,
-                      command.store ? "" : kDmaModes.at(command.mode));
-      if ((command.flags & 1U) != 0) {
-        name += " I";
-      }
-      if ((command.flags & 2U) != 0) {
-        name += " R";
-      }
-      return name;
+      return std::format("{} {}{}", command.store ? "ST" : "LD", mem,
+                         kDmaKinds.at(command.kind));
     }
     case kOpGemm: {
       const iss::GemmCommand command = iss::DecodeGemm(instruction.word);
@@ -329,11 +325,11 @@ std::string Category(const Instruction& instruction) {
     }
     case kOpVec: {
       const iss::VecCommand command = iss::DecodeVec(instruction.word);
-      if (command.op < kVecOps.size()) {
-        return std::format("VEC {}{}", kVecOps.at(command.op),
-                           command.quantize && command.op != 13 ? "+Q" : "");
+      if (iss::RunsLibraryProgram(command)) {
+        return std::format("VEC {}{}", LibraryName(command.entry),
+                           command.quantize ? "+Q" : "");
       }
-      return std::format("VEC RUN{}", command.op - 16);
+      return "VEC RUN";
     }
     case kOpNop:
       return "NOP";
@@ -360,9 +356,7 @@ uint64_t Streaming(const Instruction& instruction) {
     case kOpGemm:
       return iss::GemmArrayCycles(iss::DecodeGemm(instruction.word));
     case kOpVec:
-      return iss::FixedOperationActivity(iss::DecodeVec(instruction.word))
-                 .words *
-             4;
+      return iss::LibraryActivity(iss::DecodeVec(instruction.word)).words * 4;
     default:
       return 0;
   }
@@ -378,10 +372,10 @@ uint64_t Model(const iss::CostModel& model, const Instruction& instruction) {
       return model.Gemm(iss::DecodeGemm(instruction.word)).cycles;
     case kOpVec: {
       const iss::VecCommand command = iss::DecodeVec(instruction.word);
-      if (command.op >= 16) {
+      if (!iss::RunsLibraryProgram(command)) {
         return 0;
       }
-      return model.Vec(iss::FixedOperationActivity(command)).cycles;
+      return model.Vec(iss::LibraryActivity(command)).cycles;
     }
     default:
       return 0;

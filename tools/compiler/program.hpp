@@ -37,9 +37,7 @@ struct Transfer {
   uint32_t rows = 1;
   uint32_t row_words = 1;
   uint32_t ddr_stride = 0;
-  DmaMode mode = DmaMode::kRaw;
-  bool index = false;
-  bool row_format = false;
+  DmaKind kind = DmaKind::kRaw;
   uint32_t tok = 0;
 };
 
@@ -48,6 +46,7 @@ struct GaccArgs {
   uint32_t dst = 0;
   uint32_t slots = 0;
   uint32_t blocks = 1;
+  uint32_t coefficient_stride = 0;
   bool acc = false;
   bool flush = true;
 };

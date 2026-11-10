@@ -11,6 +11,7 @@
 
 #include "ddr.hpp"
 #include "hotarubi/exact.hpp"
+#include "hotarubi/isa.hpp"
 #include "memories.hpp"
 #include "reference.hpp"
 
@@ -79,15 +80,16 @@ class DmaEngineTest : public testing::Test {
   static DmaCommand Load(uint32_t mem, uint32_t ddr, uint32_t onchip,
                          uint32_t rows, uint32_t row_words, uint32_t stride) {
     return {.store = false,
-            .ddr_addr = Address(ddr),
+            .ddr_addr = Address(ddr) / 16,
             .mem = mem,
             .onchip = onchip,
             .rows = rows,
             .row_words = row_words,
-            .ddr_stride = stride,
-            .mode = 0,
-            .flags = 0,
-            .tok = 0};
+            .ddr_stride = stride / 16,
+            .kind = isa::dma::kKindRaw,
+            .tok = 0,
+            .acc = false,
+            .flush = false};
   }
 
   void ExpectWord(uint32_t mem, uint32_t index, uint32_t offset) const {
@@ -193,39 +195,6 @@ TEST_F(DmaEngineTest, StoresRawRowsFromAbufAndFbuf) {
   }
 }
 
-TEST_F(DmaEngineTest, IgnoresTheIndexFlagWithoutRowFormatAndOnStores) {
-  constexpr uint32_t kStride = 300;
-  Randomize(0, 4096);
-  DmaCommand load = Load(kFbuf, 1024, 10, 3, 2, kStride);
-  load.flags = 1;
-  Execute(load);
-  for (uint32_t r = 0; r < 3; ++r) {
-    for (uint32_t w = 0; w < 2; ++w) {
-      ExpectWord(kFbuf, 10 + (r * 2) + w, 1024 + (r * kStride) + (w * 128));
-    }
-  }
-  EXPECT_EQ(engine_.Activity().read_beats, 3U * 2 * 8);
-  std::ranges::fill(bytes_, kUntouched);
-  RandomizeOnChip(10, 6);
-  DmaCommand store = Load(kFbuf, 512, 10, 3, 2, kStride);
-  store.store = true;
-  store.flags = 1;
-  Execute(store);
-  std::vector<std::byte> expected(kDdrBytes, kUntouched);
-  for (uint32_t r = 0; r < 3; ++r) {
-    for (uint32_t w = 0; w < 2; ++w) {
-      for (uint32_t i = 0; i < 128; ++i) {
-        expected.at(512 + (r * kStride) + (w * 128) + i) =
-            static_cast<std::byte>(
-                (memories_.fbuf.at(10 + (r * 2) + w).at(i / 4) >>
-                 (8 * (i % 4))) &
-                0xFFU);
-      }
-    }
-  }
-  ASSERT_TRUE(bytes_ == expected);
-}
-
 struct RowCase {
   uint32_t mem;
   uint32_t tok;
@@ -273,7 +242,8 @@ class RowFormatTest : public DmaEngineTest,
     DmaCommand command =
         Load(GetParam().mem, GetParam().indexed ? kList : kRowsStart, kOnChip,
              kRows, kRowWords, stride_);
-    command.flags = GetParam().indexed ? 3 : 2;
+    command.kind =
+        GetParam().indexed ? isa::dma::kKindRowIndexed : isa::dma::kKindRow;
     command.tok = GetParam().tok;
     return command;
   }
@@ -367,7 +337,7 @@ TEST_F(DmaEngineTest, Split8SeparatesNibblePlanes) {
   constexpr uint32_t kStride = (kRowWords * 144) + 16;
   Randomize(0, 0x4000);
   DmaCommand command = Load(kWbuf, 0x200, 100, kRows, kRowWords, kStride);
-  command.mode = 1;
+  command.kind = isa::dma::kKindSplit8;
   Execute(command);
   const uint32_t half = kRows * kRowWords / 2;
   for (uint32_t p = 0; p < kRows / 2; ++p) {
@@ -487,7 +457,7 @@ TEST_F(T32Split8Test, TransposesAlignedBlocks) {
   }
   DmaCommand command =
       Load(kWbuf, WordOffset(0, 0), kOnChip, kRows, kRowWords, kStride);
-  command.mode = 2;
+  command.kind = isa::dma::kKindT32Split8;
   Execute(command);
   for (uint32_t r8 = 0; r8 < kGroups; ++r8) {
     for (uint32_t w = 0; w < kRowWords; ++w) {
@@ -547,7 +517,7 @@ class GatherTest : public DmaEngineTest {
   }
 
   void WriteList(const List& list) {
-    Put(list.offset, Entry(list.w_area) | (uint64_t{list.stride} << 32), 8);
+    Put(list.offset, Entry(list.w_area), 8);
     for (uint32_t i = 0; i < 0x2000; i += 4) {
       Put(list.w_area + i, RandomFloat(118), 4);
     }
@@ -597,13 +567,16 @@ TEST_F(GatherTest, AccumulatesWeightedRows) {
   const std::vector<FbufWord> before = memories_.fbuf;
   DmaCommand first =
       Load(kFbuf, lists.at(0).offset, kDst, lists.at(0).slots, kBlocks, 0);
-  first.mode = 3;
+  first.kind = isa::dma::kKindGacc;
+  first.ddr_stride = lists.at(0).stride * 8;
   Execute(first);
   ASSERT_EQ(memories_.fbuf, before);
   DmaCommand second =
       Load(kFbuf, lists.at(1).offset, kDst, lists.at(1).slots, kBlocks, 0);
-  second.mode = 3;
-  second.flags = 3;
+  second.kind = isa::dma::kKindGacc;
+  second.ddr_stride = lists.at(1).stride * 8;
+  second.acc = true;
+  second.flush = true;
   Execute(second);
   for (uint32_t g = 0; g < 4 * kBlocks; ++g) {
     for (uint32_t t = 0; t < kTokens; ++t) {
@@ -630,7 +603,8 @@ TEST_F(GatherTest, ReadsCoefficientsOnlyForSlotGroupsWithRows) {
     }
   }
   DmaCommand command = Load(kFbuf, list.offset, kDst, list.slots, kBlocks, 0);
-  command.mode = 3;
+  command.kind = isa::dma::kKindGacc;
+  command.ddr_stride = list.stride * 8;
   Execute(command);
   const DmaActivity& activity = engine_.Activity();
   EXPECT_EQ(activity.gather_entries, 24U * 16);
@@ -645,7 +619,7 @@ using DmaEngineDeathTest = DmaEngineTest;
 
 TEST_F(DmaEngineDeathTest, RejectsATokenSizeOutsideTheFormat) {
   DmaCommand command = Load(kAbuf, 0, 0, 1, 4, 0);
-  command.flags = 2;
+  command.kind = isa::dma::kKindRow;
   command.tok = 0;
   EXPECT_DEATH(Execute(command), "row format with tok = 0");
   command.tok = 33;
@@ -657,17 +631,28 @@ TEST_F(DmaEngineDeathTest, RejectsATokenSizeOutsideTheFormat) {
 
 TEST_F(DmaEngineDeathTest, RejectsAGatherIntoAnotherMemory) {
   DmaCommand command = Load(kAbuf, 0, 0, 1, 1, 0);
-  command.mode = 3;
+  command.kind = isa::dma::kKindGacc;
   EXPECT_DEATH(Execute(command), "GACC writes FBUF");
 }
 
-TEST_F(DmaEngineTest, EmptyTransfersChangeNothing) {
-  Randomize(0, 4096);
-  const Memories before = memories_;
-  Execute(Load(kFbuf, 0, 0, 0, 5, 128));
-  Execute(Load(kAbuf, 0, 0, 5, 0, 144));
-  EXPECT_EQ(memories_.fbuf, before.fbuf);
-  EXPECT_EQ(memories_.abuf, before.abuf);
+TEST_F(DmaEngineDeathTest, RejectsAnEmptyTransfer) {
+  EXPECT_DEATH(Execute(Load(kFbuf, 0, 0, 0, 5, 128)),
+               "a DMA transfer with 0 rows of 5 words");
+  EXPECT_DEATH(Execute(Load(kAbuf, 0, 0, 5, 0, 144)),
+               "a DMA transfer with 5 rows of 0 words");
+}
+
+TEST_F(DmaEngineDeathTest, RejectsAStoreOfAnotherKind) {
+  DmaCommand command = Load(kFbuf, 0, 0, 1, 4, 0);
+  command.store = true;
+  command.kind = isa::dma::kKindRowIndexed;
+  EXPECT_DEATH(Execute(command), "DMA_ST of kind 2");
+}
+
+TEST_F(DmaEngineDeathTest, RejectsAccumulationOutsideAGather) {
+  DmaCommand command = Load(kFbuf, 0, 0, 1, 4, 0);
+  command.flush = true;
+  EXPECT_DEATH(Execute(command), "acc and flush are used only by GACC");
 }
 
 }  // namespace

@@ -6,6 +6,7 @@
 #include <span>
 
 #include "fp32.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/require.hpp"
 #include "memories.hpp"
 #include "word.hpp"
@@ -24,7 +25,9 @@ Enum Decode(uint32_t value, Enum last, Enum fallback) {
                                               : fallback;
 }
 
-bool Flag(const Word128& word, uint32_t bit) { return word.Field(bit, 1) != 0; }
+bool Flag(const Word128& word, isa::Field field) {
+  return word.Field(field) != 0;
+}
 
 uint32_t CompareKey(uint32_t bits) {
   const uint32_t value = Fp32Exponent(bits) == 0 ? 0 : bits;
@@ -195,48 +198,48 @@ uint32_t SelectValue(Select sel, const LaneInputs& in, const RowState& rows) {
 }  // namespace
 
 Pass DecodePass(const Word128& instruction) {
+  namespace f = isa::pass;
   const Word128& w = instruction;
   return {
-      .rx = w.Field(119, 5),
-      .rx2 = w.Field(114, 5),
-      .rd = w.Field(109, 5),
-      .rq = w.Field(104, 5),
-      .rnw = w.Field(99, 5),
-      .rn8 = w.Field(94, 5),
-      .rpb = w.Field(89, 5),
-      .rimm = w.Field(84, 5),
-      .rimm2 = w.Field(79, 5),
-      .x2_en = Flag(w, 78),
-      .mg = w.Field(76, 2),
-      .ms = w.Field(74, 2),
-      .mx = Decode(w.Field(72, 2), MapMode::kUpper, MapMode::kNone),
-      .mx2 = Decode(w.Field(70, 2), MapMode::kUpper, MapMode::kNone),
-      .md = Decode(w.Field(68, 2), MapMode::kUpper, MapMode::kNone),
-      .pa = Decode(w.Field(66, 2), PbufAccess::kTile, PbufAccess::kNone),
-      .c0 = Decode(w.Field(63, 3), C0Source::kImm, C0Source::kZero),
-      .b = Decode(w.Field(60, 3), BSource::kPre, BSource::kOne),
-      .nl = static_cast<Nonlinear>(w.Field(58, 2)),
-      .po = static_cast<PostOp>(w.Field(56, 2)),
-      .pv = Flag(w, 55),
-      .mask_en = Flag(w, 54),
-      .red = Decode(w.Field(52, 2), Reduction::kMax, Reduction::kNone),
-      .wr = static_cast<WriteTarget>(w.Field(50, 2)),
-      .sf = Decode(w.Field(47, 3), ScalarFn::kRsqrt, ScalarFn::kNone),
-      .st = Flag(w, 46),
-      .srn = Flag(w, 45),
-      .seps = Flag(w, 44),
-      .px = w.Field(24, 20),
-      .cmp = Decode(w.Field(21, 3), Compare::kGe, Compare::kNone),
-      .cl = static_cast<CompareLeft>(w.Field(19, 2)),
-      .cr = Flag(w, 18),
-      .cmp_int = Flag(w, 17),
-      .sel = Decode(w.Field(14, 3), Select::kRs1, Select::kZero),
-      .ialu = static_cast<IntegerOp>(w.Field(11, 3)),
-      .dst_s1 = Flag(w, 8),
-      .c0_pred = Flag(w, 10),
-      .x_s1 = Flag(w, 9),
-      .ctx = w.Field(6, 2),
-      .rm = Decode(w.Field(4, 2), RowMask::kSet, RowMask::kNone),
+      .rx = w.Field(f::kRx),
+      .rx2 = w.Field(f::kRx2),
+      .rd = w.Field(f::kRd),
+      .rq = w.Field(f::kRq),
+      .rnw = w.Field(f::kRnw),
+      .rn8 = w.Field(f::kRn8),
+      .rpb = w.Field(f::kRpb),
+      .rimm = w.Field(f::kRimm),
+      .rimm2 = w.Field(f::kRimm2),
+      .x2_en = Flag(w, f::kX2En),
+      .mg = w.Field(f::kMg),
+      .ms = w.Field(f::kMs),
+      .mx = Decode(w.Field(f::kMx), MapMode::kUpper, MapMode::kNone),
+      .mx2 = Decode(w.Field(f::kMx2), MapMode::kUpper, MapMode::kNone),
+      .md = Decode(w.Field(f::kMd), MapMode::kUpper, MapMode::kNone),
+      .pa = Decode(w.Field(f::kPa), PbufAccess::kTile, PbufAccess::kNone),
+      .c0 = Decode(w.Field(f::kC0), C0Source::kImm, C0Source::kZero),
+      .b = Decode(w.Field(f::kB), BSource::kPre, BSource::kOne),
+      .nl = static_cast<Nonlinear>(w.Field(f::kNl)),
+      .po = static_cast<PostOp>(w.Field(f::kPo)),
+      .pv = Flag(w, f::kPv),
+      .red = Decode(w.Field(f::kRed), Reduction::kMax, Reduction::kNone),
+      .wr = static_cast<WriteTarget>(w.Field(f::kWr)),
+      .sf = Decode(w.Field(f::kSf), ScalarFn::kRsqrt, ScalarFn::kNone),
+      .st = Flag(w, f::kSt),
+      .srn = Flag(w, f::kSrn),
+      .seps = Flag(w, f::kSeps),
+      .px = w.Field(f::kPx),
+      .cmp = Decode(w.Field(f::kCmp), Compare::kGe, Compare::kNone),
+      .cl = Decode(w.Field(f::kCl), CompareLeft::kRowColumn, CompareLeft::kX),
+      .cr = Flag(w, f::kCr),
+      .cmp_int = Flag(w, f::kCmpInt),
+      .sel = Decode(w.Field(f::kSel), Select::kRs1, Select::kNone),
+      .ialu = static_cast<IntegerOp>(w.Field(f::kIalu)),
+      .dst_s1 = Flag(w, f::kDstS1),
+      .c0_pred = Flag(w, f::kC0Pred),
+      .x_s1 = Flag(w, f::kXS1),
+      .ctx = w.Field(f::kCtx),
+      .rm = Decode(w.Field(f::kRm), RowMask::kSet, RowMask::kNone),
   };
 }
 
@@ -283,11 +286,15 @@ bool Predicate(const Pass& pass, const LaneInputs& in) {
     case CompareLeft::kPosition:
       left = (in.t * kLanes) + in.l;
       break;
+    case CompareLeft::kRowColumn:
+      left = (in.w * kLanes) + in.l;
+      break;
     case CompareLeft::kX:
       break;
   }
-  const bool lane =
-      pass.cl == CompareLeft::kColumn || pass.cl == CompareLeft::kPosition;
+  const bool lane = pass.cl == CompareLeft::kColumn ||
+                    pass.cl == CompareLeft::kPosition ||
+                    pass.cl == CompareLeft::kRowColumn;
   const uint32_t right = pass.cr ? in.x2 : in.imm2;
   if (pass.cmp_int || lane) {
     return Holds(pass.cmp, left ^ kFp32SignBit, right ^ kFp32SignBit);

@@ -410,11 +410,12 @@ class Qkv {
   void PostVec(size_t j, uint32_t q_abuf) {
     const Head& head = heads_[j];
     if (head.linear == 2) {
-      program_.Vec({.op = VecOp::kQuant,
+      program_.Vec({.op = VecOp::kCopy,
                     .src = kCb[j % 2],
                     .dst = kVt[j % 2],
                     .rows_q = kQuads,
-                    .n8 = kHeadWords},
+                    .n8 = kHeadWords,
+                    .q = true},
                    std::format("{} quant {}", note_, Name(j)));
       return;
     }
@@ -474,10 +475,10 @@ class Attention {
       const uint64_t column = uint64_t{2} * g * kWordA;
       Ld(program_, k_ + column, Mem::kWbuf, g * 4 * rows, rows, 2,
          kKvBlocks * kWordA, std::format("{} ld K group {}", note_, g),
-         DmaMode::kSplit8);
+         DmaKind::kSplit8);
       Ld(program_, v_ + column, Mem::kWbuf, (g * 4 * rows) + (2 * rows), rows,
          2, kKvBlocks * kWordA, std::format("{} ld V group {}", note_, g),
-         DmaMode::kT32Split8);
+         DmaKind::kT32Split8);
     }
     if (!cross_) {
       Ld(program_, expert_.mask, Mem::kFbuf, 2 * s_, kQuads, keys_ / 8,
@@ -625,7 +626,7 @@ void GateUp(Program& program, const DecoderLayer& layer, uint32_t a_base,
        kGateGroups, kKb, kKb * kWordA, std::format("{} ld W up {}", note, j));
   };
   const auto post = [&](uint32_t j) {
-    program.Vec({.op = VecOp::kSiluMul,
+    program.Vec({.op = VecOp::kActMul,
                  .src = kG[j % 2],
                  .src2 = kU[j % 2],
                  .dst = h_abuf + (j * kQuads * kGateBlocks),
@@ -675,11 +676,12 @@ void Layer(Program& program, const Expert& expert, const Lm& lm,
       .Emit(kQa);
   Ld(program, expert.o, Mem::kFbuf, 0, kQuads, kQueryWords,
      kQueryWords * kWordF, std::format("{} quant O ld O", tag));
-  program.Vec({.op = VecOp::kQuant,
+  program.Vec({.op = VecOp::kCopy,
                .src = 0,
                .dst = kAo,
                .rows_q = kQuads,
-               .n8 = kQueryWords},
+               .n8 = kQueryWords,
+               .q = true},
               std::format("{} quant O", tag));
   ProjResidual(
       program,
@@ -724,11 +726,12 @@ void CrossKv(Program& program, const Expert& expert, const Lm& lm,
                   .n8 = kKvGroups,
                   .c_base = i * c_words},
                  std::format("{} gemm", note));
-    program.Vec({.op = VecOp::kQuant,
+    program.Vec({.op = VecOp::kCopy,
                  .src = i * c_words,
                  .dst = kKvOut + (i * a_words),
                  .rows_q = quads,
-                 .n8 = kKvGroups},
+                 .n8 = kKvGroups,
+                 .q = true},
                 std::format("{} quant", note));
     St(program, outputs[i], Mem::kAbuf, kKvOut + (i * a_words), quads,
        kKvBlocks, kKvBlocks * kWordA, std::format("{} st", note));
@@ -745,11 +748,12 @@ class Suffix {
        std::format("{} ld time embedding (MXINT8)", tag_));
     Ld(program_, xt, Mem::kFbuf, kXt, kQuads, kActionWords,
        kActionWords * kWordF, std::format("{} ld x_t", tag_));
-    program_.Vec({.op = VecOp::kQuant,
+    program_.Vec({.op = VecOp::kCopy,
                   .src = kXt,
                   .dst = kAx,
                   .rows_q = kQuads,
-                  .n8 = kActionWords},
+                  .n8 = kActionWords,
+                  .q = true},
                  std::format("{} quant x_t", tag_));
     LinearTiles(
         program_,
@@ -802,7 +806,7 @@ class Suffix {
   void BiasSilu(uint32_t nt) {
     const uint32_t c = kQuads * kTileFirst[nt];
     Bias(nt, kPbMlpIn, c, false);
-    program_.Vec({.op = VecOp::kSilu,
+    program_.Vec({.op = VecOp::kAct,
                   .src = c,
                   .dst = kAh + (kQuads * (kTileFirst[nt] / 4)),
                   .rows_q = kQuads,

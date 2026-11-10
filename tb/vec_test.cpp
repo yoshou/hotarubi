@@ -21,22 +21,20 @@ constexpr uint32_t kPbufArea = Ddr::kBase + 0x300000U;
 constexpr uint32_t kTbufArea = Ddr::kBase + 0x400000U;
 constexpr uint32_t kOutArea = Ddr::kBase + 0x500000U;
 
-constexpr uint32_t kOpAdd = 0;
-constexpr uint32_t kOpMul = 1;
-constexpr uint32_t kOpAddP = 2;
-constexpr uint32_t kOpMulP = 3;
-constexpr uint32_t kOpScale = 4;
-constexpr uint32_t kOpCopy = 5;
-constexpr uint32_t kOpLayerNorm = 6;
-constexpr uint32_t kOpRmsNorm = 7;
-constexpr uint32_t kOpGelu = 8;
-constexpr uint32_t kOpSilu = 9;
-constexpr uint32_t kOpSiluMul = 10;
-constexpr uint32_t kOpSoftmax = 11;
-constexpr uint32_t kOpRope = 12;
-constexpr uint32_t kOpQuant = 13;
-constexpr uint32_t kOpRelu = 14;
-constexpr uint32_t kOpMax = 15;
+constexpr uint32_t kOpAdd = isa::library::kAdd;
+constexpr uint32_t kOpMul = isa::library::kMul;
+constexpr uint32_t kOpAddP = isa::library::kAddP;
+constexpr uint32_t kOpMulP = isa::library::kMulP;
+constexpr uint32_t kOpScale = isa::library::kScale;
+constexpr uint32_t kOpCopy = isa::library::kCopy;
+constexpr uint32_t kOpLayerNorm = isa::library::kLayerNorm;
+constexpr uint32_t kOpRmsNorm = isa::library::kRmsNorm;
+constexpr uint32_t kOpAct = isa::library::kAct;
+constexpr uint32_t kOpActMul = isa::library::kActMul;
+constexpr uint32_t kOpSoftmax = isa::library::kSoftmax;
+constexpr uint32_t kOpRope = isa::library::kRope;
+constexpr uint32_t kOpRelu = isa::library::kRelu;
+constexpr uint32_t kOpMax = isa::library::kMax;
 
 using Rows = std::vector<std::vector<uint32_t>>;
 
@@ -244,7 +242,7 @@ TEST_P(VecBinaryTest, MatchesElementwiseReference) {
     value = RandomFp32(rng, -3, 3);
   }
   const uint32_t imm = RandomFp32(rng, -2, 2);
-  const VecArgs args{.op = param.op,
+  const VecArgs args{.entry = param.op,
                      .src = 16,
                      .src2 = 300,
                      .dst = param.q ? 40U : 600U,
@@ -291,7 +289,7 @@ INSTANTIATE_TEST_SUITE_P(
                     BinaryCase{kOpRelu, false}, BinaryCase{kOpMax, false},
                     BinaryCase{kOpAdd, true}, BinaryCase{kOpMulP, true},
                     BinaryCase{kOpScale, true}, BinaryCase{kOpCopy, true},
-                    BinaryCase{kOpQuant, true}, BinaryCase{kOpMax, true}));
+                    BinaryCase{kOpMax, true}));
 
 uint32_t ElementCount(const VecArgs& args) {
   return args.aux == 0 ? 8 * args.n8 : args.aux;
@@ -354,14 +352,14 @@ TEST_P(VecNormTest, LayerNorm) {
   }
   std::vector<uint32_t> params = gamma;
   params.insert(params.end(), beta.begin(), beta.end());
-  const VecArgs args{.op = kOpLayerNorm,
+  const VecArgs args{.entry = kOpLayerNorm,
                      .src = 0,
-                     .src2 = 500,
+                     .src2 = q ? 500U : 900U,
                      .dst = q ? 3U : 900U,
                      .rows_q = kRowsQ,
                      .n8 = kN8,
                      .p_base = 11,
-                     .aux = 0,
+                     .aux = 8 * kN8,
                      .imm = 0x3727C5ACU,
                      .q = q};
   VecBench bench(q ? 303 : 304);
@@ -382,14 +380,14 @@ TEST_P(VecNormTest, RmsNorm) {
   for (uint32_t& value : gamma) {
     value = RandomFp32(rng, -1, 1);
   }
-  const VecArgs args{.op = kOpRmsNorm,
+  const VecArgs args{.entry = kOpRmsNorm,
                      .src = 20,
-                     .src2 = 700,
+                     .src2 = q ? 700U : 1000U,
                      .dst = q ? 100U : 1000U,
                      .rows_q = kRowsQ,
                      .n8 = kN8,
                      .p_base = 0,
-                     .aux = 0,
+                     .aux = 8 * kN8,
                      .imm = 0x358637BDU,
                      .q = q};
   VecBench bench(q ? 313 : 314);
@@ -409,6 +407,7 @@ uint32_t SignFix(uint32_t x, uint32_t a) {
 
 struct ActCase {
   uint32_t op;
+  bool gelu;
   bool q;
 };
 
@@ -416,17 +415,17 @@ class VecActTest : public testing::TestWithParam<ActCase> {};
 
 TEST_P(VecActTest, MatchesTableReference) {
   const ActCase param = GetParam();
-  std::mt19937 rng(400 + param.op + (param.q ? 50 : 0));
+  std::mt19937 rng(400 + param.op + (param.gelu ? 20 : 0) + (param.q ? 50 : 0));
   constexpr uint32_t kRowsQ = 2;
   constexpr uint32_t kN8 = 8;
-  const Tables tables = MakeTables(param.op == kOpGelu ? ActFunction::kGeluPhi
-                                                       : ActFunction::kSigmoid);
+  const Tables tables =
+      MakeTables(param.gelu ? ActFunction::kGeluPhi : ActFunction::kSigmoid);
   Rows x = RandomRows(rng, 4 * kRowsQ, 8 * kN8, -8, 4);
   x[0][0] = 0x41800000U;
   x[0][1] = 0xC1A00000U;
   x[0][2] = 0x41700000U;
   const Rows up = RandomRows(rng, 4 * kRowsQ, 8 * kN8, -3, 3);
-  const VecArgs args{.op = param.op,
+  const VecArgs args{.entry = param.op,
                      .src = 64,
                      .src2 = 128,
                      .dst = param.q ? 0U : 256U,
@@ -434,7 +433,7 @@ TEST_P(VecActTest, MatchesTableReference) {
                      .n8 = kN8,
                      .p_base = 0,
                      .aux = 0,
-                     .imm = 2000,
+                     .imm = param.q ? 2000U : 256U,
                      .q = param.q};
   VecBench bench(500 + param.op);
   bench.Run({.args = args,
@@ -443,17 +442,17 @@ TEST_P(VecActTest, MatchesTableReference) {
              .tables = &tables});
   const Rows expected = Map(x, [&](uint32_t t, uint32_t ch, uint32_t value) {
     const uint32_t y = SignFix(value, TableAct(tables, value));
-    return param.op == kOpSiluMul ? Fp32Mul(y, up[t][ch]) : y;
+    return param.op == kOpActMul ? Fp32Mul(y, up[t][ch]) : y;
   });
   CheckOutput(bench, args, expected);
 }
 
 INSTANTIATE_TEST_SUITE_P(Ops, VecActTest,
-                         testing::Values(ActCase{kOpGelu, false},
-                                         ActCase{kOpSilu, false},
-                                         ActCase{kOpSiluMul, false},
-                                         ActCase{kOpSilu, true},
-                                         ActCase{kOpSiluMul, true}));
+                         testing::Values(ActCase{kOpAct, true, false},
+                                         ActCase{kOpAct, false, false},
+                                         ActCase{kOpActMul, false, false},
+                                         ActCase{kOpAct, false, true},
+                                         ActCase{kOpActMul, false, true}));
 
 Rows Softmax(const Rows& x, const Tables& tables, uint32_t valid) {
   Rows y = x;
@@ -486,7 +485,7 @@ TEST_P(VecSoftmaxTest, MatchesReference) {
   constexpr uint32_t kN8 = 8;
   const Tables tables = MakeTables(ActFunction::kSigmoid);
   const Rows x = RandomRows(rng, 4 * kRowsQ, 8 * kN8, -4, 3);
-  const VecArgs args{.op = kOpSoftmax,
+  const VecArgs args{.entry = kOpSoftmax,
                      .src = 1,
                      .src2 = 0,
                      .dst = param.q ? 9U : 2000U,
@@ -494,7 +493,7 @@ TEST_P(VecSoftmaxTest, MatchesReference) {
                      .n8 = kN8,
                      .p_base = 0,
                      .aux = param.valid,
-                     .imm = 3000,
+                     .imm = param.q ? 3000U : 2000U,
                      .q = param.q};
   VecBench bench(700 + param.valid);
   bench.Run(
@@ -523,7 +522,7 @@ TEST_P(VecRopeTest, RotatesHalvesWithTiles) {
       value = RandomFp32(rng, -2, 0);
     }
   }
-  const VecArgs args{.op = kOpRope,
+  const VecArgs args{.entry = kOpRope,
                      .src = 32,
                      .src2 = 0,
                      .dst = q ? 0U : 400U,
@@ -531,7 +530,7 @@ TEST_P(VecRopeTest, RotatesHalvesWithTiles) {
                      .n8 = kN8,
                      .p_base = 5,
                      .aux = kHeads,
-                     .imm = 1500,
+                     .imm = q ? 1500U : 400U,
                      .q = q};
   VecBench bench(q ? 803 : 804);
   bench.Run({.args = args,

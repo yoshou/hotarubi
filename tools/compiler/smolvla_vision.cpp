@@ -231,7 +231,7 @@ void Projection(Program& program, uint64_t w, uint32_t pb, uint64_t out,
                    .n8 = kTileGroups,
                    .p_base = pb + (nt * 8)},
                   std::format("{} bias nt{} mc{}", note, nt, mc));
-      program.Vec({.op = VecOp::kGelu,
+      program.Vec({.op = VecOp::kAct,
                    .src = c,
                    .dst = kTmp[j % 2],
                    .rows_q = kChunkQuads,
@@ -334,11 +334,11 @@ class Attention {
     const uint32_t kv = kKv[h % 2];
     if (which == 0) {
       Ld(program_, vision_.k + column, Mem::kWbuf, kv, kQuads, 2, kKb * kWordA,
-         std::format("{} ld K head {}", note_, h), DmaMode::kSplit8);
+         std::format("{} ld K head {}", note_, h), DmaKind::kSplit8);
     } else if (which == 1) {
       Ld(program_, vision_.v + column, Mem::kWbuf, kv + (2 * kPlane), kQuads, 2,
          kKb * kWordA, std::format("{} ld V head {}", note_, h),
-         DmaMode::kT32Split8);
+         DmaKind::kT32Split8);
     } else {
       Ld(program_, vision_.q + column, Mem::kAbuf, kQh[h % 2], kQuads, 2,
          kKb * kWordA, std::format("{} ld Q head {}", note_, h));
@@ -418,11 +418,12 @@ void QuantToAbuf(Program& program, uint64_t x, uint32_t dst,
     Ld(program, x + (uint64_t{t} * kTileQuads * kWords * kWordF), Mem::kFbuf,
        kXt[t % 2], kTileQuads, kWords, kWords * kWordF,
        std::format("{} ld tile {}", note, t));
-    program.Vec({.op = VecOp::kQuant,
+    program.Vec({.op = VecOp::kCopy,
                  .src = kXt[t % 2],
                  .dst = dst + (t * kTileQuads * kKb),
                  .rows_q = kTileQuads,
-                 .n8 = kWords},
+                 .n8 = kWords,
+                 .q = true},
                 std::format("{} quant tile {}", note, t));
   }
 }
@@ -702,11 +703,12 @@ void StateProjection(Program& program, const Vision& vision, const Dims& dims,
      kLmBlocks * kWordF, "state ld PBUF (bias)");
   Ld(program, vision.state_in, Mem::kFbuf, 0, kStateQuads, kStateWords,
      kStateWords * kWordF, "state ld state");
-  program.Vec({.op = VecOp::kQuant,
+  program.Vec({.op = VecOp::kCopy,
                .src = 0,
                .dst = 0,
                .rows_q = kStateQuads,
-               .n8 = kStateWords},
+               .n8 = kStateWords,
+               .q = true},
               "state quant");
   Ld(program, vision.state_hi, Mem::kWbuf, 0, kLmWords, 1, kWordA,
      "state ld W hi");

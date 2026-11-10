@@ -72,7 +72,6 @@ VecEngineBench::VecEngineBench(uint32_t deny_percent, uint32_t seed)
   model.cmd_valid_i = 0;
   model.fbuf_rd_grant_i = 0;
   model.fbuf_wr_grant_i = 0;
-  model.abuf_wr_grant_i = 0;
   Drive(model, *state_);
   for (uint32_t i = 0; i < kResetCycles; ++i) {
     model.clk_i = 0;
@@ -97,7 +96,6 @@ void VecEngineBench::Tick(iss::Memories& memories) {
   model.eval();
   model.fbuf_rd_grant_i = (model.fbuf_rd_req_o != 0 && !deny()) ? 1 : 0;
   model.fbuf_wr_grant_i = (model.fbuf_wr_req_o != 0 && !deny()) ? 1 : 0;
-  model.abuf_wr_grant_i = model.abuf_wr_req_o;
   model.eval();
 
   State next = state;
@@ -142,14 +140,14 @@ VecEngineRun VecEngineBench::Run(const iss::VecCommand& command,
                                  iss::Memories& memories) {
   Vvec_engine& model = *model_;
   model.cmd_valid_i = 1;
-  model.cmd_op_i = command.op & 0x1FU;
+  model.cmd_entry_i = command.entry & 0xFFU;
   model.cmd_q_i = command.quantize ? 1 : 0;
   model.cmd_src_i = command.src & 0xFFFU;
   model.cmd_src2_i = command.src2 & 0xFFFU;
   model.cmd_dst_i = command.dst & 0x1FFFU;
   model.cmd_rows_q_i = command.rows_q & 0x1FFU;
   model.cmd_n8_i = command.n8 & 0xFFU;
-  model.cmd_p_base_i = command.p_base & 0x3FFU;
+  model.cmd_p_base_i = command.p_base & 0x1FFU;
   model.cmd_aux_i = command.aux & 0x7FFU;
   model.cmd_imm_i = command.imm;
   model.clk_i = 0;

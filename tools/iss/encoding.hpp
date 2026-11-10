@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include "hotarubi/isa.hpp"
 #include "word.hpp"
 
 namespace hotarubi::iss::encoding {
@@ -29,7 +30,6 @@ struct PassFields {
   uint32_t nl = 0;
   uint32_t po = 0;
   uint32_t pv = 0;
-  uint32_t mask_en = 0;
   uint32_t red = 0;
   uint32_t wr = 0;
   uint32_t sf = 0;
@@ -62,7 +62,7 @@ struct SmemFields {
   uint32_t imm = 0;
 };
 
-Word128& Set(Word128& word, uint32_t lsb, uint32_t width, uint64_t value);
+Word128& Set(Word128& word, isa::Field field, uint64_t value);
 Word128 Pass(const PassFields& fields);
 Word128 Salu(uint32_t op, uint32_t rd, uint32_t ra, uint32_t rb);
 Word128 SaluImm(uint32_t op, uint32_t rd, uint32_t ra, uint32_t imm);

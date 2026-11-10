@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <span>
 
+#include "hotarubi/isa.hpp"
+
 namespace hotarubi::iss {
 
 struct Word128 {
@@ -21,6 +23,10 @@ struct Word128 {
       value = (low >> lsb) | (high << (64 - lsb));
     }
     return static_cast<uint32_t>(value & ((uint64_t{1} << width) - 1));
+  }
+
+  [[nodiscard]] constexpr uint32_t Field(isa::Field field) const {
+    return Field(field.lsb, field.width);
   }
 
   friend constexpr bool operator==(const Word128&, const Word128&) = default;

@@ -453,14 +453,14 @@ class ConvEmitter {
     }
     if (spec_.out_i8 != nullptr) {
       const bool relu = spec_.relu && spec_.out_f32 == nullptr;
-      program_.Vec({.op = relu ? VecOp::kRelu : VecOp::kQuant,
-                    .src = c,
-                    .dst = qb_[g % 2],
-                    .rows_q = mt_ / 4,
-                    .n8 = nt_ / 8,
-                    .q = true},
-                   std::format("{} {}+Q {}", spec_.name,
-                               relu ? "RELU" : "QUANT", where));
+      program_.Vec(
+          {.op = relu ? VecOp::kRelu : VecOp::kCopy,
+           .src = c,
+           .dst = qb_[g % 2],
+           .rows_q = mt_ / 4,
+           .n8 = nt_ / 8,
+           .q = true},
+          std::format("{} {}+Q {}", spec_.name, relu ? "RELU" : "COPY", where));
     }
   }
 
@@ -764,11 +764,12 @@ void EmitMaxpool(Program& program, DdrImage& image, uint64_t base,
                    .n8 = x.c / 8},
                   std::format("maxpool max t{} f{}", t, f));
     }
-    program.Vec({.op = VecOp::kQuant,
+    program.Vec({.op = VecOp::kCopy,
                  .src = face(t, 0),
                  .dst = (t % 2) * q_words,
                  .rows_q = kMaxpoolTile / 4,
-                 .n8 = x.c / 8},
+                 .n8 = x.c / 8,
+                 .q = true},
                 std::format("maxpool quant t{}", t));
     if (t + 1 < tiles) {
       load(t + 1);
@@ -791,11 +792,12 @@ void EmitQuantMap(Program& program, const FMap& x, const FMap& out,
   program.Load(Tokens(x.Addr(0, 0), Mem::kFbuf, xs[0], kTile, x.tok[0]),
                std::format("{} ld t0", name));
   for (uint32_t t = 0; t < tiles; ++t) {
-    program.Vec({.op = VecOp::kQuant,
+    program.Vec({.op = VecOp::kCopy,
                  .src = xs[t % 2],
                  .dst = qb[t % 2],
                  .rows_q = kTile / 4,
-                 .n8 = words},
+                 .n8 = words,
+                 .q = true},
                 std::format("{} quant t{}", name, t));
     if (t + 1 < tiles) {
       program.Load(Tokens(x.Addr(0, uint64_t{t + 1} * kTile), Mem::kFbuf,
@@ -854,11 +856,12 @@ void EmitUpsampleAdd(Program& program, DdrImage& image, uint64_t base,
     if (t + 1 < tiles) {
       load(t + 1);
     }
-    program.Vec({.op = VecOp::kQuant,
+    program.Vec({.op = VecOp::kCopy,
                  .src = kXa[t % 2],
                  .dst = kQb[t % 2],
                  .rows_q = kTile / 4,
-                 .n8 = 32},
+                 .n8 = 32,
+                 .q = true},
                 std::format("{} quant t{}", name, t));
     if (out_f32 != nullptr) {
       program.Store(Tokens(out_f32->Addr(0, uint64_t{t} * kTile), Mem::kFbuf,

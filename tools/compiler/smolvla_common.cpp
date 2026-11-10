@@ -24,7 +24,7 @@ constexpr uint64_t kStrideLimit = uint64_t{1} << 24;
 
 size_t Ld(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
           uint32_t rows, uint32_t row_words, uint64_t stride,
-          std::string_view note, DmaMode mode) {
+          std::string_view note, DmaKind kind) {
   Require(stride < kStrideLimit,
           std::format("DMA stride {} is too large", stride));
   return program.Load({.ddr_offset = ddr,
@@ -33,7 +33,7 @@ size_t Ld(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
                        .rows = rows,
                        .row_words = row_words,
                        .ddr_stride = static_cast<uint32_t>(stride),
-                       .mode = mode},
+                       .kind = kind},
                       note);
 }
 

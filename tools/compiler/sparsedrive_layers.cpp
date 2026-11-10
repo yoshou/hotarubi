@@ -166,7 +166,7 @@ void AttentionEmitter::LoadKv(uint32_t h, uint32_t c, bool key) {
                  .rows = nkc_ / 4,
                  .row_words = hb_,
                  .ddr_stride = static_cast<uint32_t>(stride_),
-                 .mode = key ? DmaMode::kSplit8 : DmaMode::kT32Split8},
+                 .kind = key ? DmaKind::kSplit8 : DmaKind::kT32Split8},
                 std::format("{} ld {} h{} c{}", note_, key ? "K" : "V", h, c));
 }
 

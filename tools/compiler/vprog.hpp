@@ -113,7 +113,13 @@ enum class Cmp : uint8_t {
   kGt = 5,
   kGe = 6
 };
-enum class CmpLeft : uint8_t { kX = 0, kX2 = 1, kColumn = 2, kPosition = 3 };
+enum class CmpLeft : uint8_t {
+  kX = 0,
+  kX2 = 1,
+  kColumn = 2,
+  kPosition = 3,
+  kRowColumn = 4
+};
 enum class Sel : uint8_t {
   kNone = 0,
   kZero = 1,
@@ -169,7 +175,6 @@ struct Pass {
   Nl nl = Nl::kNone;
   Post post = Post::kAdd;
   bool post_x2 = false;
-  bool mask_en = false;
   Reduce red = Reduce::kNone;
   Write wr = Write::kNone;
   RowScalar sc{};

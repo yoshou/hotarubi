@@ -23,7 +23,6 @@ constexpr uint32_t kTbufArea = Ddr::kBase + 0x340000U;
 constexpr uint32_t kPbufArea = Ddr::kBase + 0x380000U;
 constexpr uint32_t kOutArea = Ddr::kBase + 0x400000U;
 constexpr uint32_t kProgramStart = 256;
-constexpr uint32_t kOpRun = 16;
 
 constexpr uint32_t kRegSrc = 1;
 constexpr uint32_t kRegSrc2 = 2;
@@ -31,8 +30,9 @@ constexpr uint32_t kRegDst = 3;
 constexpr uint32_t kRegRowsQ = 4;
 constexpr uint32_t kRegN8 = 5;
 constexpr uint32_t kRegPBase = 6;
+constexpr uint32_t kRegAux = 7;
 constexpr uint32_t kRegImm = 8;
-constexpr uint32_t kRegQ = 10;
+constexpr uint32_t kRegQ = 9;
 
 constexpr uint32_t kSaluAdd = 0;
 constexpr uint32_t kSaluSub = 1;
@@ -70,7 +70,6 @@ struct Pass {
   uint32_t nl = 0;
   uint32_t po = 0;
   bool pv = false;
-  bool mask_en = false;
   uint32_t red = 0;
   uint32_t wr = 1;
   uint32_t sf = 0;
@@ -92,69 +91,71 @@ struct Pass {
 };
 
 Instruction Encode(const Pass& p) {
+  namespace f = isa::pass;
   Instruction word;
-  word.Set(124, 4, 0)
-      .Set(119, 5, p.rx)
-      .Set(114, 5, p.rx2)
-      .Set(109, 5, p.rd)
-      .Set(104, 5, p.rq)
-      .Set(99, 5, p.rnw)
-      .Set(94, 5, p.rn8)
-      .Set(89, 5, p.rpb)
-      .Set(84, 5, p.rimm)
-      .Set(79, 5, p.rimm2)
-      .Set(78, 1, p.x2_en ? 1 : 0)
-      .Set(76, 2, p.mg)
-      .Set(74, 2, p.ms)
-      .Set(72, 2, p.mx)
-      .Set(70, 2, p.mx2)
-      .Set(68, 2, p.md)
-      .Set(66, 2, p.pa)
-      .Set(63, 3, p.c0)
-      .Set(60, 3, p.b)
-      .Set(58, 2, p.nl)
-      .Set(56, 2, p.po)
-      .Set(55, 1, p.pv ? 1 : 0)
-      .Set(54, 1, p.mask_en ? 1 : 0)
-      .Set(52, 2, p.red)
-      .Set(50, 2, p.wr)
-      .Set(47, 3, p.sf)
-      .Set(46, 1, p.st ? 1 : 0)
-      .Set(45, 1, p.srn ? 1 : 0)
-      .Set(44, 1, p.seps ? 1 : 0)
-      .Set(24, 20, p.px)
-      .Set(21, 3, p.cmp)
-      .Set(19, 2, p.cl)
-      .Set(18, 1, p.cr ? 1 : 0)
-      .Set(17, 1, p.cmp_int ? 1 : 0)
-      .Set(14, 3, p.sel)
-      .Set(11, 3, p.ialu)
-      .Set(10, 1, p.c0_pred ? 1 : 0)
-      .Set(9, 1, p.x_s1 ? 1 : 0)
-      .Set(8, 1, p.dst_s1 ? 1 : 0)
-      .Set(6, 2, p.ctx)
-      .Set(4, 2, p.rm);
+  word.Set(isa::program::kKind, isa::program::kKindPass)
+      .Set(f::kRx, p.rx)
+      .Set(f::kRx2, p.rx2)
+      .Set(f::kRd, p.rd)
+      .Set(f::kRq, p.rq)
+      .Set(f::kRnw, p.rnw)
+      .Set(f::kRn8, p.rn8)
+      .Set(f::kRpb, p.rpb)
+      .Set(f::kRimm, p.rimm)
+      .Set(f::kRimm2, p.rimm2)
+      .Set(f::kX2En, p.x2_en ? 1 : 0)
+      .Set(f::kMg, p.mg)
+      .Set(f::kMs, p.ms)
+      .Set(f::kMx, p.mx)
+      .Set(f::kMx2, p.mx2)
+      .Set(f::kMd, p.md)
+      .Set(f::kPa, p.pa)
+      .Set(f::kC0, p.c0)
+      .Set(f::kB, p.b)
+      .Set(f::kNl, p.nl)
+      .Set(f::kPo, p.po)
+      .Set(f::kPv, p.pv ? 1 : 0)
+      .Set(f::kRed, p.red)
+      .Set(f::kWr, p.wr)
+      .Set(f::kSf, p.sf)
+      .Set(f::kSt, p.st ? 1 : 0)
+      .Set(f::kSrn, p.srn ? 1 : 0)
+      .Set(f::kSeps, p.seps ? 1 : 0)
+      .Set(f::kPx, p.px)
+      .Set(f::kCmp, p.cmp)
+      .Set(f::kCl, p.cl)
+      .Set(f::kCr, p.cr ? 1 : 0)
+      .Set(f::kCmpInt, p.cmp_int ? 1 : 0)
+      .Set(f::kSel, p.sel)
+      .Set(f::kIalu, p.ialu)
+      .Set(f::kC0Pred, p.c0_pred ? 1 : 0)
+      .Set(f::kXS1, p.x_s1 ? 1 : 0)
+      .Set(f::kDstS1, p.dst_s1 ? 1 : 0)
+      .Set(f::kCtx, p.ctx)
+      .Set(f::kRm, p.rm);
   return word;
 }
 
 Instruction Salu(uint32_t op, uint32_t rd, uint32_t ra, uint32_t rb) {
+  namespace pg = isa::program;
   Instruction word;
-  word.Set(124, 4, 1)
-      .Set(119, 5, op)
-      .Set(114, 5, rd)
-      .Set(109, 5, ra)
-      .Set(104, 5, rb);
+  word.Set(pg::kKind, pg::kKindSalu)
+      .Set(pg::kOp, op)
+      .Set(pg::kRd, rd)
+      .Set(pg::kRa, ra)
+      .Set(pg::kRb, rb);
   return word;
 }
 
 Instruction SaluImm(uint32_t op, uint32_t rd, uint32_t ra, uint32_t imm) {
+  namespace pg = isa::program;
   Instruction word;
-  word.Set(124, 4, 1)
-      .Set(119, 5, op)
-      .Set(114, 5, rd)
-      .Set(109, 5, ra)
-      .Set(103, 1, 1)
-      .Set(0, 32, imm);
+  word.Set(pg::kKind, pg::kKindSalu)
+      .Set(pg::kOp, op)
+      .Set(pg::kRd, rd)
+      .Set(pg::kRa, ra)
+      .Set(pg::kUseImm, 1)
+      .Set(pg::kImm, imm);
   return word;
 }
 
@@ -171,29 +172,34 @@ struct Smem {
 };
 
 Instruction Encode(const Smem& s) {
+  namespace pg = isa::program;
   Instruction word;
-  word.Set(124, 4, 2)
-      .Set(121, 3, s.op)
-      .Set(116, 5, s.rd)
-      .Set(111, 5, s.ra)
-      .Set(106, 5, s.rb)
-      .Set(105, 1, s.col_imm ? 1 : 0)
-      .Set(100, 5, s.col)
-      .Set(99, 1, s.which)
-      .Set(96, 2, s.ctx)
-      .Set(0, 32, s.imm);
+  word.Set(pg::kKind, pg::kKindSmem)
+      .Set(pg::kOp, s.op)
+      .Set(pg::kRd, s.rd)
+      .Set(pg::kRa, s.ra)
+      .Set(pg::kRb, s.rb)
+      .Set(pg::kUseImm, s.col_imm ? 1 : 0)
+      .Set(pg::kSmemCol, s.col)
+      .Set(pg::kSmemWhich, s.which)
+      .Set(pg::kSmemCtx, s.ctx)
+      .Set(pg::kImm, s.imm);
   return word;
 }
 
 Instruction Branch(uint32_t cond, uint32_t ra, uint32_t target) {
+  namespace pg = isa::program;
   Instruction word;
-  word.Set(124, 4, 3).Set(122, 2, cond).Set(117, 5, ra).Set(0, 16, target);
+  word.Set(pg::kKind, pg::kKindBranch)
+      .Set(pg::kOp, cond)
+      .Set(pg::kRa, ra)
+      .Set(pg::kImm, target);
   return word;
 }
 
 Instruction Ret() {
   Instruction word;
-  word.Set(124, 4, 4);
+  word.Set(isa::program::kKind, isa::program::kKindRet);
   return word;
 }
 
@@ -280,8 +286,7 @@ std::vector<FbufWord> RunProgramOn(NpuBench& bench, const ProgramRun& run) {
                               .row_words = 1024}));
   }
   VecArgs args = run.args;
-  args.op = kOpRun;
-  args.aux = kProgramStart;
+  args.entry = kProgramStart / isa::vec::kEntryWords;
   args.wait = kWaitDma;
   stream.push_back(Vec(args));
   stream.push_back(DmaStore({.ddr_addr = kOutArea,
@@ -355,14 +360,14 @@ uint32_t SaluReference(uint32_t op, uint32_t a, uint32_t b) {
 
 TEST(VecProgramTest, ScalarAluAndRegisterLoads) {
   constexpr uint32_t kOut = 100;
-  const VecArgs args{.op = 0,
+  const VecArgs args{.entry = 0,
                      .src = 37,
                      .src2 = 0,
                      .dst = kOut,
                      .rows_q = 5,
                      .n8 = 9,
                      .p_base = 3,
-                     .aux = 0,
+                     .aux = 1234,
                      .imm = 0x80001234U,
                      .q = false};
   std::vector<Instruction> program = {SaluImm(kSaluMov, kRegOut, 0, kOut),
@@ -380,6 +385,7 @@ TEST(VecProgramTest, ScalarAluAndRegisterLoads) {
   emit(kRegRowsQ, 5);
   emit(kRegN8, 9);
   emit(kRegPBase, 3);
+  emit(kRegAux, 1234);
   emit(kRegImm, 0x80001234U);
   emit(kRegQ, 0);
   std::mt19937 rng(71);
@@ -469,7 +475,7 @@ TEST(VecProgramTest, BranchLoopAndScalarLoads) {
     program.push_back(word);
   }
   program.push_back(Ret());
-  const VecArgs args{.op = 0,
+  const VecArgs args{.entry = 0,
                      .src = kSrc + 1,
                      .src2 = 0,
                      .dst = 0,
@@ -503,6 +509,7 @@ constexpr uint32_t kCmpGe = 6;
 constexpr uint32_t kLeftX2 = 1;
 constexpr uint32_t kLeftColumn = 2;
 constexpr uint32_t kLeftPosition = 3;
+constexpr uint32_t kLeftRowColumn = 4;
 constexpr uint32_t kSelZero = 1;
 constexpr uint32_t kSelX2 = 2;
 constexpr uint32_t kSelImm = 3;
@@ -695,7 +702,9 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
        }},
       {with([](Pass& p) {
          p.rimm2 = kRegThirteen;
-         p.mask_en = true;
+         p.cmp = kCmpLt;
+         p.cl = kLeftRowColumn;
+         p.sel = kSelZero;
        }),
        [](uint32_t a, uint32_t, uint32_t e, uint32_t w) {
          return (8 * w) + (e % 8) >= 13 ? 0U : a;
@@ -729,7 +738,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
     program.push_back(SaluImm(kSaluAdd, kRegOut, kRegOut, kWords));
   }
   program.push_back(Ret());
-  const VecArgs args{.op = 0,
+  const VecArgs args{.entry = 0,
                      .src = 0,
                      .src2 = 0,
                      .dst = 0,
@@ -876,7 +885,7 @@ TEST(VecProgramTest, PermutationsAndWordMappings) {
     }
   }
   program.push_back(Ret());
-  const VecArgs args{.op = 0,
+  const VecArgs args{.entry = 0,
                      .src = 0,
                      .src2 = 0,
                      .dst = 0,
@@ -992,7 +1001,7 @@ TEST(VecProgramTest, RowScalarsAndReductions) {
                                 .rn8 = kRegWords,
                                 .b = kBRs1}));
   program.push_back(Ret());
-  const VecArgs args{.op = 0,
+  const VecArgs args{.entry = 0,
                      .src = 0,
                      .src2 = 0,
                      .dst = 0,
@@ -1067,7 +1076,7 @@ TEST(VecProgramTest, FractionTable) {
                                                         .rn8 = kRegTwo,
                                                         .nl = 3}),
                                             Ret()};
-  const VecArgs args{.op = 0,
+  const VecArgs args{.entry = 0,
                      .src = 0,
                      .src2 = 0,
                      .dst = 0,
@@ -1254,7 +1263,7 @@ TEST(VecProgramTest, Transpose8ChangesRotationBetweenConsecutiveInstructions) {
   EXPECT_EQ(output, expected);
 }
 
-constexpr uint32_t kRegVecCycles = 0x2C;
+constexpr uint32_t kRegVecCycles = 0x30;
 constexpr uint32_t kC0Pbuf = 2;
 constexpr uint32_t kBPbuf = 2;
 constexpr uint32_t kPaRowvec = 1;

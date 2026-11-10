@@ -25,7 +25,7 @@ add_library(tb_vec_ref STATIC vec_ref.cpp)
 target_link_libraries(tb_vec_ref PUBLIC tb_fp32_ref)
 
 add_library(tb_npu_bench STATIC npu_bench.cpp npu_data.cpp gemm_ref.cpp)
-target_link_libraries(tb_npu_bench PUBLIC rtl_npu_top tb_fp32_ref)
+target_link_libraries(tb_npu_bench PUBLIC rtl_npu_top tb_fp32_ref hotarubi_runtime)
 
 hotarubi_add_test(fp32_unit_test fp32_unit_test.cpp)
 target_link_libraries(fp32_unit_test PRIVATE rtl_fp32_add rtl_fp32_mul tb_fp32_ref)

@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
+
 namespace hotarubi::tb {
 
 using Beat = std::array<uint32_t, 4>;
@@ -117,6 +119,9 @@ struct Instruction {
   std::array<uint32_t, 4> words{};
 
   Instruction& Set(uint32_t lsb, uint32_t width, uint64_t value);
+  Instruction& Set(isa::Field field, uint64_t value) {
+    return Set(field.lsb, field.width, value);
+  }
 };
 
 class NpuBench {

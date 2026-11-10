@@ -163,11 +163,12 @@ void QuantRows(Program& program, const Plan& plan, uint64_t x, uint32_t dst,
     Ld(program, x + (uint64_t{t} * kTileQuads * kLmWords * kWordF), Mem::kFbuf,
        kXt[t % 2], kTileQuads, kLmWords, kLmWords * kWordF,
        std::format("{} ld tile {}", note, t));
-    program.Vec({.op = VecOp::kQuant,
+    program.Vec({.op = VecOp::kCopy,
                  .src = kXt[t % 2],
                  .dst = dst + (t * kTileQuads * kLmBlocks),
                  .rows_q = kTileQuads,
-                 .n8 = kLmWords},
+                 .n8 = kLmWords,
+                 .q = true},
                 std::format("{} quant tile {}", note, t));
   }
 }
@@ -244,11 +245,12 @@ class Qkv {
     const Head& head = heads_[j];
     const uint32_t scratch = 2 * plan_.quads * kHeadWords;
     if (head.linear == 2) {
-      program_.Vec({.op = VecOp::kQuant,
+      program_.Vec({.op = VecOp::kCopy,
                     .src = C(j),
                     .dst = plan_.vt[j % 2],
                     .rows_q = plan_.quads,
-                    .n8 = kHeadWords},
+                    .n8 = kHeadWords,
+                    .q = true},
                    std::format("{} quant {}", note_, Name(j)));
       return;
     }
@@ -307,10 +309,10 @@ class Attention {
       const uint64_t column = uint64_t{2} * g * kWordA;
       Ld(program_, k_cache_ + column, Mem::kWbuf, g * group, plan_.quads, 2,
          kKvBlocks * kWordA, std::format("{} ld K group {}", note_, g),
-         DmaMode::kSplit8);
+         DmaKind::kSplit8);
       Ld(program_, v_cache_ + column, Mem::kWbuf, (g * group) + plan_.head,
          plan_.quads, 2, kKvBlocks * kWordA,
-         std::format("{} ld V group {}", note_, g), DmaMode::kT32Split8);
+         std::format("{} ld V group {}", note_, g), DmaKind::kT32Split8);
     }
     const uint32_t total = kQueryHeads * chunks_;
     for (uint32_t g = 0; g < total; ++g) {
@@ -520,7 +522,7 @@ void GateUp(Program& program, const Plan& plan, const DecoderLayer& layer,
        std::format("{} ld W up {}", note, j));
   };
   const auto post = [&](uint32_t j) {
-    program.Vec({.op = VecOp::kSiluMul,
+    program.Vec({.op = VecOp::kActMul,
                  .src = (j % 2) * g_words,
                  .src2 = (2 + (j % 2)) * g_words,
                  .dst = plan.h + (j * plan.quads * kGateBlocks),

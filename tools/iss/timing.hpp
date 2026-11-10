@@ -79,7 +79,8 @@ struct DdrExtent {
 uint64_t GemmArrayCycles(const GemmCommand& command);
 DmaActivity EstimateDma(const DmaCommand& command);
 DdrExtent EstimateDdrExtent(const DmaCommand& command);
-VecActivity FixedOperationActivity(const VecCommand& command);
+bool RunsLibraryProgram(const VecCommand& command);
+VecActivity LibraryActivity(const VecCommand& command);
 
 }  // namespace hotarubi::iss
 

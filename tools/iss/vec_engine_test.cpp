@@ -9,6 +9,7 @@
 
 #include "encoding.hpp"
 #include "hotarubi/exact.hpp"
+#include "hotarubi/isa.hpp"
 #include "memories.hpp"
 #include "reference.hpp"
 #include "word.hpp"
@@ -19,24 +20,20 @@ namespace {
 constexpr uint32_t kLog2e = 0x3FB8AA3B;
 constexpr uint32_t kEpsilon = 0x3727C5AC;
 
-enum Op : uint8_t {
-  kAdd = 0,
-  kMul = 1,
-  kAddP = 2,
-  kMulP = 3,
-  kScale = 4,
-  kCopy = 5,
-  kLayerNorm = 6,
-  kRmsNorm = 7,
-  kGelu = 8,
-  kSilu = 9,
-  kSiluMul = 10,
-  kSoftmax = 11,
-  kRope = 12,
-  kQuant = 13,
-  kRelu = 14,
-  kMax = 15,
-};
+constexpr uint32_t kAdd = isa::library::kAdd;
+constexpr uint32_t kMul = isa::library::kMul;
+constexpr uint32_t kAddP = isa::library::kAddP;
+constexpr uint32_t kMulP = isa::library::kMulP;
+constexpr uint32_t kScale = isa::library::kScale;
+constexpr uint32_t kCopy = isa::library::kCopy;
+constexpr uint32_t kLayerNorm = isa::library::kLayerNorm;
+constexpr uint32_t kRmsNorm = isa::library::kRmsNorm;
+constexpr uint32_t kAct = isa::library::kAct;
+constexpr uint32_t kActMul = isa::library::kActMul;
+constexpr uint32_t kSoftmax = isa::library::kSoftmax;
+constexpr uint32_t kRope = isa::library::kRope;
+constexpr uint32_t kRelu = isa::library::kRelu;
+constexpr uint32_t kMax = isa::library::kMax;
 
 uint32_t FlipSign(uint32_t bits) { return bits ^ 0x80000000U; }
 
@@ -162,24 +159,24 @@ TEST_F(VecEngineTest, TransposeProgramPermutesFourMatricesPerTile) {
   }
   for (const uint32_t rotation : {0U, 1U, 2U}) {
     Word128 transpose;
-    encoding::Set(transpose, 124, 4, 7);
-    encoding::Set(transpose, 119, 5, 1);
-    encoding::Set(transpose, 114, 5, 11);
-    encoding::Set(transpose, 109, 5, 3);
-    encoding::Set(transpose, 104, 5, 4);
-    encoding::Set(transpose, 99, 5, 11);
-    encoding::Set(transpose, 94, 5, 5);
-    encoding::Set(transpose, 89, 5, 4);
-    encoding::Set(transpose, 87, 2, rotation);
+    namespace tr = isa::transpose;
+    encoding::Set(transpose, isa::program::kKind, isa::program::kKindTranspose);
+    encoding::Set(transpose, tr::kRx, 1);
+    encoding::Set(transpose, tr::kRsw, 11);
+    encoding::Set(transpose, tr::kRd, 3);
+    encoding::Set(transpose, tr::kRt, 4);
+    encoding::Set(transpose, tr::kRdt, 11);
+    encoding::Set(transpose, tr::kRst, 5);
+    encoding::Set(transpose, tr::kRdw, 4);
+    encoding::Set(transpose, tr::kRor, rotation);
     memories_.cbuf.at(kPc) = encoding::SaluImm(12, 11, 0, 1);
     memories_.cbuf.at(kPc + 1) = transpose;
     memories_.cbuf.at(kPc + 2) = encoding::Ret();
-    engine_.Execute({.op = kVecRun,
+    engine_.Execute({.entry = kPc / isa::vec::kEntryWords,
                      .src = 0,
                      .dst = kDst,
                      .rows_q = kTiles,
-                     .n8 = 8,
-                     .aux = kPc},
+                     .n8 = 8},
                     memories_);
     ExpectTransposed(kDst, kTiles, rotation);
     EXPECT_EQ(engine_.Activity().transposes, 1U);
@@ -202,7 +199,7 @@ TEST_F(VecEngineTest, ElementwiseOperations) {
     FillFbuf(kSrc2, kQuads * kN8, 110, 140);
     FillPbuf(kPBase, 2, 110, 140);
     const std::vector<FbufWord> before = memories_.fbuf;
-    engine_.Execute({.op = op,
+    engine_.Execute({.entry = op,
                      .quantize = false,
                      .src = kSrc,
                      .src2 = kSrc2,
@@ -269,7 +266,7 @@ TEST_F(VecEngineTest, QuantizesToMxint8) {
       rows.at(row).push_back(Output(40, kN8, row, column));
     }
   }
-  engine_.Execute({.op = kQuant,
+  engine_.Execute({.entry = kCopy,
                    .quantize = true,
                    .src = 40,
                    .src2 = 0,
@@ -297,15 +294,15 @@ TEST_P(LayerNormTest, NormalizesEachRow) {
   FillFbuf(kSrc, kQuads * kN8, 120, 132);
   FillPbuf(kPBase, 4, 124, 128);
   const std::vector<FbufWord> before = memories_.fbuf;
-  engine_.Execute({.op = kLayerNorm,
+  engine_.Execute({.entry = kLayerNorm,
                    .quantize = quantize,
                    .src = kSrc,
-                   .src2 = kScratch,
+                   .src2 = quantize ? kScratch : dst,
                    .dst = dst,
                    .rows_q = kQuads,
                    .n8 = kN8,
                    .p_base = kPBase,
-                   .aux = 0,
+                   .aux = kN8 * kLanes,
                    .imm = kEpsilon},
                   memories_);
   const uint32_t n = kN8 * kLanes;
@@ -354,10 +351,10 @@ TEST_F(VecEngineTest, RmsNormNormalizesEachRow) {
   FillFbuf(kSrc, kQuads * kN8, 118, 134);
   FillPbuf(kPBase, 1, 124, 128);
   const std::vector<FbufWord> before = memories_.fbuf;
-  engine_.Execute({.op = kRmsNorm,
+  engine_.Execute({.entry = kRmsNorm,
                    .quantize = false,
                    .src = kSrc,
-                   .src2 = 0,
+                   .src2 = kDst,
                    .dst = kDst,
                    .rows_q = kQuads,
                    .n8 = kN8,
@@ -393,7 +390,7 @@ TEST_F(VecEngineTest, SoftmaxOverTheValidColumns) {
   FillFbuf(kSrc, kQuads * kN8, 120, 131);
   FillTable(0, true);
   const std::vector<FbufWord> before = memories_.fbuf;
-  engine_.Execute({.op = kSoftmax,
+  engine_.Execute({.entry = kSoftmax,
                    .quantize = false,
                    .src = kSrc,
                    .src2 = 0,
@@ -402,7 +399,7 @@ TEST_F(VecEngineTest, SoftmaxOverTheValidColumns) {
                    .n8 = kN8,
                    .p_base = 0,
                    .aux = kValid,
-                   .imm = 0},
+                   .imm = kDst},
                   memories_);
   const uint32_t n = kN8 * kLanes;
   for (uint32_t row = 0; row < kQuads * kTokens; ++row) {
@@ -444,7 +441,7 @@ TEST_P(ActivationTest, MultipliesByTheTabulatedFunction) {
   memories_.fbuf.at(kSrc).at(2) = 0x417FFFFF;
   FillTable(512, false);
   const std::vector<FbufWord> before = memories_.fbuf;
-  engine_.Execute({.op = op,
+  engine_.Execute({.entry = op,
                    .quantize = false,
                    .src = kSrc,
                    .src2 = kUp,
@@ -453,7 +450,7 @@ TEST_P(ActivationTest, MultipliesByTheTabulatedFunction) {
                    .n8 = kN8,
                    .p_base = 0,
                    .aux = 0,
-                   .imm = 0},
+                   .imm = kDst},
                   memories_);
   for (uint32_t row = 0; row < kQuads * kTokens; ++row) {
     for (uint32_t c = 0; c < kN8 * kLanes; ++c) {
@@ -462,7 +459,7 @@ TEST_P(ActivationTest, MultipliesByTheTabulatedFunction) {
           reference::Mul(x, reference::Sigma(x, memories_.tbuf));
       uint32_t expected =
           Negative(x) ? reference::Add(FlipSign(product), x) : product;
-      if (op == kSiluMul) {
+      if (op == kActMul) {
         expected = reference::Mul(expected, Element(before, kUp, kN8, row, c));
       }
       ASSERT_EQ(Output(kDst, kN8, row, c), expected)
@@ -472,7 +469,7 @@ TEST_P(ActivationTest, MultipliesByTheTabulatedFunction) {
 }
 
 INSTANTIATE_TEST_SUITE_P(VecEngine, ActivationTest,
-                         testing::Values(kGelu, kSilu, kSiluMul));
+                         testing::Values(kAct, kActMul));
 
 TEST_F(VecEngineTest, RopeRotatesHalfPairs) {
   constexpr uint32_t kQuads = 2;
@@ -484,7 +481,7 @@ TEST_F(VecEngineTest, RopeRotatesHalfPairs) {
   FillFbuf(kSrc, kQuads * kN8, 118, 132);
   FillPbuf(kPBase, 2 * kQuads * 4, 120, 127);
   const std::vector<FbufWord> before = memories_.fbuf;
-  engine_.Execute({.op = kRope,
+  engine_.Execute({.entry = kRope,
                    .quantize = false,
                    .src = kSrc,
                    .src2 = 0,
@@ -493,7 +490,7 @@ TEST_F(VecEngineTest, RopeRotatesHalfPairs) {
                    .n8 = kN8,
                    .p_base = kPBase,
                    .aux = kHeads,
-                   .imm = 0},
+                   .imm = kDst},
                   memories_);
   for (uint32_t q = 0; q < kQuads; ++q) {
     for (uint32_t h = 0; h < kHeads; ++h) {

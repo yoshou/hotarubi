@@ -10,10 +10,7 @@
 
 namespace hotarubi::compiler::vec_rom {
 
-inline constexpr uint32_t kOperations = 16;
-
 struct Rom {
-  std::array<uint32_t, kOperations> starts{};
   std::array<Instruction, vprog::kRomWords> words{};
 };
 

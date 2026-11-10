@@ -89,8 +89,7 @@ TEST(ScheduleTest, DdrTransfersConflictOnlyThroughStores) {
                 .mem = Mem::kFbuf,
                 .onchip = 500,
                 .row_words = 4,
-                .index = true,
-                .row_format = true,
+                .kind = DmaKind::kRowIndexed,
                 .tok = 1});
   EXPECT_TRUE(Conflicts(program, 0, 1));
   EXPECT_FALSE(Conflicts(program, 0, 2));

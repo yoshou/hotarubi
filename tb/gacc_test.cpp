@@ -68,7 +68,7 @@ GaccList MakeList(std::mt19937& rng, Ddr& ddr, uint32_t list_address,
   }
   ddr.Write32(list_address,
               (w_address + (quad * list.quad_row_words * kFbufWordBytes)) / 16);
-  ddr.Write32(list_address + 4, list.w_stride);
+  ddr.Write32(list_address + 4, 0);
   ddr.Write32(list_address + 8, 0);
   ddr.Write32(list_address + 12, 0);
   for (uint32_t e = 0; e < slots * 16; ++e) {
@@ -143,15 +143,20 @@ std::vector<FbufWord> ToWords(const Accumulators& acc, uint32_t row_words) {
   return words;
 }
 
-Instruction Gacc(uint32_t list_address, uint32_t slots, uint32_t row_words,
-                 uint32_t dst, uint32_t flags) {
-  return DmaLoad({.ddr_addr = list_address,
+constexpr uint32_t kGaccAcc = 1;
+constexpr uint32_t kGaccFlush = 2;
+
+Instruction Gacc(const GaccList& list, uint32_t row_words, uint32_t dst,
+                 uint32_t flags) {
+  return DmaLoad({.ddr_addr = list.list_address,
                   .mem = Mem::kFbuf,
                   .onchip = dst,
-                  .rows = slots,
+                  .rows = list.slots,
                   .row_words = row_words,
-                  .mode = DmaMode::kGacc,
-                  .flags = flags});
+                  .ddr_stride = list.w_stride * kFbufWordBytes,
+                  .kind = DmaKind::kGacc,
+                  .acc = (flags & kGaccAcc) != 0,
+                  .flush = (flags & kGaccFlush) != 0});
 }
 
 void RunAndCompare(NpuBench& bench, std::vector<Instruction> program,
@@ -207,7 +212,7 @@ TEST(GaccTest, SingleListFromZero) {
                           .onchip = kDst,
                           .rows = 1,
                           .row_words = 4 * kRowWords}),
-                 Gacc(kListArea, kSlots, kRowWords, kDst, kGaccFlagFlush)},
+                 Gacc(list, kRowWords, kDst, kGaccFlush)},
                 kDst, ToWords(acc, kRowWords));
 }
 
@@ -230,9 +235,8 @@ TEST(GaccTest, ChainedListsAccumulate) {
   ReferenceGacc(ddr, first, kRowWords, kQuad, acc);
   ReferenceGacc(ddr, second, kRowWords, kQuad, acc);
   RunAndCompare(bench,
-                {Gacc(first.list_address, first.slots, kRowWords, kDst, 0),
-                 Gacc(second.list_address, second.slots, kRowWords, kDst,
-                      kGaccFlagAcc | kGaccFlagFlush)},
+                {Gacc(first, kRowWords, kDst, 0),
+                 Gacc(second, kRowWords, kDst, kGaccAcc | kGaccFlush)},
                 kDst, ToWords(acc, kRowWords));
 }
 
@@ -252,7 +256,7 @@ TEST(GaccTest, WithoutFlushLeavesFbufUnchanged) {
                           .onchip = kDst,
                           .rows = 1,
                           .row_words = 4 * kRowWords}),
-                 Gacc(kListArea, list.slots, kRowWords, kDst, 0)},
+                 Gacc(list, kRowWords, kDst, 0)},
                 kDst, init);
 }
 
@@ -271,9 +275,8 @@ TEST(GaccTest, MaximumBlocksPerToken) {
     token.assign(size_t{32} * kRowWords, kFp32Zero);
   }
   ReferenceGacc(ddr, list, kRowWords, kQuad, acc);
-  RunAndCompare(bench,
-                {Gacc(kListArea, list.slots, kRowWords, kDst, kGaccFlagFlush)},
-                kDst, ToWords(acc, kRowWords));
+  RunAndCompare(bench, {Gacc(list, kRowWords, kDst, kGaccFlush)}, kDst,
+                ToWords(acc, kRowWords));
 }
 
 TEST(GaccTest, PartialLastSlotGroup) {
@@ -292,9 +295,8 @@ TEST(GaccTest, PartialLastSlotGroup) {
     token.assign(size_t{32} * kRowWords, kFp32Zero);
   }
   ReferenceGacc(ddr, list, kRowWords, kQuad, acc);
-  RunAndCompare(bench,
-                {Gacc(kListArea, list.slots, kRowWords, kDst, kGaccFlagFlush)},
-                kDst, ToWords(acc, kRowWords));
+  RunAndCompare(bench, {Gacc(list, kRowWords, kDst, kGaccFlush)}, kDst,
+                ToWords(acc, kRowWords));
 }
 
 void RunFromZero(uint32_t seed, uint32_t row_words, uint32_t slots,
@@ -312,8 +314,7 @@ void RunFromZero(uint32_t seed, uint32_t row_words, uint32_t slots,
     token.assign(size_t{32} * row_words, kFp32Zero);
   }
   ReferenceGacc(ddr, list, row_words, kQuad, acc);
-  RunAndCompare(bench,
-                {Gacc(kListArea, slots, row_words, kDst, kGaccFlagFlush)}, kDst,
+  RunAndCompare(bench, {Gacc(list, row_words, kDst, kGaccFlush)}, kDst,
                 ToWords(acc, row_words));
 }
 

@@ -384,8 +384,7 @@ SparseHead::SparseHead(DdrImage& image, uint64_t base, HeadParams params,
   PutEntries(image, keep, std::vector<uint32_t>(cf.ntp, kNull));
   const auto block = [&](uint32_t q, uint32_t camera, uint32_t slots) {
     std::vector<uint32_t> entries = {
-        Entry(base_, w) + (((camera * (cf.scam / 8)) + (q * wq)) * 8),
-        wg & 0xFFFFU, 0, 0};
+        Entry(base_, w) + (((camera * (cf.scam / 8)) + (q * wq)) * 8), 0, 0, 0};
     for (uint32_t i = 0; i < slots * 16; ++i) {
       entries.push_back(kNull);
       entries.push_back(0);
@@ -599,9 +598,7 @@ void SparseHead::StoreColumns(const Rows& rows, uint32_t j, uint32_t m,
                    .rows = m,
                    .row_words = 1,
                    .ddr_stride = static_cast<uint32_t>(rows.Tb()),
-                   .mode = DmaMode::kRaw,
-                   .index = false,
-                   .row_format = true,
+                   .kind = DmaKind::kRow,
                    .tok = ncols / 32},
                   note);
 }
@@ -645,11 +642,12 @@ void SparseHead::QuantRows(
     if (extra) {
       extra(tile.t, slot, tile.m / 4, tile.i0);
     }
-    program_->Vec({.op = VecOp::kQuant,
+    program_->Vec({.op = VecOp::kCopy,
                    .src = slot,
                    .dst = abuf + ((tile.i0 / 4) * blocks),
                    .rows_q = tile.m / 4,
-                   .n8 = words},
+                   .n8 = words,
+                   .q = true},
                   std::format("{} quant t{}", note, tile.t));
   }
 }
@@ -666,11 +664,12 @@ void SparseHead::QuantRowsAdd(const Rows& rows, const Rows& rows2, uint32_t n,
               LoadRows(rows2, i0, 4 * rq, kSecond[t % 2],
                        std::format("{} ld 2nd t{}", note, t));
               if (abuf_plain.has_value()) {
-                program_->Vec({.op = VecOp::kQuant,
+                program_->Vec({.op = VecOp::kCopy,
                                .src = slot,
                                .dst = *abuf_plain + ((i0 / 4) * blocks),
                                .rows_q = rq,
-                               .n8 = words},
+                               .n8 = words,
+                               .q = true},
                               std::format("{} Q(plain) t{}", note, t));
               }
               program_->Vec({.op = VecOp::kAdd,
@@ -846,11 +845,12 @@ void SparseHead::Attention(const HeadLayer& layer, const Keys& pb,
       const uint32_t q0 = tile.i0 / 4;
       before.Gemm(*program_, vsrc + (q0 * kKbD), kKbD, tile.m, c, 0,
                   std::format("{} fc_before t{}", note, tile.t));
-      program_->Vec({.op = VecOp::kQuant,
+      program_->Vec({.op = VecOp::kCopy,
                      .src = c,
                      .dst = av + (q0 * kbq),
                      .rows_q = tile.m / 4,
-                     .n8 = nwq},
+                     .n8 = nwq,
+                     .q = true},
                     std::format("{} fc_before Q t{}", note, tile.t));
     }
     proj(layer.attn[2], {{.a_offset = av, .kb_offset = 0, .kb = kbq}}, kbq,
@@ -891,11 +891,12 @@ void SparseHead::OutProjection(const HeadLayer& layer, const Keys& pb,
     program_->Load(Words(ob + (uint64_t{q0} * nwq * kWordF), Mem::kFbuf, slot,
                          (tile.m / 4) * nwq),
                    std::format("{} ld O t{}", note, tile.t));
-    program_->Vec({.op = VecOp::kQuant,
+    program_->Vec({.op = VecOp::kCopy,
                    .src = slot,
                    .dst = ao + (q0 * kbq),
                    .rows_q = tile.m / 4,
-                   .n8 = nwq},
+                   .n8 = nwq,
+                   .q = true},
                   std::format("{} Q(O) t{}", note, tile.t));
   }
   const Lin& op = layer.attn[3];
@@ -938,11 +939,12 @@ void SparseHead::OutProjection(const HeadLayer& layer, const Keys& pb,
                        .rows_q = tile.m / 4,
                        .n8 = kNwD},
                       std::format("{} + identity h{} t{}", note, half, tile.t));
-        program_->Vec({.op = VecOp::kQuant,
+        program_->Vec({.op = VecOp::kCopy,
                        .src = c,
                        .dst = af[half] + (q0 * kKbD),
                        .rows_q = tile.m / 4,
-                       .n8 = kNwD},
+                       .n8 = kNwD,
+                       .q = true},
                       std::format("{} Q h{} t{}", note, half, tile.t));
       }
     }
@@ -1012,8 +1014,9 @@ void SparseHead::Norm(const Keys& pb, std::string_view note) {
 void SparseHead::CameraEncoder(const HeadLayer& layer, const Keys& pb,
                                std::string_view note) {
   LoadRows(cam_in, 0, 32, 0, std::format("{} ld cam_in", note));
-  program_->Vec({.op = VecOp::kQuant, .src = 0, .dst = 0, .rows_q = 8, .n8 = 4},
-                std::format("{} Q", note));
+  program_->Vec(
+      {.op = VecOp::kCopy, .src = 0, .dst = 0, .rows_q = 8, .n8 = 4, .q = true},
+      std::format("{} Q", note));
   for (size_t i = 0; i < layer.cam.size(); ++i) {
     const Lin& lin = layer.cam[i].first;
     lin.Load(*program_, 0, std::format("{} {}", note, i));
@@ -1104,30 +1107,34 @@ void SparseHead::Deformable(const HeadLayer& layer, size_t index,
     const uint32_t dst = kGb[(q / 32) % 2] + ((q % 32) * kNwD);
     if (q < nq) {
       for (uint32_t camera = 0; camera < ncam; ++camera) {
-        program_->Gacc({.list_offset = ListAddr(q, camera),
-                        .dst = dst,
-                        .slots = cf.scam,
-                        .blocks = kKbD,
-                        .acc = camera > 0,
-                        .flush = camera == ncam - 1},
-                       std::format("{} gacc q{} c{}", note, q, camera));
+        program_->Gacc(
+            {.list_offset = ListAddr(q, camera),
+             .dst = dst,
+             .slots = cf.scam,
+             .blocks = kKbD,
+             .coefficient_stride = static_cast<uint32_t>(wg * kWordF),
+             .acc = camera > 0,
+             .flush = camera == ncam - 1},
+            std::format("{} gacc q{} c{}", note, q, camera));
       }
     } else {
       program_->Gacc({.list_offset = null_list,
                       .dst = dst,
                       .slots = 1,
                       .blocks = kKbD,
+                      .coefficient_stride = static_cast<uint32_t>(wg * kWordF),
                       .acc = false,
                       .flush = true},
                      std::format("{} gacc pad q{}", note, q));
     }
     if (q % 32 == 31 || q == (cf.nap / 4) - 1) {
       const uint32_t t = q / 32;
-      program_->Vec({.op = VecOp::kQuant,
+      program_->Vec({.op = VecOp::kCopy,
                      .src = kGb[t % 2],
                      .dst = ag + (t * 32 * kKbD),
                      .rows_q = (q % 32) + 1,
-                     .n8 = kNwD},
+                     .n8 = kNwD,
+                     .q = true},
                     std::format("{} Q(gacc) t{}", note, t));
     }
   }
@@ -1389,9 +1396,7 @@ void SparseHead::KeypointsMap(std::string_view note) {
                     .rows = cf.nap,
                     .row_words = 1,
                     .ddr_stride = static_cast<uint32_t>(lfc.Tb()),
-                    .mode = DmaMode::kRaw,
-                    .index = false,
-                    .row_format = true,
+                    .kind = DmaKind::kRow,
                     .tok = kMapBlock / 32},
                    std::format("{} kp ld lfc blk h{} lq{}", note, h, lq));
     const uint32_t imm = imm0 | (h << 24) | (lq << 27) | (gs << 29);
@@ -1532,11 +1537,12 @@ void SparseHead::Refine(const HeadLayer& layer, const Keys& pb,
             [&](uint32_t t, uint32_t slot, uint32_t rq, uint32_t i0) {
               LoadRows(e, i0, 4 * rq, kEt[t % 2],
                        std::format("{} ld E t{}", note, t));
-              program_->Vec({.op = VecOp::kQuant,
+              program_->Vec({.op = VecOp::kCopy,
                              .src = slot,
                              .dst = ax + ((i0 / 4) * kKbD),
                              .rows_q = rq,
-                             .n8 = kNwD},
+                             .n8 = kNwD,
+                             .q = true},
                             std::format("{} Q(x) t{}", note, t));
               program_->Vec({.op = VecOp::kAdd,
                              .src = slot,

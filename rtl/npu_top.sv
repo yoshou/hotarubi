@@ -81,23 +81,22 @@ module npu_top
   logic [7:0]  gemm_n8;
   logic [1:0]  gemm_wmode;
   logic        gemm_acc;
-  logic [4:0]  vec_op;
+  logic [7:0]  vec_entry;
   logic        vec_q;
   logic [11:0] vec_src, vec_src2;
   logic [12:0] vec_dst;
   logic [8:0]  vec_rows_q;
   logic [7:0]  vec_n8;
-  logic [9:0]  vec_p_base;
+  logic [8:0]  vec_p_base;
   logic [10:0] vec_aux;
   logic [31:0] vec_imm;
-  logic        dma_st;
-  logic [31:0] dma_ddr_addr;
-  logic [2:0]  dma_mem;
-  logic [19:0] dma_oc_addr;
+  logic        dma_st, dma_acc, dma_flush;
+  logic [27:0] dma_ddr_addr;
+  logic [2:0]  dma_mem, dma_kind;
+  logic [12:0] dma_oc_addr;
   logic [11:0] dma_rows, dma_row_words;
-  logic [23:0] dma_ddr_stride;
-  logic [1:0]  dma_mode, dma_flags;
-  logic [6:0]  dma_tok;
+  logic [19:0] dma_ddr_stride;
+  logic [5:0]  dma_tok;
   logic        dma_axi_err;
   logic        gemm_stat_fed, vec_stat_issue, vec_stat_drain, vec_stat_scalar, vec_stat_pass;
   logic        dma_stat_rd_beat, dma_stat_wr_beat, dma_stat_denied;
@@ -286,7 +285,7 @@ module npu_top
     .gemm_acc_o      (gemm_acc),
     .vec_cmd_valid_o (vec_cmd_valid),
     .vec_busy_i      (vec_busy),
-    .vec_op_o        (vec_op),
+    .vec_entry_o     (vec_entry),
     .vec_q_o         (vec_q),
     .vec_src_o       (vec_src),
     .vec_src2_o      (vec_src2),
@@ -305,9 +304,10 @@ module npu_top
     .dma_rows_o      (dma_rows),
     .dma_row_words_o (dma_row_words),
     .dma_ddr_stride_o(dma_ddr_stride),
-    .dma_mode_o      (dma_mode),
-    .dma_flags_o     (dma_flags),
+    .dma_kind_o      (dma_kind),
     .dma_tok_o       (dma_tok),
+    .dma_acc_o       (dma_acc),
+    .dma_flush_o     (dma_flush),
     .gemm_stat_fed_i (gemm_stat_fed),
     .vec_stat_issue_i(vec_stat_issue),
     .vec_stat_drain_i(vec_stat_drain),
@@ -361,11 +361,11 @@ module npu_top
     .stat_fed_o    (gemm_stat_fed)
   );
 
-  logic          v_fb_rd_req, v_fb_rd_grant, v_fb_wr_req, v_fb_wr_grant, v_ab_wr_req, v_ab_wr_grant;
+  logic          v_fb_rd_req, v_fb_rd_grant, v_fb_wr_req, v_fb_wr_grant, v_ab_wr_req;
   logic [11:0]   v_fb_raddr, v_fb_waddr;
   logic [1023:0] v_fb_wdata, v_fb_tdata, pbuf_q;
   logic          v_fb_wtr;
-  logic [9:0]    v_pb_addr;
+  logic [8:0]    v_pb_addr;
   logic [9:0]    tab_addr [Lanes];
   logic [63:0]   tab_data [Lanes];
   logic [12:0]   v_ab_waddr;
@@ -377,7 +377,7 @@ module npu_top
     .clk_i,
     .rst_ni         (rst_ni),
     .cmd_valid_i    (vec_cmd_valid),
-    .cmd_op_i       (vec_op),
+    .cmd_entry_i    (vec_entry),
     .cmd_q_i        (vec_q),
     .cmd_src_i      (vec_src),
     .cmd_src2_i     (vec_src2),
@@ -403,7 +403,6 @@ module npu_top
     .tab_addr_o     (tab_addr),
     .tab_data_i     (tab_data),
     .abuf_wr_req_o  (v_ab_wr_req),
-    .abuf_wr_grant_i(v_ab_wr_grant),
     .abuf_waddr_o   (v_ab_waddr),
     .abuf_wdata_o   (v_ab_wdata),
     .cbuf_addr_o    (cb_addr),
@@ -416,7 +415,7 @@ module npu_top
 
   logic          d_wr_req, d_wr_grant, d_rd_req, d_rd_grant;
   logic [2:0]    d_wr_mem, d_rd_mem;
-  logic [19:0]   d_wr_addr, d_rd_addr;
+  logic [12:0]   d_wr_addr, d_rd_addr;
   logic [1151:0] d_wr_data;
   logic [1055:0] d_rd_data;
 
@@ -431,9 +430,10 @@ module npu_top
     .cmd_rows_i      (dma_rows),
     .cmd_row_words_i (dma_row_words),
     .cmd_ddr_stride_i(dma_ddr_stride),
-    .cmd_mode_i      (dma_mode),
-    .cmd_flags_i     (dma_flags),
+    .cmd_kind_i      (dma_kind),
     .cmd_tok_i       (dma_tok),
+    .cmd_acc_i       (dma_acc),
+    .cmd_flush_i     (dma_flush),
     .busy_o          (dma_busy),
     .m_axi_araddr_o  (d_axi_araddr),
     .m_axi_arlen_o   (d_axi_arlen),
@@ -476,7 +476,7 @@ module npu_top
     .stat_null_o     (dma_stat_null)
   );
 
-  logic d_wr_abuf, d_wr_wbuf, d_wr_fbuf, d_wr_pbuf, d_wr_tbuf, d_wr_cbuf, d_rd_abuf, d_rd_fbuf;
+  logic d_wr_abuf, d_wr_wbuf, d_wr_fbuf, d_wr_pbuf, d_wr_tbuf, d_wr_cbuf;
 
   assign d_wr_abuf = d_wr_req && (d_wr_mem == 3'd0);
   assign d_wr_wbuf = d_wr_req && (d_wr_mem == 3'd1);
@@ -484,10 +484,7 @@ module npu_top
   assign d_wr_pbuf = d_wr_req && (d_wr_mem == 3'd3);
   assign d_wr_tbuf = d_wr_req && (d_wr_mem == 3'd4);
   assign d_wr_cbuf = d_wr_req && (d_wr_mem == 3'd5);
-  assign d_rd_abuf = d_rd_req && (d_rd_mem == 3'd0);
-  assign d_rd_fbuf = d_rd_req && (d_rd_mem == 3'd2);
 
-  assign v_ab_wr_grant = v_ab_wr_req;
   assign v_fb_wr_grant = v_fb_wr_req && !g_fbuf_we;
   assign v_fb_rd_grant = v_fb_rd_req && !g_fbuf_rd_req;
 
@@ -510,7 +507,7 @@ module npu_top
 
   always_ff @(posedge clk_i) begin
     ab_we   <= v_ab_wr_req | d_wr_abuf;
-    ab_addr <= v_ab_wr_req ? v_ab_waddr : d_wr_abuf ? d_wr_addr[12:0] : d_rd_addr[12:0];
+    ab_addr <= v_ab_wr_req ? v_ab_waddr : d_wr_abuf ? d_wr_addr : d_rd_addr;
     ab_wd   <= v_ab_wr_req ? v_ab_wdata : d_wr_data[1055:0];
   end
 
@@ -599,7 +596,7 @@ module npu_top
     if (pb_we) begin
       pbuf[pb_wa] <= pb_wd;
     end
-    pbuf_q1 <= pbuf[v_pb_addr[8:0]];
+    pbuf_q1 <= pbuf[v_pb_addr];
     pbuf_q  <= pbuf_q1;
   end
 
@@ -664,7 +661,6 @@ module npu_top
   assign unused_top = ^{d_axi_rready, d_axi_bready, q_axi_rready, q_axi_bready,
                         s_axil_awaddr_i[11:8], s_axil_araddr_i[11:8], g_abuf_addr[19:13],
                         g_wbuf_addr[19:11], g_fbuf_raddr[19:12], g_fbuf_waddr[19:12],
-                        d_wr_addr[19:13], d_wr_data[1151:1056], d_rd_addr[19:13], v_pb_addr[9],
-                        d_rd_abuf, d_rd_fbuf};
+                        d_wr_data[1151:1056]};
 
 endmodule

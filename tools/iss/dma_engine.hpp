@@ -34,10 +34,13 @@ struct DmaCommand {
   uint32_t rows = 0;
   uint32_t row_words = 0;
   uint32_t ddr_stride = 0;
-  uint32_t mode = 0;
-  uint32_t flags = 0;
+  uint32_t kind = 0;
   uint32_t tok = 0;
+  bool acc = false;
+  bool flush = false;
 };
+
+uint64_t DdrByteAddress(uint32_t units);
 
 uint32_t Int8ToFp32(uint8_t value);
 uint32_t ScaleCoefficient(uint32_t coefficient, uint32_t scale);

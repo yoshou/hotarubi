@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "isa.hpp"
 
@@ -73,7 +74,7 @@ TEST(ProgramTest, ControlInstructionsWaitForAllEnginesButWaitHostDoesNot) {
 TEST(ProgramTest, AddsTheBaseToDdrOffsets) {
   Program program(kBase);
   program.Load({.ddr_offset = 0x1230, .mem = Mem::kTbuf, .rows = 2});
-  EXPECT_EQ(program.Instructions()[0].Get(80, 32), kBase + 0x1230U);
+  EXPECT_EQ(program.Instructions()[0].Get(88, 28), (kBase + 0x1230U) / 16);
 }
 
 TEST(ProgramTest, SetDdrOffsetRewritesOnlyTheAddressOfATransfer) {
@@ -81,7 +82,7 @@ TEST(ProgramTest, SetDdrOffsetRewritesOnlyTheAddressOfATransfer) {
   const size_t index = program.Load(
       {.ddr_offset = 0x1000, .mem = Mem::kFbuf, .onchip = 7, .rows = 3});
   Instruction expected = program.Instructions()[index];
-  expected.Set(80, 32, kBase + 0x2340);
+  expected.Set(88, 28, (kBase + 0x2340) / 16);
   program.SetDdrOffset(index, 0x2340);
   EXPECT_EQ(program.Instructions()[index].words, expected.words);
 }
@@ -106,7 +107,8 @@ TEST(ProgramTest, QuantizedVecWritesAbufThroughItsScratch) {
                                     .q = true,
                                     .scratch = 512});
   const Instruction& instruction = program.Instructions()[index];
-  EXPECT_EQ(instruction.Get(112, 4), 1U);
+  EXPECT_EQ(instruction.Get(108, 8), isa::library::kSoftmax);
+  EXPECT_EQ(instruction.Get(107, 1), 1U);
   EXPECT_EQ(instruction.Get(0, 32), 512U);
   const size_t gemm = program.Gemm({.a_base = 40,
                                     .a_stride = 1,
@@ -124,16 +126,18 @@ TEST(ProgramTest, ListsAndSerializesInstructions) {
   program.Load({.ddr_offset = 0x10, .mem = Mem::kFbuf}, "load");
   program.Halt();
   EXPECT_EQ(program.Listing(),
-            "    0 DMA  w=0 01003000001040000000200200000000 load\n"
-            "    1 CTRL w=d 07d00000000000000000000000000000 halt\n");
+            "    0 DMA  w=0 01030000014000001001000000000000 load\n"
+            "    1 CTRL w=7 07700000000000000000000000000000 halt\n");
   const std::vector<std::byte> bytes = program.Bytes();
   ASSERT_EQ(bytes.size(), 32U);
   EXPECT_EQ(bytes[0], std::byte{0x00});
-  EXPECT_EQ(bytes[4], std::byte{0x02});
-  EXPECT_EQ(bytes[5], std::byte{0x20});
-  EXPECT_EQ(bytes[10], std::byte{0x10});
+  EXPECT_EQ(bytes[6], std::byte{0x01});
+  EXPECT_EQ(bytes[7], std::byte{0x10});
+  EXPECT_EQ(bytes[10], std::byte{0x40});
+  EXPECT_EQ(bytes[11], std::byte{0x01});
+  EXPECT_EQ(bytes[14], std::byte{0x03});
   EXPECT_EQ(bytes[15], std::byte{0x01});
-  EXPECT_EQ(bytes[30], std::byte{0xD0});
+  EXPECT_EQ(bytes[30], std::byte{0x70});
   EXPECT_EQ(bytes[31], std::byte{0x07});
 }
 
@@ -181,7 +185,7 @@ TEST(ProgramTest, ScopesTagInstructionsAndTheJsonListingHoldsRanges) {
   EXPECT_EQ(reads[0].Items()[1].Integer(), 0);
   EXPECT_EQ(reads[0].Items()[2].Integer(), 2);
   EXPECT_EQ(instructions[2].Find("engine")->String(), "CTRL");
-  EXPECT_EQ(instructions[2].Find("wait")->Integer(), 0xD);
+  EXPECT_EQ(instructions[2].Find("wait")->Integer(), 0x7);
   EXPECT_TRUE(instructions[2].Find("reads")->Items().empty());
 }
 

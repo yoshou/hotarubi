@@ -11,6 +11,7 @@
 
 #include "ddr.hpp"
 #include "fp32.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/require.hpp"
 #include "memories.hpp"
 #include "word.hpp"
@@ -22,13 +23,6 @@ constexpr uint32_t kBeatBytes = 16;
 constexpr uint32_t kWordBufferBytes = 144;
 constexpr uint32_t kMxint8WordBytes = 144;
 constexpr uint32_t kNullEntry = 0xFFFFFFFF;
-constexpr uint32_t kModeRaw = 0;
-constexpr uint32_t kModeSplit8 = 1;
-constexpr uint32_t kModeGather = 3;
-constexpr uint32_t kFlagIndex = 1;
-constexpr uint32_t kFlagRows = 2;
-constexpr uint32_t kFlagAccumulate = 1;
-constexpr uint32_t kFlagFlush = 2;
 constexpr std::byte kNullScale{0x7F};
 constexpr uint32_t kT32Rows = 8;
 constexpr uint32_t kT32Tokens = 32;
@@ -58,11 +52,14 @@ uint32_t BeatsPerWord(uint32_t mem) {
 }
 
 uint32_t RowAddress(const DmaCommand& command, uint32_t row, uint64_t offset) {
-  return static_cast<uint32_t>(uint64_t{command.ddr_addr} +
-                               (uint64_t{row} * command.ddr_stride) + offset);
+  return static_cast<uint32_t>(
+      DdrByteAddress(command.ddr_addr) +
+      (uint64_t{row} * command.ddr_stride * kBeatBytes) + offset);
 }
 
-uint32_t UnitAddress(uint32_t entry) { return (entry & 0x0FFFFFFFU) << 4; }
+uint32_t UnitAddress(uint32_t entry) {
+  return static_cast<uint32_t>(DdrByteAddress(entry));
+}
 
 uint8_t Byte(std::byte value) { return std::to_integer<uint8_t>(value); }
 
@@ -231,13 +228,12 @@ void LoadWords(const DmaCommand& command, const Ddr& ddr, Memories& memories,
   }
 }
 
-void LoadRows(const DmaCommand& command, const Ddr& ddr, Memories& memories,
-              DmaActivity& activity) {
-  const bool indexed = (command.flags & kFlagIndex) != 0;
+void LoadRows(const DmaCommand& command, bool indexed, const Ddr& ddr,
+              Memories& memories, DmaActivity& activity) {
   const RowFormat format = MakeRowFormat(command, indexed);
   const uint32_t count = command.rows * command.row_words;
   const std::vector<uint32_t> entries =
-      indexed ? ReadList(ddr, command.ddr_addr, count, activity)
+      indexed ? ReadList(ddr, UnitAddress(command.ddr_addr), count, activity)
               : std::vector<uint32_t>{};
   Quad quad;
   for (uint32_t u = 0; u < count; ++u) {
@@ -410,7 +406,7 @@ void LoadT32(const DmaCommand& command, const Ddr& ddr, Memories& memories,
 
 struct GatherWeights {
   uint32_t base = 0;
-  uint32_t stride = 0;
+  uint64_t stride = 0;
   uint32_t blocks = 0;
 };
 
@@ -429,7 +425,9 @@ GatherCoefficients LoadGatherCoefficients(const Ddr& ddr,
   GatherCoefficients w{};
   for (uint32_t i = 0; i < weights.blocks; ++i) {
     std::array<std::byte, size_t{kFbufElements} * 4> chunk{};
-    ddr.Read(weights.base + (group * 128) + (i * weights.stride), chunk);
+    ddr.Read(static_cast<uint32_t>(weights.base + (group * 128) +
+                                   (i * weights.stride)),
+             chunk);
     for (uint32_t e = 0; e < kFbufElements; ++e) {
       w.at(i).at(e) = static_cast<uint32_t>(
           LoadLittle(std::span(chunk).subspan(size_t{e} * 4, 4)));
@@ -545,43 +543,55 @@ uint8_t AlignElement(uint8_t value, uint32_t shift) {
       0xFFU);
 }
 
+uint64_t DdrByteAddress(uint32_t units) {
+  return uint64_t{units & 0x0FFFFFFFU} * kBeatBytes;
+}
+
 void DmaEngine::Execute(const DmaCommand& command, Ddr& ddr,
                         Memories& memories) {
   activity_ = {};
-  const bool rows = (command.flags & kFlagRows) != 0;
+  Require(command.rows >= 1 && command.row_words >= 1,
+          std::format("a DMA transfer with {} rows of {} words", command.rows,
+                      command.row_words));
+  Require(
+      command.kind == isa::dma::kKindGacc || (!command.acc && !command.flush),
+      "acc and flush are used only by GACC");
   if (command.store) {
-    if (command.rows * command.row_words == 0) {
-      return;
+    switch (command.kind) {
+      case isa::dma::kKindRaw:
+        StoreWords(command, ddr, memories, activity_);
+        return;
+      case isa::dma::kKindRow:
+        StoreRows(command, ddr, memories, activity_);
+        return;
+      default:
+        Fail(std::format("DMA_ST of kind {}", command.kind));
     }
-    if (rows) {
-      StoreRows(command, ddr, memories, activity_);
-    } else {
-      StoreWords(command, ddr, memories, activity_);
-    }
-    return;
   }
-  if (command.mode == kModeGather) {
-    Gather(command, ddr, memories);
-    return;
-  }
-  if (command.rows * command.row_words == 0) {
-    return;
-  }
-  if (command.mode == kModeRaw) {
-    if (rows) {
-      LoadRows(command, ddr, memories, activity_);
-    } else {
+  switch (command.kind) {
+    case isa::dma::kKindRaw:
       LoadWords(command, ddr, memories, activity_);
-    }
-    return;
-  }
-  Require(command.flags == 0, "SPLIT8 and T32_SPLIT8 do not take flags");
-  Require(command.mem == static_cast<uint32_t>(Mem::kWbuf),
-          "SPLIT8 and T32_SPLIT8 write WBUF");
-  if (command.mode == kModeSplit8) {
-    LoadSplit8(command, ddr, memories, activity_);
-  } else {
-    LoadT32(command, ddr, memories, activity_);
+      return;
+    case isa::dma::kKindRow:
+    case isa::dma::kKindRowIndexed:
+      LoadRows(command, command.kind == isa::dma::kKindRowIndexed, ddr,
+               memories, activity_);
+      return;
+    case isa::dma::kKindSplit8:
+    case isa::dma::kKindT32Split8:
+      Require(command.mem == static_cast<uint32_t>(Mem::kWbuf),
+              "SPLIT8 and T32_SPLIT8 write WBUF");
+      if (command.kind == isa::dma::kKindSplit8) {
+        LoadSplit8(command, ddr, memories, activity_);
+      } else {
+        LoadT32(command, ddr, memories, activity_);
+      }
+      return;
+    case isa::dma::kKindGacc:
+      Gather(command, ddr, memories);
+      return;
+    default:
+      Fail(std::format("DMA_LD of kind {}", command.kind));
   }
 }
 
@@ -593,7 +603,7 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
           std::format("GACC with {} blocks per token", blocks));
   Require(command.rows <= kGatherMaxSlots,
           std::format("GACC with {} slots", command.rows));
-  if ((command.flags & kFlagAccumulate) == 0) {
+  if (!command.acc) {
     for (auto& token : accumulators_) {
       token.fill(0);
     }
@@ -601,10 +611,10 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
   const uint64_t entries = uint64_t{command.rows} * kGatherEntriesPerSlot;
   activity_.gather_entries = entries;
   CountRead(activity_, 1 + (entries / 2));
-  const uint64_t header = ddr.Read64(command.ddr_addr);
+  const uint32_t list = UnitAddress(command.ddr_addr);
   const GatherWeights weights{
-      .base = UnitAddress(static_cast<uint32_t>(header)),
-      .stride = static_cast<uint32_t>((header >> 32) & 0xFFFFU) << 7,
+      .base = UnitAddress(static_cast<uint32_t>(ddr.Read64(list))),
+      .stride = uint64_t{command.ddr_stride} * kBeatBytes,
       .blocks = blocks,
   };
   GatherCoefficientBanks banks(
@@ -616,7 +626,7 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
     for (uint32_t t = 0; t < kTokens; ++t) {
       for (uint32_t k = 0; k < kTokens; ++k) {
         const uint64_t entry =
-            ddr.Read64(command.ddr_addr + kBeatBytes +
+            ddr.Read64(list + kBeatBytes +
                        (((s * kGatherEntriesPerSlot) + (t * kTokens) + k) * 8));
         if (static_cast<uint32_t>(entry) == kNullEntry) {
           ++activity_.null_entries;
@@ -636,7 +646,7 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
       }
     }
   }
-  if ((command.flags & kFlagFlush) != 0) {
+  if (command.flush) {
     FlushGather(accumulators_, blocks, command.onchip, memories);
   }
 }

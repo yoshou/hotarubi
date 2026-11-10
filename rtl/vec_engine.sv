@@ -1,18 +1,17 @@
 module vec_engine
   import vec_pkg::*;
-  import vec_rom_pkg::*;
 (
   input  logic          clk_i,
   input  logic          rst_ni,
   input  logic          cmd_valid_i,
-  input  logic [4:0]    cmd_op_i,
+  input  logic [7:0]    cmd_entry_i,
   input  logic          cmd_q_i,
   input  logic [11:0]   cmd_src_i,
   input  logic [11:0]   cmd_src2_i,
   input  logic [12:0]   cmd_dst_i,
   input  logic [8:0]    cmd_rows_q_i,
   input  logic [7:0]    cmd_n8_i,
-  input  logic [9:0]    cmd_p_base_i,
+  input  logic [8:0]    cmd_p_base_i,
   input  logic [10:0]   cmd_aux_i,
   input  logic [31:0]   cmd_imm_i,
   output logic          busy_o,
@@ -26,12 +25,11 @@ module vec_engine
   output logic [1023:0] fbuf_wdata_o,
   output logic          fbuf_wtr_o,
   output logic [1023:0] fbuf_tdata_o,
-  output logic [9:0]    pbuf_a_addr_o,
+  output logic [8:0]    pbuf_a_addr_o,
   input  logic [1023:0] pbuf_a_rdata_i,
   output logic [9:0]    tab_addr_o [Lanes],
   input  logic [63:0]   tab_data_i [Lanes],
   output logic          abuf_wr_req_o,
-  input  logic          abuf_wr_grant_i,
   output logic [12:0]   abuf_waddr_o,
   output logic [1055:0] abuf_wdata_o,
   output logic [9:0]    cbuf_addr_o,
@@ -41,10 +39,6 @@ module vec_engine
   output logic          stat_scalar_o,
   output logic          stat_pass_o
 );
-
-  function automatic logic uses_imm(input logic [4:0] op);
-    return (op == 5'(OpLayerNorm)) || (op == 5'(OpRmsNorm)) || (op == 5'(OpScale));
-  endfunction
 
   typedef enum logic [4:0] {
     StIdle,
@@ -78,18 +72,11 @@ module vec_engine
   pass_t        pd_n;
   logic         pre_on, pre_done;
   logic [3:0]   pre_cnt;
-  logic [11:0]  pn_x, pn_x2;
-  logic [12:0]  pn_d;
-  logic [8:0]   pn_rq;
-  logic [9:0]   pn_nw;
-  logic [7:0]   pn_n8;
-  logic [9:0]   pn_pb;
-  logic [31:0]  pn_imm, pn_imm2;
   pass_t        pd;
   logic         qf;
 
   assign busy_o        = (st != StIdle);
-  assign stat_issue_o  = (st == StIssue) || (st == StTransposeWait);
+  assign stat_issue_o  = (st == StIssue) || tr_mode;
   assign stat_drain_o  = (st == StDrain) || (st == StMdrain);
   assign stat_scalar_o = ((st == StSegSetup) && pass_wait) || (st == StRnwait) ||
                          ((st == StDecode) && (kind == KindRet) && !ret_ok);
@@ -111,11 +98,6 @@ module vec_engine
     end
   end
 
-  logic [11:0] cmd_scratch;
-
-  assign cmd_scratch = !cmd_q_i ? cmd_dst_i[11:0] :
-                       uses_imm(cmd_op_i) ? cmd_src2_i : cmd_imm_i[11:0];
-
   always_ff @(posedge clk_i) begin
     if (st == StIdle && cmd_valid_i) begin
       creg[0] <= 32'(cmd_src_i);
@@ -124,10 +106,9 @@ module vec_engine
       creg[3] <= 32'(cmd_rows_q_i);
       creg[4] <= 32'(cmd_n8_i);
       creg[5] <= 32'(cmd_p_base_i);
-      creg[6] <= cmd_op_i[4] ? 32'd0 : 32'(cmd_aux_i);
+      creg[6] <= 32'(cmd_aux_i);
       creg[7] <= cmd_imm_i;
-      creg[8] <= 32'(cmd_scratch);
-      creg[9] <= 32'(cmd_q_i);
+      creg[8] <= 32'(cmd_q_i);
     end else if (rf_we && is_creg(rf_wa)) begin
       creg[4'(rf_wa - 5'd1)] <= rf_wd;
     end
@@ -145,14 +126,77 @@ module vec_engine
   assign rf_a = reg_read(ra_q);
   assign rf_b = reg_read(rb_q);
 
+  typedef struct packed {
+    logic [11:0] x;
+    logic [11:0] x2;
+    logic [12:0] d;
+    logic [8:0]  rq;
+    logic [11:0] nw;
+    logic [11:0] n8;
+    logic [11:0] pb;
+    logic [31:0] imm;
+    logic [31:0] imm2;
+  } opr_t;
+
+  function automatic logic [9:0] opr_regs(input pass_regs_t p, input logic [3:0] step);
+    case (step)
+      4'd0:    return {p.rx, p.rx2};
+      4'd1:    return {p.rd, p.rq};
+      4'd2:    return {p.rnw, p.rn8};
+      4'd3:    return {p.rpb, p.rimm};
+      default: return {p.rimm2, 5'd0};
+    endcase
+  endfunction
+
+  function automatic opr_t opr_capture(input opr_t o, input logic [3:0] step,
+                                       input logic [31:0] a, input logic [31:0] b);
+    opr_t r;
+    r = o;
+    case (step)
+      4'd1: begin
+        r.x  = a[11:0];
+        r.x2 = b[11:0];
+      end
+      4'd2: begin
+        r.d  = a[12:0];
+        r.rq = b[8:0];
+      end
+      4'd3: begin
+        r.nw = a[11:0];
+        r.n8 = b[11:0];
+      end
+      4'd4: begin
+        r.pb  = a[11:0];
+        r.imm = b;
+      end
+      4'd5: begin
+        r.imm2 = a;
+      end
+      default: begin
+      end
+    endcase
+    return r;
+  endfunction
+
+  opr_t        po, pn;
   logic [11:0] p_x, p_x2;
   logic [12:0] p_d;
   logic [8:0]  p_rq;
   logic [9:0]  p_nw;
   logic [7:0]  p_n8;
-  logic [9:0]  p_pb;
+  logic [8:0]  p_pb;
   logic [31:0] p_imm, p_imm2;
-  logic [11:0] tr_src_tile_stride, tr_dst_tile_stride, tr_dst_word_stride;
+
+  assign p_x    = po.x;
+  assign p_x2   = po.x2;
+  assign p_d    = po.d;
+  assign p_rq   = po.rq;
+  assign p_nw   = po.nw[9:0];
+  assign p_n8   = po.n8[7:0];
+  assign p_pb   = po.pb[8:0];
+  assign p_imm  = po.imm;
+  assign p_imm2 = po.imm2;
+
   logic        tr_start, tr_busy, tr_rd, tr_wr, tr_mode;
   logic [11:0] tr_ra, tr_wa;
   logic [1023:0] tr_wd;
@@ -162,7 +206,7 @@ module vec_engine
 
   logic [11:0] rb_src, rb_src2, rb_dst;
   logic [12:0] rb_abuf;
-  logic [9:0]  pt_row;
+  logic [8:0]  pt_row;
   logic [8:0]  q;
   logic [9:0]  w;
   logic        slot_ph;
@@ -180,11 +224,11 @@ module vec_engine
     endcase
   endfunction
 
-  logic [9:0] wa_word, wb_word, ww_word;
+  logic       row_last;
+  logic [9:0] w_next, wa_word, wb_word, ww_word;
 
-  assign wa_word = word_of(pd.mx, pd.mg, pd.ms, w);
-  assign wb_word = word_of(pd.mx2, pd.mg, pd.ms, w);
-  assign ww_word = word_of(pd.md, pd.mg, pd.ms, w);
+  assign row_last = (w == p_nw - 10'd1);
+  assign w_next   = row_last ? 10'd0 : w + 10'd1;
 
   logic wf_afull, df_afull, af_afull;
   logic pend_full, pend_clear;
@@ -199,15 +243,8 @@ module vec_engine
   logic        sk_last1, sk_last2, sk_go1, sk_go2, sk_end;
   logic        rd_v, rd_is_entry, rd_is_hold;
   logic [11:0] rd_addr;
-  logic [9:0]  rd_pa_addr;
+  logic [8:0]  rd_pa_addr;
   ctrl_t       rd_ctrl;
-  logic [7:0]  mask8;
-
-  always_comb begin
-    for (int c = 0; c < 8; c++) begin
-      mask8[c] = pd.mask_en & ((16'({w[9:0], 3'd0}) + 16'(c)) >= p_imm2[15:0]);
-    end
-  end
 
   always_comb begin
     rd_is_hold  = (slot_ph == 1'b0) & pd.x2_en;
@@ -228,7 +265,7 @@ module vec_engine
     rd_ctrl.c1        = (pd.po == PoMax) ? C1Max : (pd.po == PoSignfix) ? C1Signfix :
                         pd.pv ? C1X2 : C1Zero;
     rd_ctrl.neg_c1    = (pd.po == PoSub) | ((pd.po == PoMax) & !pd.pv);
-    rd_ctrl.mask      = mask8;
+    rd_ctrl.w         = w;
     rd_ctrl.red       = pd.red;
     rd_ctrl.wr        = wr_eff;
     rd_ctrl.waddr     = (wr_eff == WrAbuf) ? (rb_abuf + 13'(ww_word[9:2])) :
@@ -237,9 +274,9 @@ module vec_engine
     rd_ctrl.qw        = ww_word[1:0];
     rd_ctrl.pa_tile   = (pd.pa == PaTile);
     case (pd.pa)
-      PaRowvec: rd_pa_addr = p_pb + 10'(w[9:2]);
-      PaTile:   rd_pa_addr = p_pb + pt_row + 10'(w[1:0]);
-      default:  rd_pa_addr = 10'd0;
+      PaRowvec: rd_pa_addr = p_pb + 9'(w[9:2]);
+      PaTile:   rd_pa_addr = p_pb + pt_row + 9'(w[1:0]);
+      default:  rd_pa_addr = 9'd0;
     endcase
     rd_ctrl.pa_slice = w[1:0];
     rd_ctrl.px       = pd.px;
@@ -251,7 +288,7 @@ module vec_engine
     rd_ctrl.ialu     = pd.ialu;
     rd_ctrl.c0_pred  = pd.c0_pred;
     rd_ctrl.rm_set   = (pd.rm == RmSet);
-    rd_ctrl.row_end  = (w == p_nw - 10'd1);
+    rd_ctrl.row_end  = row_last;
     rd_ctrl.row      = q;
     rd_ctrl.imm      = p_imm;
     rd_ctrl.imm2     = p_imm2;
@@ -292,6 +329,10 @@ module vec_engine
   assign rd_fire    = rd_v & fbuf_rd_grant_i;
   assign sm_rd_fire = sm_rd_v & fbuf_rd_grant_i;
 
+  logic quad_end;
+
+  assign quad_end = cur_skip | (rd_fire & rd_is_entry & row_last);
+
   logic lane_busy, red_busy, sc_busy, quant_busy, wf_empty, af_empty, phs_v;
   logic pass_wait, ret_ok;
   logic rdpipe_busy;
@@ -308,7 +349,6 @@ module vec_engine
     end
   end
 
-  assign tr_mode  = (st == StTransposeWait);
   assign tr_start = (st == StTransposeStart) && drained_r;
 
   logic next_is_pass, overlap_ok;
@@ -325,10 +365,10 @@ module vec_engine
     .src_i            (p_x),
     .dst_i            (p_d[11:0]),
     .tiles_i          (p_rq),
-    .src_tile_stride_i(tr_src_tile_stride),
+    .src_tile_stride_i(po.n8),
     .src_word_stride_i(p_x2),
-    .dst_tile_stride_i(tr_dst_tile_stride),
-    .dst_word_stride_i(tr_dst_word_stride),
+    .dst_tile_stride_i(po.nw),
+    .dst_word_stride_i(po.pb),
     .rotation_i       (ins[88:87]),
     .busy_o           (tr_busy),
     .rd_req_o         (tr_rd),
@@ -350,12 +390,10 @@ module vec_engine
   logic [31:0]        rn;
   logic [31:0]        rs0 [NumContexts][4];
   logic [31:0]        rs1 [NumContexts][4];
-  logic [CtxW-1:0]    sm_ctx_field;
   logic [CtxIdxW-1:0] sm_ctx, pd_ctx;
 
-  assign sm_ctx_field = ins[97:96];
-  assign sm_ctx       = sm_ctx_field[CtxIdxW-1:0];
-  assign pd_ctx       = pd.ctx[CtxIdxW-1:0];
+  assign sm_ctx = ins[96];
+  assign pd_ctx = pd.ctx;
 
   logic [NumContexts-1:0] ctx_reducing, ctx_issued, ctx_sc_pending, ctx_idle, sc_outstanding,
                           ctx_done;
@@ -372,7 +410,7 @@ module vec_engine
   logic [CtxIdxW-1:0]     done_ctx;
 
   assign pass_reads_rs  = (pd.c0 == C0Rs0) | (pd.b == BRs1) | (pd.sel == SelRs1);
-  assign pass_last_fire = rd_fire & rd_is_entry & (w == p_nw - 10'd1) & (q == p_rq - 9'd1);
+  assign pass_last_fire = rd_fire & rd_is_entry & row_last & (q == p_rq - 9'd1);
   assign rq_empty       = (rq_count == '0);
   assign ctx_all_idle   = &ctx_idle;
   assign ret_ok         = ctx_all_idle & !sc_busy & !sc_start & !sc_running & rq_empty;
@@ -394,7 +432,7 @@ module vec_engine
       end
     end
     rq_push = done_any & (ctx_prog[done_ctx].fn != SfNone);
-    case (sm_op)
+    case (ins_op)
       SmemRn:    sm_ready = rq_empty & !sc_busy & !sc_start & !sc_running;
       SmemRsmov: sm_ready = !sc_outstanding[sm_ctx];
       default:   sm_ready = 1'b1;
@@ -472,26 +510,17 @@ module vec_engine
   logic [31:0]   mul_p1, mul_p2, mul_p3;
   logic [1023:0] mword;
 
-  logic [4:0]  ins_rd, ins_ra, ins_rb, sa_op, sm_col;
-  logic        sa_imm, sm_colimm, sm_which;
-  logic [2:0]  sm_op;
+  logic [4:0]  ins_op, ins_rd, ins_ra, ins_rb, sm_col;
+  logic        ins_use_imm, sm_which;
   logic [31:0] ins_imm;
-  logic [1:0]  br_cond;
-  logic [9:0]  br_tgt;
 
-  assign ins_rd    = (kind == KindSmem) ? ins[120:116] : ins[118:114];
-  assign ins_ra    = (kind == KindSmem) ? ins[115:111] :
-                     (kind == KindBranch) ? ins[121:117] : ins[113:109];
-  assign ins_rb    = (kind == KindSmem) ? ins[110:106] : ins[108:104];
-  assign sa_op     = ins[123:119];
-  assign sa_imm    = ins[103];
-  assign sm_op     = ins[123:121];
-  assign sm_colimm = ins[105];
-  assign sm_col    = sm_colimm ? ins[104:100] : op_b[4:0];
-  assign sm_which  = ins[99];
-  assign ins_imm   = ins[31:0];
-  assign br_cond   = ins[123:122];
-  assign br_tgt    = ins[9:0];
+  assign ins_op      = ins[123:119];
+  assign ins_rd      = ins[118:114];
+  assign ins_ra      = ins[113:109];
+  assign ins_rb      = ins[108:104];
+  assign ins_use_imm = ins[103];
+  assign sm_which    = ins[97];
+  assign ins_imm     = ins[31:0];
 
   function automatic logic [31:0] salu(input logic [4:0] op, input logic [31:0] a,
                                        input logic [31:0] b, input logic [31:0] mulres);
@@ -515,6 +544,7 @@ module vec_engine
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       st          <= StIdle;
+      tr_mode     <= 1'b0;
       cur_skip    <= 1'b0;
       sc_start    <= 1'b0;
       gap         <= 2'd0;
@@ -546,41 +576,13 @@ module vec_engine
           pd_n    <= dec_pass(cbuf_rdata_i);
           pre_cnt <= 4'd0;
         end else if (pre_on) begin
-          case (pre_cnt)
-            4'd0: begin
-              ra_q <= pd_n.rx;
-              rb_q <= pd_n.rx2;
-            end
-            4'd1: begin
-              ra_q  <= pd_n.rd;
-              rb_q  <= pd_n.rq;
-              pn_x  <= rf_a[11:0];
-              pn_x2 <= rf_b[11:0];
-            end
-            4'd2: begin
-              ra_q  <= pd_n.rnw;
-              rb_q  <= pd_n.rn8;
-              pn_d  <= rf_a[12:0];
-              pn_rq <= rf_b[8:0];
-            end
-            4'd3: begin
-              ra_q  <= pd_n.rpb;
-              rb_q  <= pd_n.rimm;
-              pn_nw <= rf_a[9:0];
-              pn_n8 <= rf_b[7:0];
-            end
-            4'd4: begin
-              ra_q   <= pd_n.rimm2;
-              rb_q   <= 5'd0;
-              pn_pb  <= rf_a[9:0];
-              pn_imm <= rf_b;
-            end
-            default: begin
-              pn_imm2  <= rf_a;
-              pre_on   <= 1'b0;
-              pre_done <= 1'b1;
-            end
-          endcase
+          if (pre_cnt != 4'd5) begin
+            {ra_q, rb_q} <= opr_regs(pd_n.r, pre_cnt);
+          end else begin
+            pre_on   <= 1'b0;
+            pre_done <= 1'b1;
+          end
+          pn      <= opr_capture(pn, pre_cnt, rf_a, rf_b);
           pre_cnt <= pre_cnt + 4'd1;
         end
       end
@@ -588,7 +590,7 @@ module vec_engine
         StIdle: begin
           if (cmd_valid_i) begin
             qf <= cmd_q_i;
-            pc <= cmd_op_i[4] ? cmd_aux_i[9:0] : RomPc[cmd_op_i[3:0]];
+            pc <= {cmd_entry_i, 2'b00};
             st <= StFetch;
           end
         end
@@ -615,12 +617,7 @@ module vec_engine
               cnt <= 4'd0;
               st  <= StPrd;
             end
-            KindSalu, KindBranch: begin
-              ra_q <= ins_ra;
-              rb_q <= ins_rb;
-              st   <= StSrd;
-            end
-            KindSmem: begin
+            KindSalu, KindBranch, KindSmem: begin
               ra_q <= ins_ra;
               rb_q <= ins_rb;
               st   <= StSrd;
@@ -634,60 +631,32 @@ module vec_engine
           endcase
         end
         StPrd: begin
-          case (cnt)
-            4'd0: begin
-              ra_q <= pd.rx;
-              rb_q <= pd.rx2;
-            end
-            4'd1: begin
-              ra_q <= pd.rd;
-              rb_q <= pd.rq;
-              p_x  <= rf_a[11:0];
-              p_x2 <= rf_b[11:0];
-            end
-            4'd2: begin
-              ra_q <= pd.rnw;
-              rb_q <= pd.rn8;
-              p_d  <= rf_a[12:0];
-              p_rq <= rf_b[8:0];
-            end
-            4'd3: begin
-              ra_q <= pd.rpb;
-              rb_q <= pd.rimm;
-              p_nw <= rf_a[9:0];
-              p_n8 <= rf_b[7:0];
-              tr_dst_tile_stride <= rf_a[11:0];
-              tr_src_tile_stride <= rf_b[11:0];
-            end
-            4'd4: begin
-              ra_q  <= pd.rimm2;
-              rb_q  <= 5'd0;
-              p_pb  <= rf_a[9:0];
-              p_imm <= rf_b;
-              tr_dst_word_stride <= rf_a[11:0];
-            end
-            default: begin
-              p_imm2 <= rf_a;
-            end
-          endcase
-          cnt <= cnt + 4'd1;
-          if (cnt == 4'd5) begin
+          if (cnt != 4'd5) begin
+            {ra_q, rb_q} <= opr_regs(pd.r, cnt);
+          end else begin
             st <= (kind == KindTranspose) ? StTransposeStart : StSegSetup;
           end
+          po  <= opr_capture(po, cnt, rf_a, rf_b);
+          cnt <= cnt + 4'd1;
         end
         StTransposeStart: begin
           if (drained_r) begin
-            st <= StTransposeWait;
+            st      <= StTransposeWait;
+            tr_mode <= 1'b1;
           end
         end
         StTransposeWait: begin
           if (!tr_busy) begin
-            st <= StNext;
+            st      <= StNext;
+            tr_mode <= 1'b0;
           end
         end
         StSegSetup: begin
           if (!pass_wait) begin
             w       <= 10'd0;
+            wa_word <= word_of(pd.mx, pd.mg, pd.ms, 10'd0);
+            wb_word <= word_of(pd.mx2, pd.mg, pd.ms, 10'd0);
+            ww_word <= word_of(pd.md, pd.mg, pd.ms, 10'd0);
             slot_ph <= 1'b0;
             slot_j  <= 3'd0;
             q       <= 9'd0;
@@ -695,13 +664,25 @@ module vec_engine
             rb_src2 <= p_x2;
             rb_dst  <= p_d[11:0];
             rb_abuf <= p_d;
-            pt_row  <= 10'd0;
+            pt_row  <= 9'd0;
             cur_skip <= (pd.rm == RmSkip) & !rm_q;
             st      <= StIssue;
           end
         end
         StIssue: begin
-          if (cur_skip) begin
+          if (!cur_skip && rd_fire) begin
+            if (rd_is_hold) begin
+              slot_ph <= 1'b1;
+            end else begin
+              slot_ph <= 1'b0;
+              slot_j  <= slot_j + 3'd1;
+              w       <= w_next;
+              wa_word <= word_of(pd.mx, pd.mg, pd.ms, w_next);
+              wb_word <= word_of(pd.mx2, pd.mg, pd.ms, w_next);
+              ww_word <= word_of(pd.md, pd.mg, pd.ms, w_next);
+            end
+          end
+          if (quad_end) begin
             if ((q == p_rq - 9'd1) || sk_end) begin
               cur_skip <= 1'b0;
               st       <= overlap_ok ? StNext : StDrain;
@@ -711,7 +692,7 @@ module vec_engine
               rb_src2  <= rb_src2 + step_x;
               rb_dst   <= rb_dst + step_d;
               rb_abuf  <= rb_abuf + 13'(p_n8[7:2]);
-              pt_row   <= pt_row + 10'd4;
+              pt_row   <= pt_row + 9'd4;
               cur_skip <= 1'b0;
             end else begin
               q        <= q + 9'd2;
@@ -719,39 +700,8 @@ module vec_engine
               rb_src2  <= rb_src2 + {step_x[10:0], 1'b0};
               rb_dst   <= rb_dst + {step_d[10:0], 1'b0};
               rb_abuf  <= rb_abuf + 13'({p_n8[7:2], 1'b0});
-              pt_row   <= pt_row + 10'd8;
+              pt_row   <= pt_row + 9'd8;
               cur_skip <= !sk_go2;
-            end
-          end else if (rd_fire) begin
-            if (rd_is_hold) begin
-              slot_ph <= 1'b1;
-            end else begin
-              slot_ph <= 1'b0;
-              slot_j  <= slot_j + 3'd1;
-              if (w == p_nw - 10'd1) begin
-                w <= 10'd0;
-                if ((q == p_rq - 9'd1) || sk_end) begin
-                  st <= overlap_ok ? StNext : StDrain;
-                end else if (sk_go1) begin
-                  q        <= q + 9'd1;
-                  rb_src   <= src_d1;
-                  rb_src2  <= rb_src2 + step_x;
-                  rb_dst   <= rb_dst + step_d;
-                  rb_abuf  <= rb_abuf + 13'(p_n8[7:2]);
-                  pt_row   <= pt_row + 10'd4;
-                  cur_skip <= 1'b0;
-                end else begin
-                  q        <= q + 9'd2;
-                  rb_src   <= src_d2;
-                  rb_src2  <= rb_src2 + {step_x[10:0], 1'b0};
-                  rb_dst   <= rb_dst + {step_d[10:0], 1'b0};
-                  rb_abuf  <= rb_abuf + 13'({p_n8[7:2], 1'b0});
-                  pt_row   <= pt_row + 10'd8;
-                  cur_skip <= !sk_go2;
-                end
-              end else begin
-                w <= w + 10'd1;
-              end
             end
           end
         end
@@ -762,7 +712,7 @@ module vec_engine
         end
         StSrd: begin
           op_a <= rf_a;
-          op_b <= (kind == KindSalu && sa_imm) ? ins_imm : rf_b;
+          op_b <= (kind == KindSalu && ins_use_imm) ? ins_imm : rf_b;
           if (kind == KindSmem) begin
             ra_q <= ins_rd;
             st   <= StMdrain;
@@ -773,13 +723,13 @@ module vec_engine
           end
         end
         StSex: begin
-          if (sa_op == SaluMul) begin
+          if (ins_op == SaluMul) begin
             cnt <= 4'd0;
             st  <= StMulw;
           end else begin
             rf_we <= (ins_rd != 5'd0);
             rf_wa <= ins_rd;
-            rf_wd <= salu(sa_op, op_a, op_b, 32'd0);
+            rf_wd <= salu(ins_op, op_a, op_b, 32'd0);
             st    <= StNext;
           end
         end
@@ -793,9 +743,9 @@ module vec_engine
           end
         end
         StBex: begin
-          if (br_cond == 2'd0 || (br_cond == 2'd1 && op_a == 32'd0) ||
-              (br_cond == 2'd2 && op_a != 32'd0)) begin
-            pc <= br_tgt;
+          if (ins_op == BrAlways || (ins_op == BrZero && op_a == 32'd0) ||
+              (ins_op == BrNonzero && op_a != 32'd0)) begin
+            pc <= ins_imm[9:0];
             st <= StFetch;
           end else begin
             st <= StNext;
@@ -803,8 +753,9 @@ module vec_engine
         end
         StMdrain: begin
           sm_addr <= op_a[11:0] + ins_imm[11:0];
+          sm_col  <= ins_use_imm ? ins[102:98] : op_b[4:0];
           if (drained && sm_ready) begin
-            case (sm_op)
+            case (ins_op)
               SmemSld: begin
                 sm_rd_v <= 1'b1;
                 st      <= StMrd;
@@ -833,7 +784,7 @@ module vec_engine
           end
         end
         StMex: begin
-          case (sm_op)
+          case (ins_op)
             SmemSld: begin
               rf_we <= (ins_rd != 5'd0);
               rf_wa <= ins_rd;
@@ -862,15 +813,7 @@ module vec_engine
             pf_cnt      <= 3'd0;
             pre_done    <= 1'b0;
             pd          <= pd_n;
-            p_x         <= pn_x;
-            p_x2        <= pn_x2;
-            p_d         <= pn_d;
-            p_rq        <= pn_rq;
-            p_nw        <= pn_nw;
-            p_n8        <= pn_n8;
-            p_pb        <= pn_pb;
-            p_imm       <= pn_imm;
-            p_imm2      <= pn_imm2;
+            po          <= pn;
             kind        <= KindPass;
             st          <= StSegSetup;
           end else begin
@@ -1091,13 +1034,15 @@ module vec_engine
       xl  = e0_x[l*32 +: 32];
       x2l = e0_x2[l*32 +: 32];
       case (e0_c.cl)
-        ClX2:       lhs = x2l;
-        ClColumn:   lhs = 32'(l);
-        ClPosition: lhs = 32'({e0_c.ph, 3'(l)});
-        default:    lhs = xl;
+        ClX2:        lhs = x2l;
+        ClColumn:    lhs = 32'(l);
+        ClPosition:  lhs = 32'({e0_c.ph, 3'(l)});
+        ClRowColumn: lhs = 32'({e0_c.w, 3'(l)});
+        default:     lhs = xl;
       endcase
       rhs = e0_c.cr ? x2l : e0_c.imm2;
-      ii  = e0_c.cmp_int | (e0_c.cl == ClColumn) | (e0_c.cl == ClPosition);
+      ii  = e0_c.cmp_int | (e0_c.cl == ClColumn) | (e0_c.cl == ClPosition) |
+            (e0_c.cl == ClRowColumn);
       kl  = ii ? (lhs ^ 32'h80000000) : fkey(lhs);
       kr  = ii ? (rhs ^ 32'h80000000) : fkey(rhs);
       lt  = (kl < kr);
@@ -1106,7 +1051,7 @@ module vec_engine
       case (e0_c.c0)
         C0X2:    c0v = x2l;
         C0Pbuf:  c0v = e0_pa[l*32 +: 32];
-        C0Rs0:   c0v = rs0[e0_c.ctx[CtxIdxW-1:0]][e0_c.ph];
+        C0Rs0:   c0v = rs0[e0_c.ctx][e0_c.ph];
         C0Imm:   c0v = e0_c.imm;
         default: c0v = 32'd0;
       endcase
@@ -1223,7 +1168,7 @@ module vec_engine
   logic [31:0]   rs1_b;
 
   assign c_b   = cd[StageB - 1];
-  assign rs1_b = rs1[c_b.ctx[CtxIdxW-1:0]][c_b.ph];
+  assign rs1_b = rs1[c_b.ctx][c_b.ph];
 
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
@@ -1267,7 +1212,12 @@ module vec_engine
     );
   end
 
-  logic [Hw-1:0] y_sel, y_wr, y_red;
+  logic [Hw-1:0] y_wr;
+  logic [31:0]   rs1_y;
+
+  always_ff @(posedge clk_i) begin
+    rs1_y <= rs1[c_ny.ctx][c_ny.ph];
+  end
 
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
@@ -1277,17 +1227,10 @@ module vec_engine
         SelX2:   alt = d2[StageY-1][l*32 +: 32];
         SelImm:  alt = c_y.imm;
         SelNull: alt = NullEntry;
-        SelRs1:  alt = rs1[c_y.ctx[CtxIdxW-1:0]][c_y.ph];
+        SelRs1:  alt = rs1_y;
         default: alt = 32'd0;
       endcase
-      y_sel[l*32 +: 32] = (c_y.sel != SelNone && !pred_d[StageY-1][l]) ? alt : y0;
-      if (c_y.mask[l]) begin
-        y_wr[l*32 +: 32]  = 32'd0;
-        y_red[l*32 +: 32] = (c_y.red == RedMax) ? FpNegInf : 32'd0;
-      end else begin
-        y_wr[l*32 +: 32]  = y_sel[l*32 +: 32];
-        y_red[l*32 +: 32] = y_sel[l*32 +: 32];
-      end
+      y_wr[l*32 +: 32] = (c_y.sel != SelNone && !pred_d[StageY-1][l]) ? alt : y0;
     end
   end
 
@@ -1297,11 +1240,11 @@ module vec_engine
     .clear_i       (red_clear),
     .clear_ctx_i   (pd_ctx),
     .in_valid_i    (c_y.valid),
-    .ctx_i         (c_y.ctx[CtxIdxW-1:0]),
+    .ctx_i         (c_y.ctx),
     .ph_i          (c_y.ph),
     .red_i         (c_y.red),
     .j_i           (c_y.j),
-    .y_i           (y_red),
+    .y_i           (y_wr),
     .acc_rd_addr_i (acc_rd_addr),
     .acc_rd_data_o (acc_rd_data),
     .acc_max_o     (acc_max),
@@ -1713,7 +1656,7 @@ module vec_engine
   logic          af_pop;
   logic [4:0]    af_count;
 
-  assign af_pop = abuf_wr_req_o & abuf_wr_grant_i;
+  assign af_pop = !af_empty;
 
   sfifo #(
     .Width      (13 + 1056),
@@ -1740,6 +1683,6 @@ module vec_engine
   logic unused_engine;
 
   assign unused_engine = ^{c_y, c_ny, c_nl, c_c1, c_b, rn, wf_count, ef_count, ef_afull,
-                           df_count, af_count, sm_ctx_field, pd.ctx};
+                           df_count, af_count, ins[127:124]};
 
 endmodule

@@ -17,6 +17,7 @@
 
 #include "bench_bus.hpp"
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "npu_bench.hpp"
 #include "npu_isa.hpp"
 #include "trace_record.hpp"
@@ -32,7 +33,7 @@ constexpr uint32_t kOutputOffset = 0x2000;
 constexpr uint32_t kTraceOffset = 0x3000;
 constexpr uint32_t kTraceBytes = 4 * 2 * 16;
 constexpr uint32_t kWordBytes = 128;
-constexpr uint32_t kScale = 4;
+constexpr uint32_t kScale = isa::library::kScale;
 constexpr uint32_t kTwo = 0x40000000U;
 
 Program DoubleProgram() {
@@ -43,7 +44,7 @@ Program DoubleProgram() {
                    .rows = 1,
                    .row_words = 1,
                    .ddr_stride = kWordBytes}),
-      tb::Vec({.op = kScale,
+      tb::Vec({.entry = kScale,
                .src = 0,
                .dst = 1,
                .rows_q = 1,

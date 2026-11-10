@@ -155,7 +155,7 @@ std::vector<AbufWord> RandomA(std::mt19937& rng, uint32_t count) {
 }
 
 void CheckThroughGemm(std::mt19937& rng, uint32_t seed, const Matrix& matrix,
-                      DmaMode mode, const std::vector<WbufWord>& expected,
+                      DmaKind kind, const std::vector<WbufWord>& expected,
                       GemmArgs high) {
   const auto rows = static_cast<uint32_t>(matrix.size());
   const auto row_words = static_cast<uint32_t>(matrix[0].size());
@@ -184,7 +184,7 @@ void CheckThroughGemm(std::mt19937& rng, uint32_t seed, const Matrix& matrix,
                .rows = rows,
                .row_words = row_words,
                .ddr_stride = kSrcStride,
-               .mode = mode}),
+               .kind = kind}),
       DmaLoad({.ddr_addr = kAArea,
                .mem = Mem::kAbuf,
                .onchip = 0,
@@ -214,7 +214,7 @@ TEST(Split8Test, SplitsRowPairsIntoHighAndLowPlanes) {
   constexpr uint32_t kRowWords = 3;
   constexpr uint32_t kDst = 5;
   const Matrix matrix = RandomMatrix(rng, kRows, kRowWords);
-  CheckThroughGemm(rng, 41, matrix, DmaMode::kSplit8,
+  CheckThroughGemm(rng, 41, matrix, DmaKind::kSplit8,
                    ExpectedSplit8(matrix, kDst),
                    {.a_base = 0,
                     .a_stride = kRowWords,
@@ -234,7 +234,7 @@ TEST(Split8Test, T32TransposesAndAlignsScales) {
   constexpr uint32_t kRowWords = 2;
   constexpr uint32_t kDst = 3;
   const Matrix matrix = RandomMatrix(rng, kRows, kRowWords);
-  CheckThroughGemm(rng, 42, matrix, DmaMode::kT32Split8,
+  CheckThroughGemm(rng, 42, matrix, DmaKind::kT32Split8,
                    ExpectedT32Split8(matrix, kDst),
                    {.a_base = 0,
                     .a_stride = kRows / 8,

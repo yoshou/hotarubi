@@ -3,15 +3,16 @@ module dma_engine (
   input  logic          rst_ni,
   input  logic          cmd_valid_i,
   input  logic          cmd_st_i,
-  input  logic [31:0]   cmd_ddr_addr_i,
+  input  logic [27:0]   cmd_ddr_addr_i,
   input  logic [2:0]    cmd_mem_i,
-  input  logic [19:0]   cmd_oc_addr_i,
+  input  logic [12:0]   cmd_oc_addr_i,
   input  logic [11:0]   cmd_rows_i,
   input  logic [11:0]   cmd_row_words_i,
-  input  logic [23:0]   cmd_ddr_stride_i,
-  input  logic [1:0]    cmd_mode_i,
-  input  logic [1:0]    cmd_flags_i,
-  input  logic [6:0]    cmd_tok_i,
+  input  logic [19:0]   cmd_ddr_stride_i,
+  input  logic [2:0]    cmd_kind_i,
+  input  logic [5:0]    cmd_tok_i,
+  input  logic          cmd_acc_i,
+  input  logic          cmd_flush_i,
   output logic          busy_o,
   output logic [31:0]   m_axi_araddr_o,
   output logic [7:0]    m_axi_arlen_o,
@@ -41,12 +42,12 @@ module dma_engine (
   output logic          wr_req_o,
   input  logic          wr_grant_i,
   output logic [2:0]    wr_mem_o,
-  output logic [19:0]   wr_addr_o,
+  output logic [12:0]   wr_addr_o,
   output logic [1151:0] wr_data_o,
   output logic          rd_req_o,
   input  logic          rd_grant_i,
   output logic [2:0]    rd_mem_o,
-  output logic [19:0]   rd_addr_o,
+  output logic [12:0]   rd_addr_o,
   input  logic [1055:0] rd_data_i,
   output logic          stat_rd_beat_o,
   output logic          stat_wr_beat_o,
@@ -60,10 +61,28 @@ module dma_engine (
   localparam int UfDepth = 64;
   localparam int WqDepth = 64;
 
+  localparam logic [2:0] KindRow        = 3'd1;
+  localparam logic [2:0] KindRowIndexed = 3'd2;
+  localparam logic [2:0] KindSplit8     = 3'd3;
+  localparam logic [2:0] KindT32        = 3'd4;
+  localparam logic [2:0] KindGacc       = 3'd5;
+
   localparam logic [1:0] ModeRaw    = 2'd0;
   localparam logic [1:0] ModeSplit8 = 2'd1;
   localparam logic [1:0] ModeT32    = 2'd2;
   localparam logic [1:0] ModeGacc   = 2'd3;
+
+  function automatic logic [1:0] mode_of(input logic st, input logic [2:0] kind);
+    if (st) begin
+      return ModeRaw;
+    end
+    case (kind)
+      KindSplit8: return ModeSplit8;
+      KindT32:    return ModeT32;
+      KindGacc:   return ModeGacc;
+      default:    return ModeRaw;
+    endcase
+  endfunction
 
   typedef enum logic [1:0] {
     SIdle,
@@ -77,7 +96,7 @@ module dma_engine (
   logic [1:0]  c_gflags;
   logic [31:0] c_ddr;
   logic [2:0]  c_mem;
-  logic [19:0] c_oc;
+  logic [12:0] c_oc;
   logic [11:0] c_rows, c_w;
   logic [23:0] c_stride;
   logic [1:0]  c_mode;
@@ -91,7 +110,7 @@ module dma_engine (
   logic [15:0] row_beats;
   (* use_dsp = "yes" *) logic [23:0] rows_w;
   logic [23:0] oc_words;
-  logic [19:0] n_half, kbt, kbt2, kbt3, kbt4;
+  logic [12:0] n_half, kbt, kbt2, kbt3, kbt4;
 
   assign busy_o      = (st != SIdle);
 
@@ -137,19 +156,19 @@ module dma_engine (
           if (cmd_valid_i) begin
             st       <= SSetup1;
             c_st     <= cmd_st_i;
-            c_ddr    <= cmd_ddr_addr_i;
+            c_ddr    <= {cmd_ddr_addr_i, 4'b0};
             c_mem    <= cmd_mem_i;
             c_oc     <= cmd_oc_addr_i;
             c_rows   <= cmd_rows_i;
             c_w      <= cmd_row_words_i;
-            c_stride <= cmd_ddr_stride_i;
-            c_mode   <= cmd_st_i ? ModeRaw : cmd_mode_i;
-            c_idx    <= cmd_flags_i[0] && cmd_flags_i[1] && !cmd_st_i && (cmd_mode_i == ModeRaw);
-            c_row    <= cmd_flags_i[1] && (cmd_st_i || cmd_mode_i == ModeRaw);
+            c_stride <= {cmd_ddr_stride_i, 4'b0};
+            c_mode   <= mode_of(cmd_st_i, cmd_kind_i);
+            c_idx    <= !cmd_st_i && (cmd_kind_i == KindRowIndexed);
+            c_row    <= (cmd_kind_i == KindRow) || (cmd_kind_i == KindRowIndexed);
             c_abuf   <= (cmd_mem_i == 3'd0);
-            c_gacc   <= !cmd_st_i && (cmd_mode_i == ModeGacc);
-            c_gflags <= cmd_flags_i;
-            c_tok    <= cmd_tok_i[5:0];
+            c_gacc   <= !cmd_st_i && (cmd_kind_i == KindGacc);
+            c_gflags <= {cmd_flush_i, cmd_acc_i};
+            c_tok    <= cmd_tok_i;
           end
         end
         SSetup1: begin
@@ -157,7 +176,7 @@ module dma_engine (
           rows_w <= c_rows * c_w;
           ubeats <= c_row ? tbeats : 8'(bpw);
           nwq    <= c_abuf ? 7'(c_tok) : 7'({c_tok, 2'b00});
-          kbt    <= 20'(c_rows[11:3]);
+          kbt    <= 13'(c_rows[11:3]);
           case (c_mode)
             ModeSplit8: begin
               n_out      <= c_rows >> 1;
@@ -181,7 +200,7 @@ module dma_engine (
         end
         SSetup2: begin
           st         <= SRun;
-          n_half     <= 20'(rows_w >> 1);
+          n_half     <= 13'(rows_w >> 1);
           kbt2       <= kbt << 1;
           kbt3       <= kbt + (kbt << 1);
           kbt4       <= kbt << 2;
@@ -221,7 +240,7 @@ module dma_engine (
       g_wa     <= '0;
       g_ia     <= '0;
     end else if (setup_pulse) begin
-      gen_done <= (c_rows == 12'd0) || (c_w == 12'd0) || c_gacc;
+      gen_done <= c_gacc;
       g_out    <= '0;
       g_w      <= '0;
       g_in     <= '0;
@@ -318,10 +337,10 @@ module dma_engine (
       lf_left     <= '0;
       lf_inflight <= '0;
     end else if (setup_pulse) begin
-      gi_done     <= !c_idx || (rows_w == 24'd0);
+      gi_done     <= !c_idx;
       gi_sub      <= '0;
       gi_cnt      <= '0;
-      lf_done     <= !(c_idx || c_gacc) || (!c_gacc && rows_w == 24'd0);
+      lf_done     <= !(c_idx || c_gacc);
       lf_pc       <= c_ddr;
       lf_inflight <= '0;
       lf_left     <= c_gacc ? 14'({c_rows, 3'b000} + 15'd1) : 14'((rows_w + 24'd3) >> 2);
@@ -599,7 +618,7 @@ module dma_engine (
   logic [1151:0] rf_out_word;
   logic [127:0]  rf_bout;
   logic          wf_push, wf_pop, wf_empty, wf_afull;
-  logic [1171:0] wf_din, wf_dout;
+  logic [1164:0] wf_din, wf_dout;
   logic          pend_hi, pend_lo;
 
   assign cons_ok = (c_mode == ModeT32) ? t32_in_ready :
@@ -608,7 +627,7 @@ module dma_engine (
   logic [3:0]    bcnt;
   logic          wv, c_rr;
   logic [1151:0] asm_r;
-  logic [19:0]   dst_cnt, idx;
+  logic [12:0]   dst_cnt, idx;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -677,7 +696,7 @@ module dma_engine (
     end
   end
 
-  logic [19:0] idx_hi;
+  logic [12:0] idx_hi;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -718,10 +737,10 @@ module dma_engine (
 
   logic          t_v;
   logic [1151:0] t_d;
-  logic [19:0]   t_addr, blk_base, rb;
+  logic [12:0]   t_addr, blk_base, rb;
   logic [11:0]   t_w;
   logic [2:0]    t_cnt;
-  logic [19:0]   cg_off;
+  logic [12:0]   cg_off;
 
   always_comb begin
     case (t32_cg)
@@ -746,7 +765,7 @@ module dma_engine (
     end else begin
       t_v <= t32_out_valid && t32_out_ready;
       if (t32_out_valid && t32_out_ready) begin
-        t_addr <= blk_base + cg_off + (t32_lo ? n_half : 20'd0);
+        t_addr <= blk_base + cg_off + (t32_lo ? n_half : 13'd0);
         t_cnt  <= t_cnt + 1'b1;
         if (t_cnt == 3'd7) begin
           if (t_w == c_w - 1'b1) begin
@@ -828,11 +847,12 @@ module dma_engine (
     .rst_ni,
     .clear_i    (setup_pulse),
     .start_i    (ga_start),
-    .cfg_slots_i(c_rows),
-    .cfg_kb_i   (c_w[3:0]),
-    .cfg_acc_i  (c_gflags[0]),
-    .cfg_flush_i(c_gflags[1]),
-    .cfg_dst_i  (c_oc[12:0]),
+    .cfg_slots_i (c_rows),
+    .cfg_kb_i    (c_w[3:0]),
+    .cfg_stride_i(c_stride[23:4]),
+    .cfg_acc_i   (c_gflags[0]),
+    .cfg_flush_i (c_gflags[1]),
+    .cfg_dst_i   (c_oc),
     .ent_valid_i(ga_ent_valid),
     .ent_ready_o(ga_ent_ready),
     .ent_data_i (ibr_d),
@@ -870,7 +890,7 @@ module dma_engine (
     wf_din  = '0;
     if (c_gacc) begin
       wf_push = ga_out_valid && ga_out_ready;
-      wf_din  = {7'd0, ga_out_addr, 128'd0, ga_out_word};
+      wf_din  = {ga_out_addr, 128'd0, ga_out_word};
     end else if (c_row) begin
       wf_push = rf_out_valid && rf_out_ready;
       wf_din  = {dst_cnt, rf_out_word};
@@ -894,7 +914,7 @@ module dma_engine (
   logic [3:0] wf_count;
 
   sfifo #(
-    .Width      (1172),
+    .Width      (1165),
     .Depth      (8),
     .AfullMargin(3)
   ) u_wf (
@@ -911,7 +931,7 @@ module dma_engine (
   );
 
   logic          wo_v;
-  logic [1171:0] wo_d;
+  logic [1164:0] wo_d;
 
   assign wf_pop = !wf_empty && (!wo_v || wr_grant_i);
 
@@ -931,7 +951,7 @@ module dma_engine (
 
   assign wr_req_o  = wo_v;
   assign wr_mem_o  = c_mem;
-  assign wr_addr_o = wo_d[1171:1152];
+  assign wr_addr_o = wo_d[1164:1152];
   assign wr_data_o = wo_d[1151:0];
 
   assign ld_done = gen_all_done && b_idle && (reserved == 8'd0) && rf_empty && tf_empty && !wv &&
@@ -956,7 +976,7 @@ module dma_engine (
   assign rd_mem_o    = c_mem;
   assign ser_take    = !c_row && hold_v && (!ser_v || (wb_push && scnt == bpw - 1'b1));
 
-  logic [19:0] rd_addr_r;
+  logic [12:0] rd_addr_r;
 
   assign rd_addr_o = rd_addr_r;
 
@@ -971,7 +991,7 @@ module dma_engine (
       scnt     <= '0;
     end else if (setup_pulse) begin
       rd_cnt    <= '0;
-      rd_all    <= (rows_w == 24'd0);
+      rd_all    <= 1'b0;
       inflight  <= 1'b0;
       hold_v    <= 1'b0;
       ser_v     <= 1'b0;
@@ -1121,7 +1141,7 @@ module dma_engine (
 
   logic unused_dma;
 
-  assign unused_dma = ^{cmd_tok_i[6], m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, rf_afull,
+  assign unused_dma = ^{m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, rf_afull,
                         rf_count, tf_count, wq_afull, wq_count, wf_count, wb_count};
 
 endmodule

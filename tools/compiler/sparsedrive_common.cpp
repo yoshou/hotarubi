@@ -196,9 +196,7 @@ Transfer Tokens(uint64_t ddr, Mem mem, uint32_t onchip, uint32_t tokens,
           .rows = 1,
           .row_words = tokens,
           .ddr_stride = 0,
-          .mode = DmaMode::kRaw,
-          .index = index,
-          .row_format = true,
+          .kind = index ? DmaKind::kRowIndexed : DmaKind::kRow,
           .tok = tok};
 }
 

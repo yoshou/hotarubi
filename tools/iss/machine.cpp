@@ -10,6 +10,8 @@
 
 #include "dma_engine.hpp"
 #include "gemm_array.hpp"
+#include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "timeline.hpp"
 #include "timing.hpp"
 #include "trace_record.hpp"
@@ -19,34 +21,36 @@
 namespace hotarubi::iss {
 namespace {
 
-constexpr uint32_t kOpNop = 0;
-constexpr uint32_t kOpDmaLoad = 1;
-constexpr uint32_t kOpDmaStore = 2;
-constexpr uint32_t kOpGemm = 4;
-constexpr uint32_t kOpVec = 5;
-constexpr uint32_t kOpSignal = 6;
-constexpr uint32_t kOpHalt = 7;
-constexpr uint32_t kOpWaitHost = 8;
+using isa::kOpDmaLoad;
+using isa::kOpDmaStore;
+using isa::kOpGemm;
+using isa::kOpHalt;
+using isa::kOpNop;
+using isa::kOpSignal;
+using isa::kOpVec;
+using isa::kOpWaitHost;
 
-constexpr uint32_t kRegCtrl = 0x00;
-constexpr uint32_t kRegStatus = 0x04;
-constexpr uint32_t kRegInstrBase = 0x08;
-constexpr uint32_t kRegInstrCount = 0x0C;
-constexpr uint32_t kRegIrqStatus = 0x10;
-constexpr uint32_t kRegIrqEnable = 0x14;
-constexpr uint32_t kRegSignal = 0x18;
-constexpr uint32_t kRegSignalValue = 0x1C;
-constexpr uint32_t kRegIssued = 0x20;
-constexpr uint32_t kRegCycles = 0x24;
-constexpr uint32_t kRegGemmCycles = 0x28;
-constexpr uint32_t kRegVecCycles = 0x2C;
-constexpr uint32_t kRegDmaCycles = 0x30;
-constexpr uint32_t kRegStallCycles = 0x34;
-constexpr uint32_t kRegStarveCycles = 0x38;
-constexpr uint32_t kRegTraceBase = 0x3C;
-constexpr uint32_t kRegTraceCtrl = 0x40;
-constexpr uint32_t kRegTraceCount = 0x44;
-constexpr uint32_t kRegHostGo = 0x48;
+constexpr uint32_t Offset(Register reg) { return static_cast<uint32_t>(reg); }
+
+constexpr uint32_t kRegCtrl = Offset(Register::kCtrl);
+constexpr uint32_t kRegStatus = Offset(Register::kStatus);
+constexpr uint32_t kRegInstrBase = Offset(Register::kInstrBase);
+constexpr uint32_t kRegInstrCount = Offset(Register::kInstrCount);
+constexpr uint32_t kRegIrqStatus = Offset(Register::kIrqStatus);
+constexpr uint32_t kRegIrqEnable = Offset(Register::kIrqEnable);
+constexpr uint32_t kRegSignal = Offset(Register::kSignal);
+constexpr uint32_t kRegSignalValue = Offset(Register::kSignalValue);
+constexpr uint32_t kRegIssued = Offset(Register::kIssued);
+constexpr uint32_t kRegCycles = Offset(Register::kCycles);
+constexpr uint32_t kRegDmaCycles = Offset(Register::kDmaCycles);
+constexpr uint32_t kRegGemmCycles = Offset(Register::kGemmCycles);
+constexpr uint32_t kRegVecCycles = Offset(Register::kVecCycles);
+constexpr uint32_t kRegStallCycles = Offset(Register::kStallCycles);
+constexpr uint32_t kRegStarveCycles = Offset(Register::kStarveCycles);
+constexpr uint32_t kRegTraceBase = Offset(Register::kTraceBase);
+constexpr uint32_t kRegTraceCtrl = Offset(Register::kTraceCtrl);
+constexpr uint32_t kRegTraceCount = Offset(Register::kTraceCount);
+constexpr uint32_t kRegHostGo = Offset(Register::kHostGo);
 constexpr uint32_t kRegisterMask = 0xFC;
 
 constexpr uint32_t kCtrlStart = 0x1;
@@ -67,7 +71,6 @@ constexpr uint32_t kInstructionBytes = 16;
 
 uint32_t Low32(uint64_t value) { return static_cast<uint32_t>(value); }
 
-constexpr std::array<uint32_t, Timeline::kEngines> kWaitBits = {0x1, 0x4, 0x8};
 constexpr std::array<std::string_view, 6> kMemNames = {"ABUF", "WBUF", "FBUF",
                                                        "PBUF", "TBUF", "CBUF"};
 
@@ -90,46 +93,47 @@ std::string DescribeHazards(const std::vector<Hazard>& hazards, size_t limit) {
 }
 
 DmaCommand DecodeDma(const Word128& instruction) {
-  return {.store = instruction.Field(120, 8) == kOpDmaStore,
-          .ddr_addr = instruction.Field(80, 32),
-          .mem = instruction.Field(77, 3),
-          .onchip = instruction.Field(57, 20),
-          .rows = instruction.Field(45, 12),
-          .row_words = instruction.Field(33, 12),
-          .ddr_stride = instruction.Field(9, 24),
-          .mode = instruction.Field(7, 2),
-          .flags = instruction.Field(112, 2),
-          .tok = instruction.Field(0, 7)};
+  return {.store = instruction.Field(isa::kOpcode) == kOpDmaStore,
+          .ddr_addr = instruction.Field(isa::dma::kDdrAddr),
+          .mem = instruction.Field(isa::dma::kMem),
+          .onchip = instruction.Field(isa::dma::kAddr),
+          .rows = instruction.Field(isa::dma::kRows),
+          .row_words = instruction.Field(isa::dma::kRowWords),
+          .ddr_stride = instruction.Field(isa::dma::kDdrStride),
+          .kind = instruction.Field(isa::dma::kKind),
+          .tok = instruction.Field(isa::dma::kTok),
+          .acc = instruction.Field(isa::dma::kAcc) != 0,
+          .flush = instruction.Field(isa::dma::kFlush) != 0};
 }
 
 GemmCommand DecodeGemm(const Word128& instruction) {
-  return {.a_base = instruction.Field(92, 20),
-          .a_stride = instruction.Field(82, 10),
-          .kb = instruction.Field(72, 10),
-          .m = instruction.Field(62, 10),
-          .w_base = instruction.Field(42, 20),
-          .w_stride = instruction.Field(32, 10),
-          .n8 = instruction.Field(24, 8),
-          .c_base = instruction.Field(4, 20),
-          .wmode = instruction.Field(2, 2),
-          .acc = instruction.Field(1, 1) != 0};
+  return {.a_base = instruction.Field(isa::gemm::kABase),
+          .a_stride = instruction.Field(isa::gemm::kAStride),
+          .kb = instruction.Field(isa::gemm::kKb),
+          .m = instruction.Field(isa::gemm::kM),
+          .w_base = instruction.Field(isa::gemm::kWBase),
+          .w_stride = instruction.Field(isa::gemm::kWStride),
+          .n8 = instruction.Field(isa::gemm::kN8),
+          .c_base = instruction.Field(isa::gemm::kCBase),
+          .wmode = instruction.Field(isa::gemm::kWmode),
+          .acc = instruction.Field(isa::gemm::kAcc) != 0};
 }
 
 VecCommand DecodeVec(const Word128& instruction) {
-  return {.op = instruction.Field(107, 5),
-          .quantize = instruction.Field(112, 1) != 0,
-          .src = instruction.Field(95, 12),
-          .src2 = instruction.Field(83, 12),
-          .dst = instruction.Field(70, 13),
-          .rows_q = instruction.Field(61, 9),
-          .n8 = instruction.Field(53, 8),
-          .p_base = instruction.Field(43, 10),
-          .aux = instruction.Field(32, 11),
-          .imm = instruction.Field(0, 32)};
+  return {.entry = instruction.Field(isa::vec::kEntry),
+          .quantize = instruction.Field(isa::vec::kQ) != 0,
+          .src = instruction.Field(isa::vec::kSrc),
+          .src2 = instruction.Field(isa::vec::kSrc2),
+          .dst = instruction.Field(isa::vec::kDst),
+          .rows_q = instruction.Field(isa::vec::kRowsQ),
+          .n8 = instruction.Field(isa::vec::kN8),
+          .p_base = instruction.Field(isa::vec::kPBase),
+          .aux = instruction.Field(isa::vec::kAux),
+          .imm = instruction.Field(isa::vec::kImm)};
 }
 
 uint64_t EstimateCycles(const Word128& instruction, const CostModel& model) {
-  switch (instruction.Field(120, 8)) {
+  switch (instruction.Field(isa::kOpcode)) {
     case kOpDmaLoad:
     case kOpDmaStore:
       return model.Dma(EstimateDma(DecodeDma(instruction))).cycles;
@@ -137,8 +141,8 @@ uint64_t EstimateCycles(const Word128& instruction, const CostModel& model) {
       return model.Gemm(DecodeGemm(instruction)).cycles;
     case kOpVec: {
       const VecCommand command = DecodeVec(instruction);
-      if (command.op < kVecRun) {
-        return model.Vec(FixedOperationActivity(command)).cycles;
+      if (RunsLibraryProgram(command)) {
+        return model.Vec(LibraryActivity(command)).cycles;
       }
       return model
           .Vec({.passes = 1,
@@ -171,12 +175,12 @@ uint32_t Machine::ReadRegister(uint32_t offset) const {
       return issued_;
     case kRegCycles:
       return Low32(timeline_.Cycles());
+    case kRegDmaCycles:
+      return Low32(timeline_.Busy(Source::kDma));
     case kRegGemmCycles:
       return Low32(timeline_.Busy(Source::kGemm));
     case kRegVecCycles:
       return Low32(timeline_.Busy(Source::kVec));
-    case kRegDmaCycles:
-      return Low32(timeline_.Busy(Source::kDma));
     case kRegStallCycles:
       return Low32(timeline_.Stall());
     case kRegStarveCycles:
@@ -239,8 +243,9 @@ Stop Machine::Run() {
       return Stop::kStarved;
     }
     const Word128 instruction = Fetch(next_);
-    const uint32_t opcode = instruction.Field(120, 8);
-    if (opcode == kOpWaitHost && host_go_ < instruction.Field(0, 32)) {
+    const uint32_t opcode = instruction.Field(isa::kOpcode);
+    if (opcode == kOpWaitHost &&
+        host_go_ < instruction.Field(isa::wait_host::kValue)) {
       return Stop::kWaitHost;
     }
     ++next_;
@@ -292,13 +297,13 @@ void Machine::Start() {
 void Machine::Issue(uint32_t opcode, const Word128& instruction) {
   const Source source = SourceOf(opcode);
   const Cost cost = Execute(opcode, instruction);
-  CheckHazards(source, instruction.Field(116, 4), memories_.log);
+  CheckHazards(source, instruction.Field(isa::kWait), memories_.log);
   if (observer_) {
     observer_(issued_ - 1, memories_.log);
   }
   memories_.log.Clear();
   const Span span =
-      timeline_.Issue(source, instruction.Field(116, 4), cost.cycles);
+      timeline_.Issue(source, instruction.Field(isa::kWait), cost.cycles);
   Statistics statistics = cost.statistics;
   if (source == Source::kDma) {
     statistics.c = Low32(span.start - span.issue);
@@ -310,7 +315,7 @@ void Machine::Issue(uint32_t opcode, const Word128& instruction) {
 
 void Machine::CheckHazards(Source source, uint32_t wait, const AccessLog& log) {
   for (int e = 0; e < Timeline::kEngines; ++e) {
-    if ((wait & kWaitBits.at(e)) != 0) {
+    if ((wait & isa::WaitBit(static_cast<uint32_t>(e))) != 0) {
       known_.at(e) = std::max(known_.at(e), last_.at(e));
     }
   }
@@ -356,8 +361,8 @@ Cost Machine::Execute(uint32_t opcode, const Word128& instruction) {
       vec_.Execute(DecodeVec(instruction), memories_);
       return model_.Vec(vec_.Activity());
     case kOpSignal:
-      signal_id_ = instruction.Field(104, 8);
-      signal_value_ = instruction.Field(0, 32);
+      signal_id_ = instruction.Field(isa::signal::kId);
+      signal_value_ = instruction.Field(isa::signal::kValue);
       signal_count_ = (signal_count_ + 1) & 0xFFFFU;
       irq_status_ |= kIrqSignal;
       return {};
@@ -380,14 +385,13 @@ Cost Machine::Execute(uint32_t opcode, const Word128& instruction) {
 
 void Machine::Record(const Word128& instruction, const Span& span,
                      const Statistics& statistics) {
-  const uint32_t opcode = instruction.Field(120, 8);
+  const uint32_t opcode = instruction.Field(isa::kOpcode);
   TraceRecord record{.index = issued_ - 1,
                      .issue = Low32(span.issue),
                      .completion = Low32(span.completion),
                      .source = SourceOf(opcode),
                      .opcode = opcode,
-                     .wait = instruction.Field(116, 4),
-                     .flags = instruction.Field(112, 4),
+                     .wait = instruction.Field(isa::kWait),
                      .type = RecordType::kCompletion,
                      .statistics = {}};
   const auto write = [&](const TraceRecord& r) {
@@ -417,8 +421,8 @@ bool Machine::WaitingForHost() const {
     return false;
   }
   const Word128 instruction = Fetch(next_);
-  return instruction.Field(120, 8) == kOpWaitHost &&
-         host_go_ < instruction.Field(0, 32);
+  return instruction.Field(isa::kOpcode) == kOpWaitHost &&
+         host_go_ < instruction.Field(isa::wait_host::kValue);
 }
 
 uint32_t Machine::Status() const {

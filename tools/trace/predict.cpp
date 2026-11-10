@@ -20,21 +20,23 @@
 namespace hotarubi::trace {
 namespace {
 
-constexpr uint32_t kRegCtrl = 0x00;
-constexpr uint32_t kRegInstrBase = 0x08;
-constexpr uint32_t kRegInstrCount = 0x0C;
-constexpr uint32_t kRegSignalValue = 0x1C;
-constexpr uint32_t kRegIssued = 0x20;
-constexpr uint32_t kRegCycles = 0x24;
-constexpr uint32_t kRegGemmCycles = 0x28;
-constexpr uint32_t kRegVecCycles = 0x2C;
-constexpr uint32_t kRegDmaCycles = 0x30;
-constexpr uint32_t kRegStallCycles = 0x34;
-constexpr uint32_t kRegStarveCycles = 0x38;
-constexpr uint32_t kRegTraceBase = 0x3C;
-constexpr uint32_t kRegTraceCtrl = 0x40;
-constexpr uint32_t kRegTraceCount = 0x44;
-constexpr uint32_t kRegHostGo = 0x48;
+constexpr uint32_t Offset(Register reg) { return static_cast<uint32_t>(reg); }
+
+constexpr uint32_t kRegCtrl = Offset(Register::kCtrl);
+constexpr uint32_t kRegInstrBase = Offset(Register::kInstrBase);
+constexpr uint32_t kRegInstrCount = Offset(Register::kInstrCount);
+constexpr uint32_t kRegSignalValue = Offset(Register::kSignalValue);
+constexpr uint32_t kRegIssued = Offset(Register::kIssued);
+constexpr uint32_t kRegCycles = Offset(Register::kCycles);
+constexpr uint32_t kRegGemmCycles = Offset(Register::kGemmCycles);
+constexpr uint32_t kRegVecCycles = Offset(Register::kVecCycles);
+constexpr uint32_t kRegDmaCycles = Offset(Register::kDmaCycles);
+constexpr uint32_t kRegStallCycles = Offset(Register::kStallCycles);
+constexpr uint32_t kRegStarveCycles = Offset(Register::kStarveCycles);
+constexpr uint32_t kRegTraceBase = Offset(Register::kTraceBase);
+constexpr uint32_t kRegTraceCtrl = Offset(Register::kTraceCtrl);
+constexpr uint32_t kRegTraceCount = Offset(Register::kTraceCount);
+constexpr uint32_t kRegHostGo = Offset(Register::kHostGo);
 
 Json Number(uint64_t value) { return Json(static_cast<double>(value)); }
 

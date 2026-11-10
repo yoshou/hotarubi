@@ -9,6 +9,7 @@
 
 #include "encoding.hpp"
 #include "hotarubi/exact.hpp"
+#include "hotarubi/isa.hpp"
 #include "memories.hpp"
 #include "reference.hpp"
 #include "vec_engine.hpp"
@@ -20,7 +21,6 @@ namespace {
 using encoding::PassFields;
 
 constexpr uint32_t kProgram = 256;
-constexpr uint32_t kRun = 16;
 constexpr uint32_t kNull = 0xFFFFFFFF;
 
 enum Register : uint8_t {
@@ -154,7 +154,7 @@ class VecPassTest : public testing::Test {
       memories_.cbuf.at(kProgram + i) = program.at(i);
     }
     before_ = memories_.fbuf;
-    engine_.Execute({.op = kRun,
+    engine_.Execute({.entry = kProgram / isa::vec::kEntryWords,
                      .quantize = false,
                      .src = src.first,
                      .src2 = src.second,
@@ -162,7 +162,7 @@ class VecPassTest : public testing::Test {
                      .rows_q = quads,
                      .n8 = n8,
                      .p_base = p_base,
-                     .aux = kProgram,
+                     .aux = 0,
                      .imm = imm},
                     memories_);
   }
@@ -252,13 +252,15 @@ class VecPassTest : public testing::Test {
             .max = reference::RowMax(valid)};
   }
 
-  void CheckMasked(uint32_t sc, uint32_t words, uint32_t valid_columns) const {
+  void CheckLeading(uint32_t sc, uint32_t words, uint32_t valid_columns,
+                    uint32_t other) const {
     for (uint32_t w = 0; w < words; ++w) {
       for (uint32_t e = 0; e < kFbufElements; ++e) {
         const uint32_t x = Before(w, e);
         const uint32_t y =
             sc == 2 ? reference::Mul(x, x) : reference::Add(x, 0);
-        ASSERT_EQ(After(100 + w, e), (w * 8) + (e % 8) < valid_columns ? y : 0U)
+        ASSERT_EQ(After(100 + w, e),
+                  (w * 8) + (e % 8) < valid_columns ? y : other)
             << "sc " << sc;
       }
     }
@@ -547,7 +549,7 @@ TEST_F(VecPassTest, EvaluatesPowersOfTwoAndFractions) {
   }
 }
 
-TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
+TEST_F(VecPassTest, ReducesTheLeadingColumnsIntoRowScalars) {
   constexpr uint32_t kWords = 11;
   constexpr uint32_t kValid = 77;
   Fill(0, kWords);
@@ -559,7 +561,8 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
     PassFields pass = Copy();
     pass.rimm = kR12;
     pass.rimm2 = kR11;
-    pass.mask_en = 1;
+    pass.cmp = 1;
+    pass.cl = 4;
     const std::array<PassFields, 6> scalars = {
         PassFields{},
         PassFields{.sf = 2, .st = 1, .srn = 1},
@@ -568,6 +571,7 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
         PassFields{.sf = 3},
         PassFields{.sf = 1}};
     pass.red = (sc == 3 || sc == 5) ? 2 : 1;
+    pass.sel = pass.red == 2 ? 4 : 1;
     pass.sf = scalars.at(sc).sf;
     pass.st = scalars.at(sc).st;
     pass.srn = scalars.at(sc).srn;
@@ -583,7 +587,7 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
         {0, 0}, 100, 1, kWords);
     rs0.at(sc) = engine_.Rows(0).rs0;
     rs1.at(sc) = engine_.Rows(0).rs1;
-    CheckMasked(sc, kWords, kValid);
+    CheckLeading(sc, kWords, kValid, pass.red == 2 ? 0xFFFFFFFFU : 0U);
   }
   const uint32_t rn = reference::Reciprocal(reference::FromInt(70));
   for (uint32_t t = 0; t < kTokens; ++t) {
@@ -730,18 +734,17 @@ TEST_F(VecPassTest, BranchesLoopAndSkip) {
 
 TEST_F(VecPassTest, RegistersHoldTheCommandFields) {
   Run({encoding::Ret()}, {0x1234, 0x0567}, 0x1ABC, 0x1F3, 0xEE, 0xCAFEF00D,
-      0x3FF);
+      0x1FF);
   EXPECT_EQ(engine_.Register(1), 0x234U);
   EXPECT_EQ(engine_.Register(2), 0x567U);
   EXPECT_EQ(engine_.Register(3), 0x1ABCU);
   EXPECT_EQ(engine_.Register(4), 0x1F3U);
   EXPECT_EQ(engine_.Register(5), 0xEEU);
-  EXPECT_EQ(engine_.Register(6), 0x3FFU);
+  EXPECT_EQ(engine_.Register(6), 0x1FFU);
   EXPECT_EQ(engine_.Register(7), 0U);
   EXPECT_EQ(engine_.Register(8), 0xCAFEF00DU);
-  EXPECT_EQ(engine_.Register(9), 0xABCU);
-  EXPECT_EQ(engine_.Register(10), 0U);
-  engine_.Execute({.op = 5,
+  EXPECT_EQ(engine_.Register(9), 0U);
+  engine_.Execute({.entry = isa::library::kCopy,
                    .quantize = true,
                    .src = 1,
                    .src2 = 2,
@@ -753,10 +756,10 @@ TEST_F(VecPassTest, RegistersHoldTheCommandFields) {
                    .imm = 0x00000ABC},
                   memories_);
   EXPECT_EQ(engine_.Register(7), 0x7ABU);
-  EXPECT_EQ(engine_.Register(9), 0xABCU);
-  EXPECT_EQ(engine_.Register(10), 1U);
+  EXPECT_EQ(engine_.Register(8), 0xABCU);
+  EXPECT_EQ(engine_.Register(9), 1U);
   memories_.cbuf.at(kProgram) = encoding::Ret();
-  engine_.Execute({.op = 21,
+  engine_.Execute({.entry = kProgram / isa::vec::kEntryWords,
                    .quantize = false,
                    .src = 1,
                    .src2 = 2,
@@ -764,11 +767,11 @@ TEST_F(VecPassTest, RegistersHoldTheCommandFields) {
                    .rows_q = 1,
                    .n8 = 4,
                    .p_base = 0,
-                   .aux = kProgram,
+                   .aux = 0x21,
                    .imm = 0},
                   memories_);
-  EXPECT_EQ(engine_.Register(7), 0U);
-  EXPECT_EQ(engine_.Register(9), 3U);
+  EXPECT_EQ(engine_.Register(7), 0x21U);
+  EXPECT_EQ(engine_.Register(9), 0U);
 }
 
 TEST_F(VecPassTest, RejectsProgramsWithUndefinedResults) {

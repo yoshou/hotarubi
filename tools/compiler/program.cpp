@@ -13,24 +13,20 @@
 #include <utility>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "isa.hpp"
 
 namespace hotarubi::compiler {
 namespace {
 
-constexpr std::array<uint32_t, 3> kWaitBits = {kWaitDma, kWaitGemm, kWaitVec};
 constexpr std::array<std::string_view, 5> kEngineNames = {"DMA", "GEMM", "VEC",
                                                           "CTRL", "WAIT"};
 constexpr std::array<std::string_view, kMemCount> kMemNames = {
     "ABUF", "WBUF", "FBUF", "PBUF", "TBUF", "CBUF"};
-constexpr uint32_t kFlagIndex = 0x1;
-constexpr uint32_t kFlagRow = 0x2;
-constexpr uint32_t kFlagAcc = 0x1;
-constexpr uint32_t kFlagFlush = 0x2;
-constexpr uint32_t kRowLimit = 4096;
-constexpr uint32_t kStrideLimit = 1U << 24;
-constexpr uint32_t kTokLimit = 128;
+constexpr uint32_t kRowLimit = 1U << isa::dma::kRows.width;
+constexpr uint64_t kStrideLimit = uint64_t{16} << isa::dma::kDdrStride.width;
+constexpr uint32_t kTokLimit = 1U << isa::dma::kTok.width;
 constexpr uint32_t kBeatBytes = 16;
 
 size_t MemIndex(Mem mem) { return static_cast<size_t>(mem); }
@@ -47,9 +43,13 @@ void CheckRange(const Range& range) {
                       MemIndex(range.mem)));
 }
 
+bool RowFormat(DmaKind kind) {
+  return kind == DmaKind::kRow || kind == DmaKind::kRowIndexed;
+}
+
 uint32_t OnchipWords(const Transfer& transfer) {
   const uint32_t words = transfer.rows * transfer.row_words;
-  if (!transfer.row_format) {
+  if (!RowFormat(transfer.kind)) {
     return words;
   }
   const bool abuf = transfer.mem == Mem::kAbuf;
@@ -61,8 +61,10 @@ uint32_t OnchipWords(const Transfer& transfer) {
 }
 
 void CheckTransfer(const Transfer& transfer) {
-  Require(transfer.rows < kRowLimit && transfer.row_words < kRowLimit &&
+  Require(transfer.rows >= 1 && transfer.rows < kRowLimit &&
+              transfer.row_words >= 1 && transfer.row_words < kRowLimit &&
               transfer.ddr_stride < kStrideLimit &&
+              transfer.ddr_stride % kBeatBytes == 0 &&
               transfer.ddr_offset % kBeatBytes == 0 && transfer.tok < kTokLimit,
           std::format("bad DMA transfer: offset {:#x} rows {} row_words {} "
                       "stride {} tok {}",
@@ -70,15 +72,14 @@ void CheckTransfer(const Transfer& transfer) {
                       transfer.ddr_stride, transfer.tok));
 }
 
-uint32_t TransferFlags(const Transfer& transfer) {
-  return (transfer.index ? kFlagIndex : 0) |
-         (transfer.row_format ? kFlagRow : 0);
-}
-
 bool MultiPass(VecOp op) {
   return op == VecOp::kLayerNorm || op == VecOp::kRmsNorm ||
-         op == VecOp::kGelu || op == VecOp::kSilu || op == VecOp::kSiluMul ||
-         op == VecOp::kSoftmax || op == VecOp::kRope;
+         op == VecOp::kAct || op == VecOp::kActMul || op == VecOp::kSoftmax ||
+         op == VecOp::kRope;
+}
+
+bool ScratchInSrc2(VecOp op) {
+  return op == VecOp::kLayerNorm || op == VecOp::kRmsNorm;
 }
 
 }  // namespace
@@ -112,9 +113,10 @@ void Program::ResetTracking() {
 
 uint32_t Program::DmaAddress(uint64_t offset) const {
   const uint64_t address = base_ + offset;
-  Require(address < (uint64_t{1} << 32),
-          std::format("DDR address {:#x} is beyond 32 bits", address));
-  return static_cast<uint32_t>(address);
+  Require(address < (uint64_t{1} << 32) && address % kBeatBytes == 0,
+          std::format("DDR address {:#x} is not a 16-byte unit below 4 GB",
+                      address));
+  return static_cast<uint32_t>(address / kBeatBytes);
 }
 
 int32_t Program::LatestWrite(const Tracker& tracker, const Range& range,
@@ -172,7 +174,7 @@ uint32_t Program::Admit(int32_t index, Engine engine,
   uint32_t wait = 0;
   for (int other = 0; other < kEngines; ++other) {
     if ((need & (1U << other)) != 0) {
-      wait |= kWaitBits.at(other);
+      wait |= isa::WaitBit(static_cast<uint32_t>(other));
       known_.at(other) = index;
     }
   }
@@ -244,25 +246,22 @@ void Program::Reorder(std::span<const size_t> order) {
   for (size_t i = 0; i < count; ++i) {
     const uint32_t wait =
         Admit(static_cast<int32_t>(i), engines_[i], reads_[i], writes_[i]);
-    instructions_[i].Set(116, 4, wait);
+    instructions_[i].Set(isa::kWait, wait);
   }
 }
 
 size_t Program::Load(const Transfer& transfer, std::string_view note) {
   CheckTransfer(transfer);
-  Require(!transfer.index ||
-              (transfer.row_format && transfer.mode == DmaMode::kRaw),
-          "an index list is used only by a row-format load");
+  Require(transfer.kind != DmaKind::kGacc, "a GACC is emitted by Gacc");
   const uint32_t words = OnchipWords(transfer);
   const DmaFields fields{.ddr_addr = DmaAddress(transfer.ddr_offset),
                          .mem = transfer.mem,
                          .onchip = transfer.onchip,
                          .rows = transfer.rows,
                          .row_words = transfer.row_words,
-                         .ddr_stride = transfer.ddr_stride,
-                         .mode = transfer.mode,
-                         .tok = transfer.tok,
-                         .flags = TransferFlags(transfer)};
+                         .ddr_stride = transfer.ddr_stride / kBeatBytes,
+                         .kind = transfer.kind,
+                         .tok = transfer.tok};
   return Emit(
       Engine::kDma, [&](uint32_t wait) { return EncodeDmaLoad(fields, wait); },
       {}, {Span(transfer.mem, transfer.onchip, transfer.onchip + words)}, note);
@@ -270,35 +269,39 @@ size_t Program::Load(const Transfer& transfer, std::string_view note) {
 
 size_t Program::Store(const Transfer& transfer, std::string_view note) {
   CheckTransfer(transfer);
-  Require(!transfer.index, "a store does not use an index list");
+  Require(transfer.kind == DmaKind::kRaw || transfer.kind == DmaKind::kRow,
+          "a store is a RAW or ROW transfer");
   const uint32_t words = OnchipWords(transfer);
   const DmaFields fields{.ddr_addr = DmaAddress(transfer.ddr_offset),
                          .mem = transfer.mem,
                          .onchip = transfer.onchip,
                          .rows = transfer.rows,
                          .row_words = transfer.row_words,
-                         .ddr_stride = transfer.ddr_stride,
-                         .mode = DmaMode::kRaw,
-                         .tok = transfer.tok,
-                         .flags = TransferFlags(transfer)};
+                         .ddr_stride = transfer.ddr_stride / kBeatBytes,
+                         .kind = transfer.kind,
+                         .tok = transfer.tok};
   return Emit(
       Engine::kDma, [&](uint32_t wait) { return EncodeDmaStore(fields, wait); },
       {Span(transfer.mem, transfer.onchip, transfer.onchip + words)}, {}, note);
 }
 
 size_t Program::Gacc(const GaccArgs& args, std::string_view note) {
-  Require(args.slots < kRowLimit && args.blocks >= 1 && args.blocks <= 8 &&
-              args.list_offset % kBeatBytes == 0,
-          std::format("bad GACC: slots {} blocks {}", args.slots, args.blocks));
-  const DmaFields fields{
-      .ddr_addr = DmaAddress(args.list_offset),
-      .mem = Mem::kFbuf,
-      .onchip = args.dst,
-      .rows = args.slots,
-      .row_words = args.blocks,
-      .mode = DmaMode::kGacc,
-      .tok = 0,
-      .flags = (args.acc ? kFlagAcc : 0) | (args.flush ? kFlagFlush : 0)};
+  Require(args.slots >= 1 && args.slots < kRowLimit && args.blocks >= 1 &&
+              args.blocks <= 8 && args.list_offset % kBeatBytes == 0 &&
+              args.coefficient_stride % kBeatBytes == 0 &&
+              args.coefficient_stride < kStrideLimit,
+          std::format("bad GACC: slots {} blocks {} coefficient stride {}",
+                      args.slots, args.blocks, args.coefficient_stride));
+  const DmaFields fields{.ddr_addr = DmaAddress(args.list_offset),
+                         .mem = Mem::kFbuf,
+                         .onchip = args.dst,
+                         .rows = args.slots,
+                         .row_words = args.blocks,
+                         .ddr_stride = args.coefficient_stride / kBeatBytes,
+                         .kind = DmaKind::kGacc,
+                         .tok = 0,
+                         .acc = args.acc,
+                         .flush = args.flush};
   std::vector<Range> writes;
   if (args.flush) {
     writes.push_back(Span(Mem::kFbuf, args.dst, args.dst + (4 * args.blocks)));
@@ -345,9 +348,10 @@ size_t Program::Vec(const VecArgs& args, std::string_view note) {
   const uint32_t n = args.rows_q * args.n8;
   uint32_t src2 = args.src2;
   uint32_t imm = args.imm;
+  uint32_t aux = args.aux;
   std::vector<Range> reads = {Span(Mem::kFbuf, args.src, args.src + n)};
   std::vector<Range> writes;
-  if (op == VecOp::kAdd || op == VecOp::kMul || op == VecOp::kSiluMul ||
+  if (op == VecOp::kAdd || op == VecOp::kMul || op == VecOp::kActMul ||
       op == VecOp::kMax) {
     reads.push_back(Span(Mem::kFbuf, src2, src2 + n));
   }
@@ -362,12 +366,14 @@ size_t Program::Vec(const VecArgs& args, std::string_view note) {
     reads.push_back(
         Span(Mem::kPbuf, args.p_base, args.p_base + (8 * args.rows_q)));
   }
-  if (op == VecOp::kGelu || op == VecOp::kSilu || op == VecOp::kSiluMul ||
-      op == VecOp::kSoftmax) {
+  if (op == VecOp::kAct || op == VecOp::kActMul || op == VecOp::kSoftmax) {
     reads.push_back(Span(Mem::kTbuf, 0, Depth(Mem::kTbuf)));
   }
-  const bool q = args.q || op == VecOp::kQuant;
-  if (q) {
+  if ((op == VecOp::kLayerNorm || op == VecOp::kRmsNorm) && aux == 0) {
+    aux = 8 * args.n8;
+  }
+  uint32_t scratch = args.dst;
+  if (args.q) {
     Require(args.n8 % 4 == 0 &&
                 args.dst + (args.rows_q * (args.n8 / 4)) <= Depth(Mem::kAbuf),
             std::format("bad quantized VEC output at {}", args.dst));
@@ -376,12 +382,7 @@ size_t Program::Vec(const VecArgs& args, std::string_view note) {
     if (MultiPass(op)) {
       Require(args.scratch.has_value(),
               "a multi-pass VEC operation with Q needs a scratch area");
-      const uint32_t scratch = args.scratch.value_or(0);
-      if (op == VecOp::kLayerNorm || op == VecOp::kRmsNorm) {
-        src2 = scratch;
-      } else {
-        imm = scratch;
-      }
+      scratch = args.scratch.value_or(0);
       reads.push_back(Span(Mem::kFbuf, scratch, scratch + n));
       writes.push_back(Span(Mem::kFbuf, scratch, scratch + n));
     }
@@ -393,22 +394,28 @@ size_t Program::Vec(const VecArgs& args, std::string_view note) {
     Require(op != VecOp::kRope || args.dst != args.src,
             "ROPE needs a destination different from its source");
   }
-  const VecFields fields{.op = op,
+  if (MultiPass(op)) {
+    (ScratchInSrc2(op) ? src2 : imm) = scratch;
+  }
+  const VecFields fields{.entry = static_cast<uint32_t>(op),
                          .src = args.src,
                          .src2 = src2,
                          .dst = args.dst,
                          .rows_q = args.rows_q,
                          .n8 = args.n8,
                          .p_base = args.p_base,
-                         .aux = args.aux,
+                         .aux = aux,
                          .imm = imm,
-                         .q = op != VecOp::kQuant && q};
+                         .q = args.q};
   return Emit(
       Engine::kVec, [&](uint32_t wait) { return EncodeVec(fields, wait); },
       reads, writes, note);
 }
 
 size_t Program::Run(const RunArgs& args, std::string_view note) {
+  Require(args.pc % isa::vec::kEntryWords == 0 &&
+              args.pc >= isa::vec::kRomEntries * isa::vec::kEntryWords,
+          std::format("a loaded VEC program starts at CBUF word {}", args.pc));
   const Range whole = Span(Mem::kFbuf, 0, Depth(Mem::kFbuf));
   std::vector<Range> reads = args.reads.value_or(
       std::vector<Range>{whole, Span(Mem::kPbuf, 0, Depth(Mem::kPbuf)),
@@ -416,14 +423,14 @@ size_t Program::Run(const RunArgs& args, std::string_view note) {
   reads.push_back(Span(Mem::kCbuf, 0, Depth(Mem::kCbuf)));
   const std::vector<Range> writes =
       args.writes.value_or(std::vector<Range>{whole});
-  const VecFields fields{.op = VecOp::kRun,
+  const VecFields fields{.entry = args.pc / isa::vec::kEntryWords,
                          .src = args.src,
                          .src2 = args.src2,
                          .dst = args.dst,
                          .rows_q = args.rows_q,
                          .n8 = args.n8,
                          .p_base = args.p_base,
-                         .aux = args.pc,
+                         .aux = 0,
                          .imm = args.imm,
                          .q = false};
   return Emit(
@@ -459,7 +466,7 @@ void Program::SetDdrOffset(size_t index, uint64_t ddr_offset) {
   Require(index < instructions_.size() && engines_[index] == Engine::kDma &&
               ddr_offset % kBeatBytes == 0,
           std::format("instruction {} is not a DMA transfer", index));
-  instructions_[index].Set(80, 32, DmaAddress(ddr_offset));
+  instructions_[index].Set(isa::dma::kDdrAddr, DmaAddress(ddr_offset));
 }
 
 void Program::PushScope(std::string_view tag) {
@@ -493,9 +500,10 @@ std::string Program::Listing() const {
   std::string text;
   for (size_t i = 0; i < instructions_.size(); ++i) {
     const Instruction& instruction = instructions_[i];
-    text += std::format("{:5d} {:4s} w={:x} {} {}\n", i,
-                        kEngineNames.at(static_cast<size_t>(engines_[i])),
-                        instruction.Get(116, 4), instruction.Hex(), notes_[i]);
+    text +=
+        std::format("{:5d} {:4s} w={:x} {} {}\n", i,
+                    kEngineNames.at(static_cast<size_t>(engines_[i])),
+                    instruction.Get(isa::kWait), instruction.Hex(), notes_[i]);
   }
   return text;
 }
@@ -519,13 +527,13 @@ std::string Program::ListingJson() const {
     const Instruction& instruction = instructions_[i];
     text += std::format(
         "{}{{\"index\":{},\"engine\":\"{}\",\"opcode\":{},\"wait\":{},"
-        "\"flags\":{},\"hex\":\"{}\",\"tag\":{},\"note\":{},\"reads\":{},"
+        "\"hex\":\"{}\",\"tag\":{},\"note\":{},\"reads\":{},"
         "\"writes\":{}}}",
         i == 0 ? "" : ",\n", i,
         kEngineNames.at(static_cast<size_t>(engines_[i])),
-        instruction.Get(120, 8), instruction.Get(116, 4),
-        instruction.Get(112, 4), instruction.Hex(), tag_index_[i],
-        Json(notes_[i]).Dump(), ranges(reads_[i]), ranges(writes_[i]));
+        instruction.Get(isa::kOpcode), instruction.Get(isa::kWait),
+        instruction.Hex(), tag_index_[i], Json(notes_[i]).Dump(),
+        ranges(reads_[i]), ranges(writes_[i]));
   }
   return text + "\n]}\n";
 }

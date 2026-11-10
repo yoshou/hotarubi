@@ -18,7 +18,7 @@ namespace hotarubi::tb {
 namespace {
 
 constexpr std::string_view kUsage =
-    "usage: hotarubi_vec_bench --op N [--q] --rows-q N --n8 N [--src N] "
+    "usage: hotarubi_vec_bench --entry N [--q] --rows-q N --n8 N [--src N] "
     "[--src2 N] [--dst N] [--p-base N] [--aux N] [--imm N] [--deny PERCENT]";
 
 struct Arguments {
@@ -39,8 +39,8 @@ bool Parse(std::string_view text, uint32_t& value) {
 
 uint32_t* Target(Arguments& arguments, std::string_view flag) {
   iss::VecCommand& command = arguments.command;
-  if (flag == "--op") {
-    return &command.op;
+  if (flag == "--entry") {
+    return &command.entry;
   }
   if (flag == "--rows-q") {
     return &command.rows_q;
@@ -90,7 +90,8 @@ std::optional<Arguments> ParseArguments(std::span<const char* const> args) {
     }
   }
   const iss::VecCommand& command = arguments.command;
-  if (command.rows_q == 0 || command.n8 == 0 || command.op >= iss::kVecRun) {
+  if (command.rows_q == 0 || command.n8 == 0 ||
+      !iss::RunsLibraryProgram(command)) {
     return std::nullopt;
   }
   return arguments;

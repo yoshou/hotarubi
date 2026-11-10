@@ -10,6 +10,7 @@
 
 #include "encoding.hpp"
 #include "hotarubi/exact.hpp"
+#include "hotarubi/isa.hpp"
 #include "memories.hpp"
 #include "reference.hpp"
 #include "timing.hpp"
@@ -92,13 +93,18 @@ class VecEngineBenchTest : public testing::Test {
   std::mt19937 generator_{3};
 };
 
-std::vector<Case> FixedOperations() {
+std::vector<Case> LibraryPrograms() {
   return {
       {"add",
-       {.op = 0, .src = 0, .src2 = 100, .dst = 200, .rows_q = 3, .n8 = 5},
+       {.entry = isa::library::kAdd,
+        .src = 0,
+        .src2 = 100,
+        .dst = 200,
+        .rows_q = 3,
+        .n8 = 5},
        {}},
       {"addp",
-       {.op = 2,
+       {.entry = isa::library::kAddP,
         .src = 0,
         .src2 = 0,
         .dst = 200,
@@ -107,10 +113,15 @@ std::vector<Case> FixedOperations() {
         .p_base = 4},
        {}},
       {"max",
-       {.op = 15, .src = 0, .src2 = 100, .dst = 200, .rows_q = 2, .n8 = 8},
+       {.entry = isa::library::kMax,
+        .src = 0,
+        .src2 = 100,
+        .dst = 200,
+        .rows_q = 2,
+        .n8 = 8},
        {}},
-      {"quant",
-       {.op = 13,
+      {"copy+q",
+       {.entry = isa::library::kCopy,
         .quantize = true,
         .src = 0,
         .dst = 700,
@@ -119,17 +130,18 @@ std::vector<Case> FixedOperations() {
         .imm = 300},
        {}},
       {"layernorm",
-       {.op = 6,
+       {.entry = isa::library::kLayerNorm,
         .src = 0,
         .src2 = 900,
         .dst = 400,
         .rows_q = 2,
         .n8 = 8,
         .p_base = 8,
+        .aux = 64,
         .imm = 0x358637BD},
        {}},
       {"layernorm+q",
-       {.op = 6,
+       {.entry = isa::library::kLayerNorm,
         .quantize = true,
         .src = 0,
         .src2 = 900,
@@ -137,10 +149,11 @@ std::vector<Case> FixedOperations() {
         .rows_q = 2,
         .n8 = 8,
         .p_base = 8,
+        .aux = 64,
         .imm = 0x358637BD},
        {}},
       {"rmsnorm+q",
-       {.op = 7,
+       {.entry = isa::library::kRmsNorm,
         .quantize = true,
         .src = 0,
         .src2 = 900,
@@ -148,13 +161,19 @@ std::vector<Case> FixedOperations() {
         .rows_q = 2,
         .n8 = 8,
         .p_base = 8,
+        .aux = 64,
         .imm = 0x358637BD},
        {}},
       {"softmax",
-       {.op = 11, .src = 0, .dst = 400, .rows_q = 2, .n8 = 8, .aux = 50},
+       {.entry = isa::library::kSoftmax,
+        .src = 0,
+        .dst = 400,
+        .rows_q = 2,
+        .n8 = 8,
+        .aux = 50},
        {}},
       {"softmax+q",
-       {.op = 11,
+       {.entry = isa::library::kSoftmax,
         .quantize = true,
         .src = 0,
         .dst = 500,
@@ -163,8 +182,8 @@ std::vector<Case> FixedOperations() {
         .aux = 64,
         .imm = 900},
        {}},
-      {"gelu+q",
-       {.op = 8,
+      {"act+q",
+       {.entry = isa::library::kAct,
         .quantize = true,
         .src = 0,
         .dst = 500,
@@ -172,11 +191,16 @@ std::vector<Case> FixedOperations() {
         .n8 = 4,
         .imm = 900},
        {}},
-      {"silu_mul",
-       {.op = 10, .src = 0, .src2 = 100, .dst = 400, .rows_q = 2, .n8 = 4},
+      {"act_mul",
+       {.entry = isa::library::kActMul,
+        .src = 0,
+        .src2 = 100,
+        .dst = 400,
+        .rows_q = 2,
+        .n8 = 4},
        {}},
       {"rope",
-       {.op = 12,
+       {.entry = isa::library::kRope,
         .src = 0,
         .dst = 400,
         .rows_q = 2,
@@ -217,12 +241,11 @@ Case DependentChain() {
   PassFields scaled{
       .rx = 13, .rd = 14, .rq = 4, .rnw = 5, .rn8 = 5, .b = 3, .wr = 1};
   return {.name = "run chain",
-          .command = {.op = 16,
+          .command = {.entry = kProgram / isa::vec::kEntryWords,
                       .src = 0,
                       .dst = 300,
                       .rows_q = 2,
                       .n8 = 4,
-                      .aux = kProgram,
                       .imm = 0x00030001},
           .program = {iss::encoding::SaluImm(0, 11, 0, 100),
                       iss::encoding::SaluImm(0, 12, 0, 200),
@@ -233,8 +256,8 @@ Case DependentChain() {
                       iss::encoding::Pass(scaled), iss::encoding::Ret()}};
 }
 
-TEST_F(VecEngineBenchTest, FixedOperationsMatchTheSimulator) {
-  for (const Case& c : FixedOperations()) {
+TEST_F(VecEngineBenchTest, LibraryProgramsMatchTheSimulator) {
+  for (const Case& c : LibraryPrograms()) {
     Check(c, 0);
   }
 }
@@ -244,7 +267,7 @@ TEST_F(VecEngineBenchTest, ProgramsMatchTheSimulator) {
 }
 
 TEST_F(VecEngineBenchTest, OutputsHoldUnderBackpressure) {
-  for (const Case& c : FixedOperations()) {
+  for (const Case& c : LibraryPrograms()) {
     Check(c, 40);
   }
   Check(DependentChain(), 40);

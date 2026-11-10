@@ -32,7 +32,6 @@ struct Instruction {
   uint32_t opcode = 0;
   iss::Source source = iss::Source::kSequencer;
   uint32_t wait = 0;
-  uint32_t flags = 0;
   std::string tag;
   std::string note;
   std::vector<Range> reads;

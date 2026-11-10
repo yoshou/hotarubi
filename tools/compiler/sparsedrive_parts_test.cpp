@@ -37,13 +37,13 @@ TEST(SparseDrivePartsTest, TokenTransfersUseTheRowFormat) {
       program.Load(Tokens(0x2000, Mem::kAbuf, 8, 12, 8, true), "tokens");
   const Instruction& instruction = program.Instructions()[index];
   EXPECT_EQ(instruction.Get(120, 8), 1U);
-  EXPECT_EQ(instruction.Get(112, 4), 3U);
-  EXPECT_EQ(instruction.Get(80, 32), kBase + 0x2000);
-  EXPECT_EQ(instruction.Get(77, 3), 0U);
-  EXPECT_EQ(instruction.Get(57, 20), 8U);
-  EXPECT_EQ(instruction.Get(45, 12), 1U);
-  EXPECT_EQ(instruction.Get(33, 12), 12U);
-  EXPECT_EQ(instruction.Get(0, 7), 8U);
+  EXPECT_EQ(instruction.Get(88, 28), (kBase + 0x2000) / 16);
+  EXPECT_EQ(instruction.Get(85, 3), 0U);
+  EXPECT_EQ(instruction.Get(72, 13), 8U);
+  EXPECT_EQ(instruction.Get(60, 12), 1U);
+  EXPECT_EQ(instruction.Get(48, 12), 12U);
+  EXPECT_EQ(instruction.Get(25, 3), 2U);
+  EXPECT_EQ(instruction.Get(19, 6), 8U);
 }
 
 TEST(SparseDrivePartsTest, WordTransfersAreOneRawRow) {
@@ -51,12 +51,11 @@ TEST(SparseDrivePartsTest, WordTransfersAreOneRawRow) {
   const size_t index = program.Store(Words(0x3000, Mem::kFbuf, 40, 5), "words");
   const Instruction& instruction = program.Instructions()[index];
   EXPECT_EQ(instruction.Get(120, 8), 2U);
-  EXPECT_EQ(instruction.Get(112, 4), 0U);
-  EXPECT_EQ(instruction.Get(77, 3), 2U);
-  EXPECT_EQ(instruction.Get(57, 20), 40U);
-  EXPECT_EQ(instruction.Get(45, 12), 1U);
-  EXPECT_EQ(instruction.Get(33, 12), 5U);
-  EXPECT_EQ(instruction.Get(7, 2), 0U);
+  EXPECT_EQ(instruction.Get(85, 3), 2U);
+  EXPECT_EQ(instruction.Get(72, 13), 40U);
+  EXPECT_EQ(instruction.Get(60, 12), 1U);
+  EXPECT_EQ(instruction.Get(48, 12), 5U);
+  EXPECT_EQ(instruction.Get(25, 3), 0U);
 }
 
 TEST(SparseDrivePartsTest, RequiredReturnsThePresentValue) {

@@ -13,6 +13,7 @@
 
 #include "dma_engine.hpp"
 #include "gemm_array.hpp"
+#include "hotarubi/isa.hpp"
 #include "memories.hpp"
 #include "trace_record.hpp"
 #include "vec_engine.hpp"
@@ -21,10 +22,7 @@ namespace hotarubi::iss {
 namespace {
 
 constexpr uint32_t kBurstBeats = 16;
-constexpr uint32_t kModeRaw = 0;
-constexpr uint32_t kModeGather = 3;
-constexpr uint32_t kFlagIndex = 1;
-constexpr uint32_t kFlagRows = 2;
+constexpr uint32_t kBeatBytes = 16;
 constexpr uint32_t kGatherEntriesPerSlot = 16;
 constexpr uint32_t kGatherSlotGroup = 8;
 
@@ -138,37 +136,38 @@ Cost CostModel::Vec(const VecActivity& activity) const {
 DmaActivity EstimateDma(const DmaCommand& command) {
   DmaActivity activity;
   const uint64_t units = uint64_t{command.rows} * command.row_words;
-  if (!command.store && command.mode == kModeGather) {
-    const uint64_t entries = uint64_t{command.rows} * kGatherEntriesPerSlot;
-    const uint64_t groups =
-        (command.rows + kGatherSlotGroup - 1) / kGatherSlotGroup;
-    const uint64_t row_beats = (2 * command.row_words) + 1;
-    activity.gather_entries = entries;
-    activity.gather_rows = entries;
-    activity.gather_row_beats = entries * row_beats;
-    activity.gather_fetches = entries == 0 ? 0 : 1;
-    activity.read_beats = 1 + (entries / 2) + (groups * command.row_words * 8);
-    activity.read_bursts =
-        Bursts(1 + (entries / 2)) + (groups * command.row_words);
-    return activity;
+  switch (command.kind) {
+    case isa::dma::kKindGacc: {
+      const uint64_t entries = uint64_t{command.rows} * kGatherEntriesPerSlot;
+      const uint64_t groups =
+          (command.rows + kGatherSlotGroup - 1) / kGatherSlotGroup;
+      const uint64_t row_beats = (2 * command.row_words) + 1;
+      activity.gather_entries = entries;
+      activity.gather_rows = entries;
+      activity.gather_row_beats = entries * row_beats;
+      activity.gather_fetches = entries == 0 ? 0 : 1;
+      activity.read_beats =
+          1 + (entries / 2) + (groups * command.row_words * 8);
+      activity.read_bursts =
+          Bursts(1 + (entries / 2)) + (groups * command.row_words);
+      return activity;
+    }
+    case isa::dma::kKindSplit8:
+    case isa::dma::kKindT32Split8:
+      activity.read_beats = units * 9;
+      activity.read_bursts = units;
+      return activity;
+    default:
+      break;
   }
-  if (units == 0) {
-    return activity;
-  }
-  const bool rows = (command.flags & kFlagRows) != 0;
-  const bool indexed =
-      !command.store && rows && (command.flags & kFlagIndex) != 0;
-  if (!command.store && command.mode != kModeRaw) {
-    activity.read_beats = units * 9;
-    activity.read_bursts = units;
-    return activity;
-  }
+  const bool rows = command.kind == isa::dma::kKindRow ||
+                    command.kind == isa::dma::kKindRowIndexed;
   const uint64_t unit_beats =
       rows ? RowFormatBeats(command) : BeatsPerWord(command.mem);
   uint64_t& beats = command.store ? activity.write_beats : activity.read_beats;
   uint64_t& bursts =
       command.store ? activity.write_bursts : activity.read_bursts;
-  if (indexed) {
+  if (command.kind == isa::dma::kKindRowIndexed) {
     const uint64_t list_beats = (units + 3) / 4;
     activity.read_beats += list_beats;
     activity.read_bursts += Bursts(list_beats);
@@ -183,26 +182,23 @@ DmaActivity EstimateDma(const DmaCommand& command) {
 }
 
 DdrExtent EstimateDdrExtent(const DmaCommand& command) {
-  if (!command.store &&
-      (command.mode == kModeGather ||
-       (command.mode == kModeRaw && (command.flags & kFlagRows) != 0 &&
-        (command.flags & kFlagIndex) != 0))) {
+  if (command.kind == isa::dma::kKindGacc ||
+      command.kind == isa::dma::kKindRowIndexed) {
     return {.whole = true};
   }
-  const uint64_t units = uint64_t{command.rows} * command.row_words;
-  if (units == 0) {
-    return {.lo = command.ddr_addr, .hi = command.ddr_addr};
-  }
   uint64_t unit_beats = BeatsPerWord(command.mem);
-  if (!command.store && command.mode != kModeRaw) {
+  if (command.kind == isa::dma::kKindSplit8 ||
+      command.kind == isa::dma::kKindT32Split8) {
     unit_beats = 9;
-  } else if ((command.flags & kFlagRows) != 0) {
+  } else if (command.kind == isa::dma::kKindRow) {
     unit_beats = RowFormatBeats(command);
   }
-  const uint64_t row_bytes = uint64_t{command.row_words} * unit_beats * 16;
+  const uint64_t row_bytes =
+      uint64_t{command.row_words} * unit_beats * kBeatBytes;
+  const uint64_t first = DdrByteAddress(command.ddr_addr);
   const uint64_t last_row =
-      command.ddr_addr + (uint64_t{command.rows - 1} * command.ddr_stride);
-  return {.lo = command.ddr_addr, .hi = last_row + row_bytes};
+      first + (uint64_t{command.rows - 1} * command.ddr_stride * kBeatBytes);
+  return {.lo = first, .hi = last_row + row_bytes};
 }
 
 std::expected<TimingParameters, std::string> ParseTiming(
@@ -263,8 +259,12 @@ std::expected<TimingParameters, std::string> ParseTiming(
   return p;
 }
 
-VecActivity FixedOperationActivity(const VecCommand& command) {
-  if (command.op >= kVecRun) {
+bool RunsLibraryProgram(const VecCommand& command) {
+  return command.entry < isa::vec::kRomEntries;
+}
+
+VecActivity LibraryActivity(const VecCommand& command) {
+  if (!RunsLibraryProgram(command)) {
     return {};
   }
   static thread_local std::unique_ptr<Memories> memories;

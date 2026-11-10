@@ -103,23 +103,23 @@ TEST(SparseDriveLayersTest, AttentionLoadsKThroughSplit8AndVThroughT32Split8) {
     if (Opcode(instruction) != kOpDmaLoad) {
       continue;
     }
-    const uint64_t offset = instruction.Get(80, 32) - kBase;
+    const uint64_t offset = (instruction.Get(88, 28) * 16) - kBase;
     const uint64_t region = offset / kRegion;
-    const uint64_t mem = instruction.Get(77, 3);
-    const uint64_t mode = instruction.Get(7, 2);
+    const uint64_t mem = instruction.Get(85, 3);
+    const uint64_t kind = instruction.Get(25, 3);
     if (region == 2) {
       ++keys;
       EXPECT_EQ(mem, 1U);
-      EXPECT_EQ(mode, 1U);
+      EXPECT_EQ(kind, 3U);
     } else if (region == 3) {
       ++values;
       EXPECT_EQ(mem, 1U);
-      EXPECT_EQ(mode, 2U);
+      EXPECT_EQ(kind, 4U);
     } else {
       ++queries;
       EXPECT_EQ(region, 1U);
       EXPECT_EQ(mem, 0U);
-      EXPECT_EQ(mode, 0U);
+      EXPECT_EQ(kind, 0U);
     }
   }
   EXPECT_EQ(keys, kHeads);
@@ -135,10 +135,10 @@ TEST(SparseDriveLayersTest, AttentionSoftmaxMasksKeysPastTheValidCount) {
     size_t softmaxes = 0;
     for (const Instruction& instruction : Emitted(plan)) {
       if (Opcode(instruction) == kOpVec &&
-          instruction.Get(107, 5) == static_cast<uint32_t>(VecOp::kSoftmax)) {
+          instruction.Get(108, 8) == static_cast<uint32_t>(VecOp::kSoftmax)) {
         ++softmaxes;
         EXPECT_EQ(instruction.Get(32, 11), valid);
-        EXPECT_EQ(instruction.Get(112, 4), 1U);
+        EXPECT_EQ(instruction.Get(107, 1), 1U);
       }
     }
     EXPECT_EQ(softmaxes, kHeads * kChunks);

@@ -61,28 +61,29 @@ module npu_seq #(
   output logic         gemm_acc_o,
   output logic         vec_cmd_valid_o,
   input  logic         vec_busy_i,
-  output logic [4:0]   vec_op_o,
+  output logic [7:0]   vec_entry_o,
   output logic         vec_q_o,
   output logic [11:0]  vec_src_o,
   output logic [11:0]  vec_src2_o,
   output logic [12:0]  vec_dst_o,
   output logic [8:0]   vec_rows_q_o,
   output logic [7:0]   vec_n8_o,
-  output logic [9:0]   vec_p_base_o,
+  output logic [8:0]   vec_p_base_o,
   output logic [10:0]  vec_aux_o,
   output logic [31:0]  vec_imm_o,
   output logic         dma_cmd_valid_o,
   input  logic         dma_busy_i,
   output logic         dma_st_o,
-  output logic [31:0]  dma_ddr_addr_o,
+  output logic [27:0]  dma_ddr_addr_o,
   output logic [2:0]   dma_mem_o,
-  output logic [19:0]  dma_oc_addr_o,
+  output logic [12:0]  dma_oc_addr_o,
   output logic [11:0]  dma_rows_o,
   output logic [11:0]  dma_row_words_o,
-  output logic [23:0]  dma_ddr_stride_o,
-  output logic [1:0]   dma_mode_o,
-  output logic [1:0]   dma_flags_o,
-  output logic [6:0]   dma_tok_o,
+  output logic [19:0]  dma_ddr_stride_o,
+  output logic [2:0]   dma_kind_o,
+  output logic [5:0]   dma_tok_o,
+  output logic         dma_acc_o,
+  output logic         dma_flush_o,
   input  logic         gemm_stat_fed_i,
   input  logic         vec_stat_issue_i,
   input  logic         vec_stat_drain_i,
@@ -94,14 +95,24 @@ module npu_seq #(
   input  logic [1:0]   dma_stat_null_i
 );
 
+  localparam logic [7:0] OpNop      = 8'd0;
   localparam logic [7:0] OpDmaLd    = 8'd1;
   localparam logic [7:0] OpDmaSt    = 8'd2;
-  localparam logic [7:0] OpMove     = 8'd3;
   localparam logic [7:0] OpGemm     = 8'd4;
   localparam logic [7:0] OpVec      = 8'd5;
   localparam logic [7:0] OpSignal   = 8'd6;
   localparam logic [7:0] OpHalt     = 8'd7;
   localparam logic [7:0] OpWaitHost = 8'd8;
+
+  localparam int Engines = 3;
+  localparam int EngDma  = 0;
+  localparam int EngGemm = 1;
+  localparam int EngVec  = 2;
+  localparam int SrcCtrl = Engines;
+
+  function automatic logic legal_op(input logic [7:0] op);
+    return op inside {OpNop, OpDmaLd, OpDmaSt, OpGemm, OpVec, OpSignal, OpHalt, OpWaitHost};
+  endfunction
 
   logic        aw_v, w_v, start_req, soft_req;
   logic [7:0]  aw_a;
@@ -111,7 +122,9 @@ module npu_seq #(
   logic        running, halted, error, ibuf_empty;
   logic [7:0]  sig_id;
   logic [15:0] sig_count;
-  logic [31:0] sig_value, n_issued, cyc, cyc_gemm, cyc_vec, cyc_dma, cyc_stall, cyc_starve;
+  logic [31:0] sig_value, n_issued, cyc, cyc_stall, cyc_starve;
+  logic [31:0] cyc_busy [Engines];
+  logic        eng_busy [Engines];
   logic [31:0] tr_base, tr_count, host_go;
   logic        tr_en, tr_stats, tr_idle, waiting_host, start_now;
   logic        wr_fire;
@@ -190,8 +203,8 @@ module npu_seq #(
       if (s_axil_arvalid_i && s_axil_arready_o) begin
         s_axil_rvalid_o <= 1'b1;
         case (s_axil_araddr_i[7:2])
-          6'h01: s_axil_rdata_o <= {24'd0, ibuf_empty, dma_busy_i, vec_busy_i, gemm_busy_i,
-                                    waiting_host, error, halted, running};
+          6'h01: s_axil_rdata_o <= {24'd0, ibuf_empty, eng_busy[EngVec], eng_busy[EngGemm],
+                                    eng_busy[EngDma], waiting_host, error, halted, running};
           6'h02:   s_axil_rdata_o <= instr_base;
           6'h03:   s_axil_rdata_o <= instr_count;
           6'h04:   s_axil_rdata_o <= irq_status;
@@ -200,9 +213,9 @@ module npu_seq #(
           6'h07:   s_axil_rdata_o <= sig_value;
           6'h08:   s_axil_rdata_o <= n_issued;
           6'h09:   s_axil_rdata_o <= cyc;
-          6'h0A:   s_axil_rdata_o <= cyc_gemm;
-          6'h0B:   s_axil_rdata_o <= cyc_vec;
-          6'h0C:   s_axil_rdata_o <= cyc_dma;
+          6'h0A:   s_axil_rdata_o <= cyc_busy[EngDma];
+          6'h0B:   s_axil_rdata_o <= cyc_busy[EngGemm];
+          6'h0C:   s_axil_rdata_o <= cyc_busy[EngVec];
           6'h0D:   s_axil_rdata_o <= cyc_stall;
           6'h0E:   s_axil_rdata_o <= cyc_starve;
           6'h0F:   s_axil_rdata_o <= tr_base;
@@ -291,26 +304,33 @@ module npu_seq #(
     end
   end
 
-  logic [127:0] ins;
-  logic [7:0]   opc;
-  logic [3:0]   wt;
-  logic         out_gemm, out_vec, out_dma, d_gemm, d_vec, d_dma;
-  logic         wait_ok, eng_ok, issue, host_ok;
+  logic [127:0]       ins;
+  logic [7:0]         opc;
+  logic [3:0]         wt;
+  logic [Engines-1:0] out_eng, d_eng, done_eng, eng_cmd, eng_sel;
+  logic               wait_ok, eng_ok, issue, host_ok;
 
   assign ins        = ins_r;
   assign ibuf_empty = ib_fifo_empty && !ins_v;
   assign opc        = ins[127:120];
   assign wt         = ins[119:116];
-  assign wait_ok    = !(wt[0] && out_dma) && !(wt[2] && out_gemm) && !(wt[3] && out_vec);
+  assign eng_busy   = '{dma_busy_i, gemm_busy_i, vec_busy_i};
 
   always_comb begin
-    case (opc)
-      OpDmaLd, OpDmaSt: eng_ok = !dma_busy_i && !out_dma;
-      OpGemm:           eng_ok = !gemm_busy_i && !out_gemm;
-      OpVec:            eng_ok = !vec_busy_i && !out_vec;
-      OpWaitHost:       eng_ok = host_ok;
-      default:          eng_ok = 1'b1;
-    endcase
+    eng_sel          = '0;
+    eng_sel[EngDma]  = (opc == OpDmaLd) || (opc == OpDmaSt);
+    eng_sel[EngGemm] = (opc == OpGemm);
+    eng_sel[EngVec]  = (opc == OpVec);
+    wait_ok          = 1'b1;
+    eng_ok           = (opc != OpWaitHost) || host_ok;
+    for (int e = 0; e < Engines; e++) begin
+      if (wt[e] && out_eng[e]) begin
+        wait_ok = 1'b0;
+      end
+      if (eng_sel[e] && (eng_busy[e] || out_eng[e])) begin
+        eng_ok = 1'b0;
+      end
+    end
   end
 
   assign waiting_host = running && ins_v && (opc == OpWaitHost) && !host_ok;
@@ -342,9 +362,10 @@ module npu_seq #(
     end
   end
 
-  assign gemm_cmd_valid_o = issue && (opc == OpGemm);
-  assign vec_cmd_valid_o  = issue && (opc == OpVec);
-  assign dma_cmd_valid_o  = issue && (opc == OpDmaLd || opc == OpDmaSt);
+  assign eng_cmd          = issue ? eng_sel : '0;
+  assign dma_cmd_valid_o  = eng_cmd[EngDma];
+  assign gemm_cmd_valid_o = eng_cmd[EngGemm];
+  assign vec_cmd_valid_o  = eng_cmd[EngVec];
 
   assign gemm_a_base_o   = ins[111:92];
   assign gemm_a_stride_o = ins[91:82];
@@ -357,113 +378,89 @@ module npu_seq #(
   assign gemm_wmode_o    = ins[3:2];
   assign gemm_acc_o      = ins[1];
 
-  assign vec_op_o     = ins[111:107];
+  assign vec_entry_o  = ins[115:108];
+  assign vec_q_o      = ins[107];
   assign vec_src_o    = ins[106:95];
   assign vec_src2_o   = ins[94:83];
   assign vec_dst_o    = ins[82:70];
   assign vec_rows_q_o = ins[69:61];
   assign vec_n8_o     = ins[60:53];
-  assign vec_p_base_o = ins[52:43];
+  assign vec_p_base_o = ins[51:43];
   assign vec_aux_o    = ins[42:32];
   assign vec_imm_o    = ins[31:0];
-  assign vec_q_o      = ins[112];
 
   assign dma_st_o         = (opc == OpDmaSt);
-  assign dma_ddr_addr_o   = ins[111:80];
-  assign dma_mem_o        = ins[79:77];
-  assign dma_oc_addr_o    = ins[76:57];
-  assign dma_rows_o       = ins[56:45];
-  assign dma_row_words_o  = ins[44:33];
-  assign dma_ddr_stride_o = ins[32:9];
-  assign dma_mode_o       = ins[8:7];
-  assign dma_flags_o      = ins[113:112];
-  assign dma_tok_o        = ins[6:0];
+  assign dma_ddr_addr_o   = ins[115:88];
+  assign dma_mem_o        = ins[87:85];
+  assign dma_oc_addr_o    = ins[84:72];
+  assign dma_rows_o       = ins[71:60];
+  assign dma_row_words_o  = ins[59:48];
+  assign dma_ddr_stride_o = ins[47:28];
+  assign dma_kind_o       = ins[27:25];
+  assign dma_tok_o        = ins[24:19];
+  assign dma_acc_o        = ins[18];
+  assign dma_flush_o      = ins[17];
+
+  always_comb begin
+    for (int e = 0; e < Engines; e++) begin
+      done_eng[e] = out_eng[e] && !d_eng[e] && !eng_busy[e];
+    end
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni || srst) begin
-      out_gemm <= 1'b0;
-      out_vec  <= 1'b0;
-      out_dma  <= 1'b0;
-      d_gemm   <= 1'b0;
-      d_vec    <= 1'b0;
-      d_dma    <= 1'b0;
+      out_eng <= '0;
+      d_eng   <= '0;
     end else begin
-      d_gemm <= gemm_cmd_valid_o;
-      d_vec  <= vec_cmd_valid_o;
-      d_dma  <= dma_cmd_valid_o;
-      if (gemm_cmd_valid_o) begin
-        out_gemm <= 1'b1;
-      end else if (out_gemm && !d_gemm && !gemm_busy_i) begin
-        out_gemm <= 1'b0;
-      end
-      if (vec_cmd_valid_o) begin
-        out_vec <= 1'b1;
-      end else if (out_vec && !d_vec && !vec_busy_i) begin
-        out_vec <= 1'b0;
-      end
-      if (dma_cmd_valid_o) begin
-        out_dma <= 1'b1;
-      end else if (out_dma && !d_dma && !dma_busy_i) begin
-        out_dma <= 1'b0;
+      d_eng <= eng_cmd;
+      for (int e = 0; e < Engines; e++) begin
+        if (eng_cmd[e]) begin
+          out_eng[e] <= 1'b1;
+        end else if (done_eng[e]) begin
+          out_eng[e] <= 1'b0;
+        end
       end
     end
   end
 
-  localparam int SrcDma  = 0;
-  localparam int SrcGemm = 1;
-  localparam int SrcVec  = 2;
-  localparam int SrcCtrl = 3;
-
-  logic [31:0]  iss_cyc [3];
-  logic [31:0]  iss_idx [3];
-  logic [15:0]  iss_tag [3];
-  logic         slot_v  [4];
-  logic [31:0]  slot_c  [3];
-  logic [127:0] slot_s  [3];
+  logic [31:0]  iss_cyc [Engines];
+  logic [31:0]  iss_idx [Engines];
+  logic [11:0]  iss_tag [Engines];
+  logic         slot_v  [Engines + 1];
+  logic [31:0]  slot_c  [Engines];
+  logic [127:0] slot_s  [Engines];
   logic [127:0] ctrl_d;
-  logic [23:0]  st_a    [3];
-  logic [23:0]  st_b    [3];
-  logic [23:0]  st_c    [3];
-  logic [7:0]   st_d    [3];
-  logic         st_in_a [3];
-  logic         st_in_b [3];
-  logic         st_in_c [3];
-  logic [1:0]   st_in_d [3];
-  logic         st_clr  [3];
+  logic [23:0]  st_a    [Engines];
+  logic [23:0]  st_b    [Engines];
+  logic [23:0]  st_c    [Engines];
+  logic [7:0]   st_d    [Engines];
+  logic         st_in_a [Engines];
+  logic         st_in_b [Engines];
+  logic         st_in_c [Engines];
+  logic [1:0]   st_in_d [Engines];
   logic         tr_pend_v;
   logic [127:0] tr_pend_d;
   logic [1:0]   src_sel;
   logic         tr_afull, tr_push;
   logic [127:0] tr_data;
-  logic [15:0]  cur_tag;
+  logic [11:0]  cur_tag;
 
-  assign st_in_a[SrcDma]  = dma_stat_rd_beat_i;
-  assign st_in_b[SrcDma]  = dma_stat_wr_beat_i;
-  assign st_in_c[SrcDma]  = dma_stat_denied_i;
-  assign st_in_d[SrcDma]  = dma_stat_null_i;
-  assign st_in_a[SrcGemm] = gemm_stat_fed_i;
-  assign st_in_b[SrcGemm] = 1'b0;
-  assign st_in_c[SrcGemm] = 1'b0;
-  assign st_in_d[SrcGemm] = 2'd0;
-  assign st_in_a[SrcVec]  = vec_stat_issue_i;
-  assign st_in_b[SrcVec]  = vec_stat_drain_i;
-  assign st_in_c[SrcVec]  = vec_stat_scalar_i;
-  assign st_in_d[SrcVec]  = {1'b0, vec_stat_pass_i};
-  assign st_clr[SrcDma]   = dma_cmd_valid_o;
-  assign st_clr[SrcGemm]  = gemm_cmd_valid_o;
-  assign st_clr[SrcVec]   = vec_cmd_valid_o;
+  assign st_in_a = '{dma_stat_rd_beat_i, gemm_stat_fed_i, vec_stat_issue_i};
+  assign st_in_b = '{dma_stat_wr_beat_i, 1'b0, vec_stat_drain_i};
+  assign st_in_c = '{dma_stat_denied_i, 1'b0, vec_stat_scalar_i};
+  assign st_in_d = '{dma_stat_null_i, 2'd0, {1'b0, vec_stat_pass_i}};
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      for (int i = 0; i < 3; i++) begin
+      for (int i = 0; i < Engines; i++) begin
         st_a[i] <= '0;
         st_b[i] <= '0;
         st_c[i] <= '0;
         st_d[i] <= '0;
       end
     end else begin
-      for (int i = 0; i < 3; i++) begin
-        if (st_clr[i]) begin
+      for (int i = 0; i < Engines; i++) begin
+        if (eng_cmd[i]) begin
           st_a[i] <= '0;
           st_b[i] <= '0;
           st_c[i] <= '0;
@@ -486,10 +483,10 @@ module npu_seq #(
     end
   end
 
-  function automatic logic [127:0] done_record(input logic [15:0] tag, input logic [1:0] src,
+  function automatic logic [127:0] done_record(input logic [11:0] tag, input logic [1:0] src,
                                                input logic [31:0] done, input logic [31:0] iss,
                                                input logic [31:0] idx);
-    return {12'd0, tag, 2'b00, src, done, iss, idx};
+    return {16'd0, tag, 2'b00, src, done, iss, idx};
   endfunction
 
   function automatic logic [127:0] stat_record(input logic [1:0] src, input logic [31:0] idx,
@@ -498,104 +495,86 @@ module npu_seq #(
     return {d, 4'd1, 4'd0, c, b, a, 4'd0, 2'b00, src, idx};
   endfunction
 
-  assign cur_tag = {ins[115:112], wt, opc};
+  assign cur_tag = {wt, opc};
 
   always_comb begin
-    case (opc)
-      OpDmaLd, OpDmaSt: src_sel = 2'(SrcDma);
-      OpGemm:           src_sel = 2'(SrcGemm);
-      OpVec:            src_sel = 2'(SrcVec);
-      default:          src_sel = 2'(SrcCtrl);
-    endcase
+    src_sel = 2'(SrcCtrl);
+    for (int e = Engines - 1; e >= 0; e--) begin
+      if (eng_sel[e]) begin
+        src_sel = 2'(e);
+      end
+    end
   end
 
   assign tr_ok = !tr_en || (!slot_v[src_sel] && !tr_afull);
 
-  logic done_gemm, done_vec, done_dma, done_ctrl;
+  logic       done_ctrl, pop_v, pop_ctrl;
+  logic [1:0] pop_src;
 
-  assign done_gemm = out_gemm && !d_gemm && !gemm_busy_i;
-  assign done_vec  = out_vec && !d_vec && !vec_busy_i;
-  assign done_dma  = out_dma && !d_dma && !dma_busy_i;
   assign done_ctrl = issue && (src_sel == 2'(SrcCtrl));
+
+  always_comb begin
+    pop_v   = 1'b0;
+    pop_src = 2'(SrcCtrl);
+    for (int i = Engines; i >= 0; i--) begin
+      if (slot_v[i]) begin
+        pop_v   = 1'b1;
+        pop_src = 2'(i);
+      end
+    end
+  end
+
+  assign pop_ctrl = (pop_src == 2'(SrcCtrl));
+
+  always_ff @(posedge clk_i) begin
+    for (int e = 0; e < Engines; e++) begin
+      if (eng_cmd[e]) begin
+        iss_cyc[e] <= cyc;
+        iss_idx[e] <= n_issued;
+        iss_tag[e] <= cur_tag;
+      end
+      if (tr_en && done_eng[e]) begin
+        slot_c[e] <= cyc;
+        slot_s[e] <= stat_record(2'(e), iss_idx[e], st_a[e], st_b[e], st_c[e], st_d[e]);
+      end
+    end
+    if (tr_en && done_ctrl) begin
+      ctrl_d <= done_record(cur_tag, 2'(SrcCtrl), cyc, cyc, n_issued);
+    end
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      for (int i = 0; i < 4; i++) begin
+      for (int i = 0; i <= Engines; i++) begin
         slot_v[i] <= 1'b0;
       end
       tr_push   <= 1'b0;
       tr_pend_v <= 1'b0;
     end else begin
-      if (gemm_cmd_valid_o) begin
-        iss_cyc[SrcGemm] <= cyc;
-        iss_idx[SrcGemm] <= n_issued;
-        iss_tag[SrcGemm] <= cur_tag;
-      end
-      if (vec_cmd_valid_o) begin
-        iss_cyc[SrcVec] <= cyc;
-        iss_idx[SrcVec] <= n_issued;
-        iss_tag[SrcVec] <= cur_tag;
-      end
-      if (dma_cmd_valid_o) begin
-        iss_cyc[SrcDma] <= cyc;
-        iss_idx[SrcDma] <= n_issued;
-        iss_tag[SrcDma] <= cur_tag;
-      end
-      if (tr_en && done_gemm) begin
-        slot_v[SrcGemm] <= 1'b1;
-        slot_c[SrcGemm] <= cyc;
-        slot_s[SrcGemm] <= stat_record(2'(SrcGemm), iss_idx[SrcGemm], st_a[SrcGemm],
-                                       st_b[SrcGemm], st_c[SrcGemm], st_d[SrcGemm]);
-      end
-      if (tr_en && done_vec) begin
-        slot_v[SrcVec] <= 1'b1;
-        slot_c[SrcVec] <= cyc;
-        slot_s[SrcVec] <= stat_record(2'(SrcVec), iss_idx[SrcVec], st_a[SrcVec], st_b[SrcVec],
-                                      st_c[SrcVec], st_d[SrcVec]);
-      end
-      if (tr_en && done_dma) begin
-        slot_v[SrcDma] <= 1'b1;
-        slot_c[SrcDma] <= cyc;
-        slot_s[SrcDma] <= stat_record(2'(SrcDma), iss_idx[SrcDma], st_a[SrcDma], st_b[SrcDma],
-                                      st_c[SrcDma], st_d[SrcDma]);
+      for (int e = 0; e < Engines; e++) begin
+        if (tr_en && done_eng[e]) begin
+          slot_v[e] <= 1'b1;
+        end
       end
       if (tr_en && done_ctrl) begin
         slot_v[SrcCtrl] <= 1'b1;
-        ctrl_d          <= done_record(cur_tag, 2'(SrcCtrl), cyc, cyc, n_issued);
       end
       tr_push <= 1'b0;
       if (tr_pend_v) begin
         tr_pend_v <= 1'b0;
         tr_push   <= 1'b1;
         tr_data   <= tr_pend_d;
-      end else if (slot_v[SrcDma]) begin
-        slot_v[SrcDma] <= 1'b0;
-        tr_push        <= 1'b1;
-        tr_data        <= done_record(iss_tag[SrcDma], 2'(SrcDma), slot_c[SrcDma],
-                                      iss_cyc[SrcDma], iss_idx[SrcDma]);
-        tr_pend_v      <= tr_stats;
-        tr_pend_d      <= slot_s[SrcDma];
-      end else if (slot_v[SrcGemm]) begin
-        slot_v[SrcGemm] <= 1'b0;
+      end else if (pop_v) begin
+        slot_v[pop_src] <= 1'b0;
         tr_push         <= 1'b1;
-        tr_data         <= done_record(iss_tag[SrcGemm], 2'(SrcGemm), slot_c[SrcGemm],
-                                       iss_cyc[SrcGemm], iss_idx[SrcGemm]);
-        tr_pend_v       <= tr_stats;
-        tr_pend_d       <= slot_s[SrcGemm];
-      end else if (slot_v[SrcVec]) begin
-        slot_v[SrcVec] <= 1'b0;
-        tr_push        <= 1'b1;
-        tr_data        <= done_record(iss_tag[SrcVec], 2'(SrcVec), slot_c[SrcVec],
-                                      iss_cyc[SrcVec], iss_idx[SrcVec]);
-        tr_pend_v      <= tr_stats;
-        tr_pend_d      <= slot_s[SrcVec];
-      end else if (slot_v[SrcCtrl]) begin
-        slot_v[SrcCtrl] <= 1'b0;
-        tr_push         <= 1'b1;
-        tr_data         <= ctrl_d;
+        tr_data         <= pop_ctrl ? ctrl_d :
+                           done_record(iss_tag[pop_src], pop_src, slot_c[pop_src],
+                                       iss_cyc[pop_src], iss_idx[pop_src]);
+        tr_pend_v       <= !pop_ctrl && tr_stats;
+        tr_pend_d       <= slot_s[pop_src];
       end
       if (srst) begin
-        for (int i = 0; i < 4; i++) begin
+        for (int i = 0; i <= Engines; i++) begin
           slot_v[i] <= 1'b0;
         end
         tr_pend_v <= 1'b0;
@@ -637,7 +616,7 @@ module npu_seq #(
     if (issue && opc == OpHalt) begin
       irq_set[1] = 1'b1;
     end
-    if (issue && (opc == OpMove || opc > OpWaitHost)) begin
+    if (issue && !legal_op(opc)) begin
       irq_set[2] = 1'b1;
     end
     if (dma_axi_err_i || (m_axi_rvalid_i && m_axi_rresp_i[1]) ||
@@ -657,11 +636,11 @@ module npu_seq #(
       sig_value  <= '0;
       n_issued   <= '0;
       cyc        <= '0;
-      cyc_gemm   <= '0;
-      cyc_vec    <= '0;
-      cyc_dma    <= '0;
       cyc_stall  <= '0;
       cyc_starve <= '0;
+      for (int e = 0; e < Engines; e++) begin
+        cyc_busy[e] <= '0;
+      end
     end else begin
       irq_status <= (irq_status & ~32'(irq_clr)) | 32'(irq_set);
       if (srst) begin
@@ -674,21 +653,17 @@ module npu_seq #(
         error      <= 1'b0;
         n_issued   <= '0;
         cyc        <= '0;
-        cyc_gemm   <= '0;
-        cyc_vec    <= '0;
-        cyc_dma    <= '0;
         cyc_stall  <= '0;
         cyc_starve <= '0;
+        for (int e = 0; e < Engines; e++) begin
+          cyc_busy[e] <= '0;
+        end
       end else if (running) begin
         cyc <= cyc + 1'b1;
-        if (gemm_busy_i) begin
-          cyc_gemm <= cyc_gemm + 1'b1;
-        end
-        if (vec_busy_i) begin
-          cyc_vec <= cyc_vec + 1'b1;
-        end
-        if (dma_busy_i) begin
-          cyc_dma <= cyc_dma + 1'b1;
+        for (int e = 0; e < Engines; e++) begin
+          if (eng_busy[e]) begin
+            cyc_busy[e] <= cyc_busy[e] + 1'b1;
+          end
         end
         if (ins_v && !issue) begin
           cyc_stall <= cyc_stall + 1'b1;
