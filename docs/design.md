@@ -219,7 +219,7 @@ RUN loads its operand fields into scalar registers:
 | scratch (as in the Q-flag rule; dst without Q) | r9 |
 | Q flag | r10 |
 
-For op 0–15 the same registers are loaded, except `r7 = aux` and pc is the start of the operation's program in CBUF [0, 256). r0 is always 0. r11–r31, RS0, RS1 and rn are not initialized. Programs do not write r10. A program ends with RET, which waits until every row context is idle and then clears the engine's busy state without waiting for the drain.
+For op 0–15 the same registers are loaded, except `r7 = aux` and pc is the start of the operation's program in CBUF [0, 256). r0 is always 0. r11–r31, RS0, RS1 and rn are not initialized. A program ends with RET, which waits until every row context is idle and then clears the engine's busy state without waiting for the drain.
 
 Instruction word, `[127:124]` kind: 0 PASS, 1 SALU, 2 SMEM, 3 BR, 4 RET, 5 NOP, 7 TRANSPOSE8; 6 and 8–15 act as NOP.
 
@@ -236,35 +236,42 @@ A PASS streams `rq` quads × `rnw` words through the lanes, 4 cycles per word. R
 | [103:99] | rnw | Register: words per row |
 | [98:94] | rn8 | Register: row stride (words) |
 | [93:89] | rpb | Register: PBUF start |
-| [88:84] | rimm | Register: immediate for b, c0 or sel = IMM, and ε for sc = RSTD |
+| [88:84] | rimm | Register: immediate for b, c0 or sel = IMM, and ε for seps |
 | [83:79] | rimm2 | Register: comparison value, or valid-column count for mask_en (low 16 bits) |
 | [78] | x2_en | Read x2; with x2_en = 0, x2 is x |
-| [77:76] / [75:74] / [73:72] | wx / wx2 / wd | Word-index mapping: 0 NORM `w`; 1 X1 `h·8 + gg`; 2 X2 `h·8 + 4 + gg` (h = w[5:2], gg = w[1:0]); 3 S4 `4·w` |
-| [71:70] | pa | PBUF value for c0 = PBUF and b = PBUF: 0 NONE; 1 ROWVEC (word `rpb + w/4`, slice `w mod 4` for every token); 2 TILE (word `rpb + q·4 + gg`, slice t for token t); 3 as NONE |
-| [69] | — | Reserved |
-| [68:66] | c0 | 0 ZERO, 1 X2, 2 PBUF, 3 RS0, 4 IMM; 5–7 as ZERO |
-| [65:63] | b | 0 ONE, 1 X2, 2 PBUF, 3 RS1, 4 IMM, 5 PRE (square), 6 LOG2E; 7 as ONE |
-| [62:61] | nl | 0 NONE, 1 ACT, 2 EXP2, 3 TAB01 |
-| [60:59] | c1 | 0 ZERO, 1 X2, 2 MAX, 3 SIGNFIX |
-| [58] | neg_c1 | Negate c1; with c1 = MAX, compare with 0 instead of x2 |
-| [57] | mask_en | Columns at and beyond the rimm2 value give 0 |
-| [56:55] | red | Reduction: 0 NONE, 1 SUM, 2 MAX; 3 as NONE |
-| [54:53] | wr | Write: 0 NONE, 1 FBUF, 2 ABUF (quantized), 3 FINAL (ABUF if r10 = Q, else FBUF) |
-| [52:50] | sc | Row scalar after the pass: 0 NONE, 1 MEAN, 2 RSTD, 3 NEGMAX, 4 RECIPSUM, 5 MAX; 6 and 7 as NONE |
-| [49:47] | px | Permutation of x: 0 NONE; 1 BCAST (column pcol of each token to all 8 columns); 2 TSWAP1 (token t ↔ t xor 1); 3 TSWAP2 (t ↔ t xor 2); 4 T4 (output lane l ← token `l mod 4`, column `l/4`); 5 T4B (output lane l ← token `(l/4) mod 4`, column `(l mod 4) + 4·(l/16)`); 6 and 7 as NONE |
-| [46:44] | — | Reserved |
-| [43:41] | pcol | Column for BCAST |
-| [40:38] | cmp | 0 NONE, 1 LT, 2 LE, 3 EQ, 4 NE, 5 GT, 6 GE; 7 as NONE |
-| [37:36] | cmp_src | 0 IMM2 (x vs rimm2), 1 X2 (x vs x2), 2 LANE (lane number vs rimm2), 3 X2_IMM2 (x2 vs rimm2) |
-| [35] | cmp_int | Integer comparison (0: FP32) |
-| [34:32] | sel | Value for lanes whose predicate is false: 0 NONE, 1 ZERO, 2 X2, 3 IMM, 4 NULL (0xFFFFFFFF), 5 RS1; 6 and 7 as ZERO |
-| [31:29] | ialu | Integer path: 0 NONE, 1 ADD, 2 SUB, 3 AND, 4 OR, 5 XOR, 6 SHR1 (logical shift right by 1), 7 RSUB (c0 − x) |
-| [28] | dst_s1 | FBUF write start advances by 1 word per quad |
-| [27] | c0_pred | c0 is 0 in lanes whose predicate is false |
-| [26] | — | Reserved |
-| [25] | x_s1 | x and x2 read starts advance by 1 word per quad |
-| [24:23] | ctx | Row context of the reduction, the row scalar and the RS0/RS1 reads (0 or 1) |
-| [22:21] | rm | Row mask: 0 NONE, 1 SKIP (quads whose RM bit is 0 are skipped), 2 SET (RM bit q is written for each quad q of the pass); 3 as NONE |
+| [77:76] | mg | Word map group: 2^mg words |
+| [75:74] | ms | Word map stride: 2^ms words |
+| [73:72] / [71:70] / [69:68] | mx / mx2 / md | Word index of the x read / the x2 read / the write: 0 w; 1 m(w); 2 m(w) + 2^mg; 3 as 0 |
+| [67:66] | pa | PBUF value for c0 = PBUF and b = PBUF: 0 NONE; 1 ROWVEC (word `rpb + w/4`, slice `w mod 4` for every token); 2 TILE (word `rpb + q·4 + (w mod 4)`, slice t for token t); 3 as NONE |
+| [65:63] | c0 | 0 ZERO, 1 X2, 2 PBUF, 3 RS0, 4 IMM; 5–7 as ZERO |
+| [62:60] | b | 0 ONE, 1 X2, 2 PBUF, 3 RS1, 4 IMM, 5 PRE (square); 6 and 7 as ONE |
+| [59:58] | nl | 0 NONE, 1 ACT, 2 EXP2, 3 TAB01 |
+| [57:56] | po | Post operation: 0 ADD, 1 SUB, 2 MAX, 3 SIGNFIX |
+| [55] | pv | Post operand c1: 0 zero, 1 x2 |
+| [54] | mask_en | Columns at and beyond the rimm2 value give 0 |
+| [53:52] | red | Reduction: 0 NONE, 1 SUM, 2 MAX; 3 as NONE |
+| [51:50] | wr | Write: 0 NONE, 1 FBUF, 2 ABUF (quantized), 3 FINAL (ABUF with the Q flag, else FBUF) |
+| [49:47] | sf | Row scalar function after the pass: 0 NONE, 1 IDENTITY, 2 NEGATE, 3 RECIPROCAL, 4 RSQRT; 5–7 as NONE |
+| [46] | st | Row scalar target: 0 RS1, 1 RS0 |
+| [45] | srn | Multiply the reduction by rn before the function |
+| [44] | seps | Add ε (the rimm value) before the function |
+| [43:24] | px | Permutation of x: a 4-bit selector for each bit of the source element index, bit 4 at [43:40] down to bit 0 at [27:24] |
+| [23:21] | cmp | 0 NONE, 1 LT, 2 LE, 3 EQ, 4 NE, 5 GT, 6 GE; 7 as NONE |
+| [20:19] | cl | Left operand of the comparison: 0 x, 1 x2, 2 COLUMN (0..7), 3 POSITION (token · 8 + column, 0..31) |
+| [18] | cr | Right operand of the comparison: 0 the rimm2 value, 1 x2 |
+| [17] | cmp_int | Integer comparison (0: FP32); COLUMN and POSITION always compare as integers |
+| [16:14] | sel | Value for lanes whose predicate is false: 0 NONE, 1 ZERO, 2 X2, 3 IMM, 4 NULL (0xFFFFFFFF), 5 RS1; 6 and 7 as ZERO |
+| [13:11] | ialu | Integer path: 0 NONE, 1 ADD, 2 SUB, 3 AND, 4 OR, 5 XOR, 6 SHR1 (logical shift right by 1), 7 RSUB (c0 − x) |
+| [10] | c0_pred | c0 is 0 in lanes whose predicate is false |
+| [9] | x_s1 | x and x2 read starts advance by 1 word per quad |
+| [8] | dst_s1 | FBUF write start advances by 1 word per quad |
+| [7:6] | ctx | Row context of the reduction, the row scalar and the RS0/RS1 reads (0 or 1) |
+| [5:4] | rm | Row mask: 0 NONE, 1 SKIP (quads whose RM bit is 0 are skipped), 2 SET (RM bit q is written for each quad q of the pass); 3 as NONE |
+| [3:0] | — | Reserved |
+
+The word map is `m(w) = ((w >> mg) << ms) + (w mod 2^mg)`: groups of 2^mg consecutive words placed 2^ms words apart; mode 2 takes the next group of each stride. A PASS that uses mode 1 has ms ≥ mg, and one that uses mode 2 has ms > mg.
+
+The permutation gives, for output position `p = token · 8 + column` with bits p4..p0, bit k of the source element index: selector bits [2:0] = 0 take p_k, 1–5 take p4, p3, p2, p1, p0, 6 gives 0 and 7 gives 1; selector bit [3] inverts the result. All selectors 0 is the identity; for example, column c of each token broadcast to all columns sets bits 2..0 to the constants of c, and swapping tokens t and t xor 1 inverts bit 3.
 
 Lane operation (x, x2 after permutation):
 
@@ -277,12 +284,12 @@ y2   = sel == NONE ? y0 : (pred ? y0 : sel value)
 y    = mask_en && invalid column ? 0 : y2
 ```
 
-- `rel` compares x (x2 for X2_IMM2, the lane number for LANE) with rimm2 (IMM2, X2_IMM2, LANE) or x2 (X2). FP32 comparison uses a sign-magnitude key, with −0 and subnormal values equal to +0. With cmp_int, and always for LANE, int32 signed comparison. For LANE, the lane number is the column 0..7 (cmp_int = 0) or the word position 0..31 = token · 8 + column (cmp_int = 1).
-- `post(prod)`: c1 = ZERO or X2 gives `prod + c1`, or `prod − c1` with neg_c1; c1 = MAX gives `max(prod, x2)`, or `max(prod, 0)` with neg_c1; c1 = SIGNFIX gives `−prod + x` when the sign bit of x is set, else `prod`.
+- `rel` compares the left operand selected by cl with the right operand selected by cr. FP32 comparison uses a sign-magnitude key, with −0 and subnormal values equal to +0. With cmp_int, and always when cl is COLUMN or POSITION, the comparison is int32 signed.
+- `post(prod)`: ADD gives `prod + c1`, SUB `prod − c1`, MAX `max(prod, c1)`, and SIGNFIX `−prod + x` when the sign bit of x is set, else `prod`; c1 is 0 or x2 as selected by pv.
 - The integer path bypasses the multiplier, the nonlinear table and the post-adder.
 - TAB01 interpolates the first half of TBUF at the fraction of prod in [0, 1).
 - An invalid column is one whose position `8·w + column` in the row is at or beyond the rimm2 value. For a MAX reduction, invalid columns count as −∞; for a SUM reduction, as 0.
-- Row scalars after the pass (rn set by SMEM RN, ε = rimm value): MEAN `RS0 = −(Σ × rn)`; RSTD `RS1 = 1/√(Σ × rn + ε)`; NEGMAX `RS0 = −max`; RECIPSUM `RS1 = 1/Σ`; MAX `RS1 = max`. The negation flips the sign bit and gives +0 for ±0.
+- Row scalar after a PASS with red and sf ≠ NONE, for each token: `r` is the token's Σ (red = SUM) or max (red = MAX); `v = r × rn` with srn (rn set by SMEM RN), then `v + ε` with seps; RS[st] of the context receives f(v), where f is the identity, the negation (the sign bit flipped, +0 for ±0), the reciprocal or the reciprocal square root. For example, a mean is NEGATE with srn into RS0 after a SUM, so that adding RS0 subtracts it.
 - NaN and the value 0xFFFFFFFF must not enter the FP32 path or an FP32 comparison; integer and NULL entries go through the integer path and sel only.
 - Integer–FP32 conversion uses magic constants: `float(i) = bits(0x4B400000 + i) − 12582912.0` for |i| < 2^22; `rint(x) = bits(x + 12582912.0) − 0x4B400000`; `floor(x) = rint(x) − (rint(x) > x)`.
 
@@ -297,12 +304,12 @@ y    = mask_en && invalid column ? 0 : y2
 | [103:99] | rdt | Register: destination tile stride |
 | [98:94] | rst | Register: source tile stride |
 | [93:89] | rdw | Register: destination word stride |
-| [88] | pack | 0 NONE; 1 ZIP4 |
-| [87:0] | — | Reserved |
+| [88:87] | ror | Column rotation k: 0–2; 3 as 0 |
+| [86:0] | — | Reserved |
 
 Bases and strides use the low 12 bits of their registers and are measured in FBUF words. The tile count uses the low 9 bits. Each tile contains four independent 8×8 matrices of 32-bit elements. For tile q, source row r is read from `rx + q·rst + r·rsw`, and destination row c is written to `rd + q·rdt + c·rdw`. All word addresses wrap at 4,096 words. Element `(t, c)` of source row r is at bits `32·(8·t + c) +: 32`, where t selects one of the four matrices.
 
-With pack = NONE, destination row c, element `(t, r)` receives source row r, element `(t, c)`. With pack = ZIP4, the destination columns are selected in the order 0, 4, 1, 5, 2, 6, 3, 7 from the transposed row. Every 32-bit element is copied unchanged. The source and destination word sets are disjoint, and destination word addresses are distinct. A zero tile count performs no reads or writes.
+Destination row c, element `(t, j)` receives source row `ror(j, k)`, element `(t, c)`, where `ror(j, k)` rotates the 3-bit column index j right by k bits. Every 32-bit element is copied unchanged. The source and destination word sets are disjoint, and destination word addresses are distinct. A zero tile count performs no reads or writes.
 
 TRANSPOSE8 waits for preceding vector operations to drain and completes all destination writes before advancing to the next instruction. The two tile buffers hold 8,192 bits each in eight skewed distributed-RAM banks. A registered output word and address remain stable during a denied FBUF write. A tile is released after its final word is written. RS0, RS1 and the scalar register file are unchanged.
 
@@ -349,7 +356,7 @@ RET and NOP have no operands.
 - SMEM waits for preceding passes to drain; RSMOV also waits for an outstanding scalar program of its context, and RN waits for the scalar unit to be idle.
 - The rimm and rimm2 values are captured when a PASS is issued.
 - A PASS must not have rq = 0 or rnw = 0.
-- sel = X2 and c1 = SIGNFIX are not used in the same pass.
+- sel = X2 and po = SIGNFIX are not used in the same pass.
 
 ## Vector arithmetic
 
@@ -401,7 +408,7 @@ An on-chip word is stored little-endian and padded with zeros to a multiple of 1
 | TBUF | 64 bits | 16 |
 | CBUF | 128 bits | 16 |
 
-`ddr_addr` and `ddr_stride` are multiples of 16 bytes. DMA_ST reads ABUF or FBUF, treats every mode as RAW and ignores flag I; DMA_LD ignores flag I without flag R. DMA_ST reads ABUF through the write port of ABUF in the cycles without a write from VEC or DMA, so it does not wait for the GEMM engine. DMA writes to TBUF and CBUF wait until the VEC engine is idle.
+`ddr_addr` and `ddr_stride` are multiples of 16 bytes. DMA_ST reads ABUF or FBUF, treats every mode as RAW and ignores flag I; DMA_LD ignores flag I without flag R. DMA_ST reads ABUF through the write port of ABUF in the cycles without a write from VEC or DMA, so it does not wait for the GEMM engine.
 
 ### RAW (2D)
 
@@ -420,7 +427,7 @@ A token is contiguous in DDR:
 | MXINT8 (to and from ABUF) | `tok` blocks of 32 bytes, then `tok` scale bytes, zero-padded to 16 bytes | `32·tok + 16·ceil(tok/16)` bytes |
 | FP32 (to and from FBUF) | `32·tok` FP32 values | `128·tok` bytes |
 
-- `tok` ([6:0]) is the number of 32-element blocks per token: at most 32 for MXINT8 and 8 for FP32. 0 counts as 1 and values above 32 as 32.
+- `tok` ([6:0]) is the number of 32-element blocks per token: 1 to 32 for MXINT8 and 1 to 8 for FP32.
 - `row_words · (token size / 16) < 65,536`.
 - DMA_LD with R: row r, token w is at `ddr_addr + r · ddr_stride + w · (token size)`; each 4 consecutive tokens are packed into one quad of on-chip words. `rows · row_words` is a multiple of 4.
 - DMA_ST with R: each on-chip quad is unpacked into 4 tokens.
@@ -435,7 +442,7 @@ Converts an ABUF-format matrix into the W8 planes of its transpose (mem = WBUF).
 
 ### GACC (mode 3)
 
-Builds the output rows of one quad (4 tokens), `out[t][ch]` with `ch = 0..32·row_words − 1`, from MXINT8 rows in row format:
+Builds the output rows of one quad (4 tokens) in FBUF (mem = FBUF), `out[t][ch]` with `ch = 0..32·row_words − 1`, from MXINT8 rows in row format:
 
 ```
 out[t][ch] = Σ_{s = 0..S−1} Σ_{k = 0..3} w[t][kb(ch)][s] · bw[s][t][k] · row(addr[s][t][k])[ch]      kb(ch) = ch / 32
@@ -443,14 +450,13 @@ out[t][ch] = Σ_{s = 0..S−1} Σ_{k = 0..3} w[t][kb(ch)][s] · bw[s][t][k] · r
 
 | Operand | Meaning |
 |---|---|
-| ddr_addr | List address. The first 16 bytes are a header: [31:0] address of w (16-byte units), [47:32] stride between the w areas of consecutive blocks kb (words), [63:48] words per quad row of w (S / 8) |
+| ddr_addr | List address. The first 16 bytes are a header: [31:0] address of w for this quad (16-byte units), [47:32] stride between the w areas of consecutive blocks kb (words) |
 | rows | Number of slots S (≤ 2047) |
 | row_words | Blocks per token, K / 32 (1 to 8) |
 | dst | FBUF address of the output quad row (4 · row_words words) |
-| ddr_stride | [15:0] quad number q of the output |
 
 - Entries follow the header, 8 bytes each: [31:0] row address (16-byte units; 0xFFFFFFFF adds nothing), [63:32] bw (FP32). Order: `for s: for t: for k`.
-- `w[t][kb][s]` is element `t·8 + (s mod 8)` of the FBUF-format word at `w address + (kb · stride + q · quad-row words + s/8) · 128` bytes.
+- `w[t][kb][s]` is element `t·8 + (s mod 8)` of the FBUF-format word at `w address + (kb · stride + s/8) · 128` bytes.
 - flags: acc = 0 starts the accumulators at 0; flush = 1 writes them to dst at the end. Larger S, and lists per camera, are chained with acc = 1.
 - Output word g of the quad row holds channels 8g..8g+7 of the 4 tokens (element `t·8 + c`).
 
@@ -469,7 +475,7 @@ AXI-Lite, byte offsets:
 
 | Offset | Name | Contents |
 |---|---|---|
-| 0x00 | CTRL (W) | bit 0 START: run INSTR_COUNT instructions from INSTR_BASE (a START while running restarts the stream); bit 1 SOFT_RESET: stop issue and fetch, empty the IBUF and clear running, halted and error (registers, counters and engines are kept) |
+| 0x00 | CTRL (W) | bit 0 START: run INSTR_COUNT instructions from INSTR_BASE (a START while running restarts the stream); bit 1 SOFT_RESET: stop issue and fetch, empty the IBUF, discard the instruction words still in flight and clear running, halted and error (registers, counters and engines are kept) |
 | 0x04 | STATUS (R) | bit 0 running, 1 halted, 2 error, 3 waiting for host, 4 GEMM busy, 5 VEC busy, 6 DMA busy, 7 IBUF empty |
 | 0x08 | INSTR_BASE | DDR address of the instruction stream (256-byte aligned) |
 | 0x0C | INSTR_COUNT | Number of instructions |
@@ -598,7 +604,7 @@ Kernels emit instructions in program order with the on-chip ranges each instruct
 
 ### Cycle model
 
-The simulator assigns each instruction an issue cycle and a completion cycle with the sequencer rules: in-order issue one cycle after the previous issue at the earliest, an instruction waits for the completion of every engine named by its wait bits and of its own engine, and a DMA load to TBUF or CBUF starts its data phase when the VEC engine is free. The first instruction issues at `start_cycles`. The cost of a command is a linear function of the activity counted while the simulator executes it:
+The simulator assigns each instruction an issue cycle and a completion cycle with the sequencer rules: in-order issue one cycle after the previous issue at the earliest, an instruction waits for the completion of every engine named by its wait bits and of its own engine. The first instruction issues at `start_cycles`. The cost of a command is a linear function of the activity counted while the simulator executes it:
 
 | Engine | Cycles |
 |---|---|
@@ -608,21 +614,13 @@ The simulator assigns each instruction an issue cycle and a completion cycle wit
 
 For gather-accumulate, read beats and bursts count the index list and the coefficients, the beats of gathered rows are counted only in the statistics record, and coefficient fetches are the coefficient requests made while an entry waits for them.
 
-For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles + skip cycles`, where words counts the issued words, a run of k skipped quads costs ⌈k/2⌉ cycles at the start of a PASS, one less when the PASS directly follows a PASS that did not drain, max(0, ⌊k/2⌋ + c − 4) cycles between two issued words, where c is the number of FBUF reads of a word (2 with a second operand), and ⌊(k − 1)/2⌋ cycles at the end of a PASS that does not drain, less 40 and at least 0 at the end of a PASS that drains (a PASS whose quads are all skipped costs the start amount, less 40 and at least 0 when it drains), a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit, with the micro-operation counts of the RTL; a PASS or SMEM that needs the context waits the remaining words:
-
-| Program | Arithmetic | Immediate |
-|---|---:|---:|
-| MEAN | 8 | 1 |
-| RSTD | 29 | 2 |
-| NEGMAX, MAX | 0 | 1 |
-| RECIPSUM | 19 | 2 |
-| RN | 12 | 2 |
+For VEC, `issue = (words + stalled words) · vec_word_cycles − passes · vec_issue_tail_cycles + transposes · vec_transpose_cycles + tiles · vec_transpose_tile_cycles + skip cycles`, where words counts the issued words, a run of k skipped quads costs ⌈k/2⌉ cycles at the start of a PASS, one less when the PASS directly follows a PASS that did not drain, max(0, ⌊k/2⌋ + c − 4) cycles between two issued words, where c is the number of FBUF reads of a word (2 with a second operand), and ⌊(k − 1)/2⌋ cycles at the end of a PASS that does not drain, less 40 and at least 0 at the end of a PASS that drains (a PASS whose quads are all skipped costs the start amount, less 40 and at least 0 when it drains), a word whose read finds a write of an earlier overlapped pass pending is stalled until 10 words after the issue of that write, `drain = draining passes · vec_drain_cycles + draining quantizing passes · vec_drain_quantized_cycles`, and `scalar = context waits · vec_word_cycles + RN · 138`. A reduction completes 16 words after the issue of its last word; a scalar program then takes 11 cycles per arithmetic micro-operation (the four tokens share one pipelined fp32 adder and multiplier), 2 per immediate write and 2 to start, after the previous program of the scalar unit; a PASS or SMEM that needs the context waits the remaining words. A row scalar has 7 arithmetic micro-operations for the sum tree of red = SUM, 1 for srn, 1 for seps, 12 for RECIPROCAL and 20 for RSQRT, and 1 immediate write, 1 more for RECIPROCAL and RSQRT, and 1 more when red = MAX is followed by arithmetic. RN has 12 arithmetic micro-operations and 2 immediate writes.
 
 The statistics of a predicted record are the read and write beats, the cycles between issue and the start of the data phase and the null entries for DMA; the array cycles for GEMM; and the issue, drain and scalar cycles and the pass count for VEC. The host's response to SIGNAL and WAIT_HOST takes no time in the model, and the trace back-pressure and the contention for the FBUF write port between the engines are not modelled. The default parameters are the values that the trace analyzer calibrates from board traces of both models with statistics records, except vec_word_cycles, vec_transpose_cycles, vec_transpose_tile_cycles and dma_gather_fetch_cycles, which are fitted to Verilator runs of the RTL. `hotarubi_trace predict` and `hotarubi_run --device iss` take `--timing NAME=VALUE,...` to override any parameter. The scheduler estimates the cost of an instruction with the same model from the activity implied by its fields (the activity of a fixed VEC operation by executing its ROM program; a RUN command as one pass over its words).
 
 ### Hazard check
 
-While executing a stream, the simulator records the on-chip words every command reads and writes and reports a hazard for each pair of commands on different engines whose accesses conflict (a write and a read or two writes of the same word) without an ordering between them. A command is ordered after an earlier command when a wait bit of it or of any command issued between them names the earlier command's engine after that command was issued, when the engines are in order and the earlier command's engine has issued a later command (a command issues only when its engine is free), or when the earlier command is a VEC command and the later one is a DMA write to TBUF or CBUF. `hotarubi_trace predict` and `hotarubi_run --device iss` fail on a stream with hazards and list them. `hotarubi_trace predict` also checks that the ranges listed for every instruction cover the words it actually reads and writes (the fetch of a fixed VEC operation from the ROM part of CBUF is implied) and fails otherwise; with `--accesses` it writes `<stream>.accesses.jsonl`, one line per instruction with the extent of its actual reads and writes in each memory.
+While executing a stream, the simulator records the on-chip words every command reads and writes and reports a hazard for each pair of commands on different engines whose accesses conflict (a write and a read or two writes of the same word) without an ordering between them. A command is ordered after an earlier command when a wait bit of it or of any command issued between them names the earlier command's engine after that command was issued, or when the engines are in order and the earlier command's engine has issued a later command (a command issues only when its engine is free). `hotarubi_trace predict` and `hotarubi_run --device iss` fail on a stream with hazards and list them. `hotarubi_trace predict` also checks that the ranges listed for every instruction cover the words it actually reads and writes (the fetch of a fixed VEC operation from the ROM part of CBUF is implied) and fails otherwise; with `--accesses` it writes `<stream>.accesses.jsonl`, one line per instruction with the extent of its actual reads and writes in each memory.
 
 ## Build
 

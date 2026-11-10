@@ -5,7 +5,6 @@ module dma_gacc (
   input  logic          start_i,
   input  logic [11:0]   cfg_slots_i,
   input  logic [3:0]    cfg_kb_i,
-  input  logic [15:0]   cfg_q_i,
   input  logic          cfg_acc_i,
   input  logic          cfg_flush_i,
   input  logic [12:0]   cfg_dst_i,
@@ -39,12 +38,10 @@ module dma_gacc (
 
   logic [11:0] slots;
   logic [3:0]  kb;
-  logic [15:0] quad;
-  logic        acc_keep, do_flush;
+  logic        do_flush;
   logic [12:0] dst;
-  logic [31:0] w_base;
-  logic [15:0] w_gstride, w_qwords;
-  logic [31:0] w_qoff, w_grp0, pq_addr;
+  logic [15:0] w_gstride;
+  logic [31:0] w_grp0, pq_addr;
   logic [4:0]  nd;
   logic [5:0]  row_beats;
 
@@ -55,8 +52,6 @@ module dma_gacc (
     GIdle,
     GZero,
     GHdr,
-    GWmul,
-    GWadd,
     GEnt,
     GDrain,
     GFlush
@@ -79,8 +74,6 @@ module dma_gacc (
   logic [3:0]   drain_cnt;
   logic         cm_busy, cm_pend;
   logic [2:0]   cm_i;
-  logic         cm_v [LMul + 1];
-  logic [2:0]   cm_i_d [LMul + 1];
   logic [31:0]  cm_bw, cm_w, cm_y;
   logic [1:0]   cm_t;
   logic [2:0]   cm_col;
@@ -100,7 +93,6 @@ module dma_gacc (
   logic         p_v [LWb + 1];
   logic [1:0]   p_t [LWb + 1];
   logic [3:0]   p_b [LWb + 1];
-  logic [5:0]   rd_idx_d [LMul + 1];
   logic [127:0] md_r;
   logic [31:0]  mc_r;
   logic [7:0]   me_r;
@@ -196,8 +188,8 @@ module dma_gacc (
   end
 
   always_ff @(posedge clk_i) begin
-    if (st == GWadd) begin
-      w_grp0 <= w_base + (w_qoff << 7);
+    if (st == GHdr && ent_valid_i) begin
+      w_grp0 <= {ent_data_i[27:0], 4'b0};
       ngrp   <= 9'((slots + 12'd7) >> 3);
     end
     if (sw) begin
@@ -242,8 +234,6 @@ module dma_gacc (
           if (start_i) begin
             slots     <= cfg_slots_i;
             kb        <= cfg_kb_i;
-            quad      <= cfg_q_i;
-            acc_keep  <= cfg_acc_i;
             do_flush  <= cfg_flush_i;
             dst       <= cfg_dst_i;
             s_cur     <= '0;
@@ -265,18 +255,14 @@ module dma_gacc (
         end
         GHdr: begin
           if (ent_valid_i) begin
-            w_base    <= {ent_data_i[27:0], 4'b0};
             w_gstride <= ent_data_i[47:32];
-            w_qwords  <= ent_data_i[63:48];
             if (slots == 12'd0) begin
               st <= GDrain;
             end else begin
-              st <= GWmul;
+              st <= GEnt;
             end
           end
         end
-        GWmul: st <= GWadd;
-        GWadd: st <= GEnt;
         GEnt: begin
           if (dbl || ent_take) begin
             if (!dbl) begin
@@ -326,10 +312,6 @@ module dma_gacc (
     end
   end
 
-  always_ff @(posedge clk_i) begin
-    w_qoff <= 32'(quad) * 32'(w_qwords);
-  end
-
   assign wr_we = w_fire;
   assign wr_wa = {rx_half, rx_kb[2:0], rx_b};
   assign wr_ra = {wh_cm, cm_i, cm_t, cm_col[2]};
@@ -369,14 +351,7 @@ module dma_gacc (
       cm_pend <= 1'b0;
       cm_i    <= '0;
       cm_cnt  <= '0;
-      for (int i = 0; i <= LMul; i++) begin
-        cm_v[i] <= 1'b0;
-      end
     end else begin
-      cm_v[0] <= cm_busy;
-      for (int i = 1; i <= LMul; i++) begin
-        cm_v[i] <= cm_v[i-1];
-      end
       if (ent_take && !ent_null) begin
         cm_busy <= 1'b1;
         cm_pend <= 1'b1;
@@ -388,7 +363,7 @@ module dma_gacc (
           cm_busy <= 1'b0;
         end
       end
-      if (cm_v[LMul - 1]) begin
+      if (cm_y_valid) begin
         cm_cnt <= cm_cnt + 1'b1;
       end
       if (pf_push) begin
@@ -398,18 +373,14 @@ module dma_gacc (
   end
 
   always_ff @(posedge clk_i) begin
-    cm_i_d[0] <= cm_i;
-    for (int i = 1; i <= LMul; i++) begin
-      cm_i_d[i] <= cm_i_d[i-1];
-    end
     if (!clear_i && ent_take && !ent_null) begin
       cm_bw  <= ent_cur[63:32];
       cm_t   <= e_t;
       cm_col <= s_cur[2:0];
       wh_cm  <= wh_cur;
     end
-    if (!clear_i && cm_v[LMul - 1]) begin
-      cm_c[cm_i_d[LMul - 1] * 32 +: 32] <= cm_y;
+    if (!clear_i && cm_y_valid) begin
+      cm_c[cm_cnt[2:0] * 32 +: 32] <= cm_y;
     end
   end
 
@@ -527,10 +498,8 @@ module dma_gacc (
   end
 
   logic [127:0] mac_data;
-  logic [5:0]   rd_idx;
 
   assign mac_data = rbuf[{rb_mac, mac_b}];
-  assign rd_idx   = {mac_t, mac_b};
 
   function automatic logic [31:0] i8_to_f32(input logic [7:0] q);
     logic [7:0]  m;
@@ -581,11 +550,7 @@ module dma_gacc (
     for (int l = 0; l < Nl; l++) begin
       xf[l] <= i8_to_f32(md_r[8 * l +: 8]);
     end
-    cs_d        <= cs;
-    rd_idx_d[0] <= rd_idx;
-    for (int i = 1; i <= LMul; i++) begin
-      rd_idx_d[i] <= rd_idx_d[i-1];
-    end
+    cs_d <= cs;
   end
 
   logic [Nl-1:0] prod_valid, sum_valid;
@@ -633,7 +598,7 @@ module dma_gacc (
   logic [Nl*32-1:0] acc_wd_w, acc_rd_m, acc_rd;
   logic [5:0]       acc_ra;
 
-  assign acc_ra = flushing ? fl_idx : rd_idx_d[LMul - 1];
+  assign acc_ra = flushing ? fl_idx : {p_t[LMul - 1], p_b[LMul - 1]};
 
   always_comb begin
     for (int l = 0; l < Nl; l++) begin
@@ -730,6 +695,6 @@ module dma_gacc (
 
   logic unused_gacc;
 
-  assign unused_gacc = ^{cm_y_valid, pf_count, acc_keep, prod_valid, sum_valid};
+  assign unused_gacc = ^{pf_count, prod_valid, sum_valid};
 
 endmodule

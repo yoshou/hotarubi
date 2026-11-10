@@ -172,6 +172,19 @@ TEST(SequencerTest, SoftResetStopsTheStream) {
   EXPECT_EQ(bench.ReadReg(kRegStatus), kStatusHalted | kStatusIbufEmpty);
 }
 
+TEST(SequencerTest, SoftResetDuringAFetchLeavesTheIbufEmpty) {
+  NpuBench bench(69);
+  std::vector<Instruction> program(48, Signal(1, 0));
+  program.front() = WaitHost(1);
+  bench.LoadProgram(program, NpuBench::kProgramBase);
+  bench.Start(NpuBench::kProgramBase, static_cast<uint32_t>(program.size()));
+  bench.WriteReg(kRegCtrl, 2);
+  for (int i = 0; i < 1000; ++i) {
+    bench.Tick();
+  }
+  EXPECT_EQ(bench.ReadReg(kRegStatus), kStatusIbufEmpty);
+}
+
 TEST(SequencerTest, BusyCountersFollowEngines) {
   NpuBench bench(68);
   const std::vector<Instruction> program = {

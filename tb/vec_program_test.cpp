@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -58,23 +59,28 @@ struct Pass {
   uint32_t rimm = 0;
   uint32_t rimm2 = 0;
   bool x2_en = false;
-  uint32_t wx = 0;
-  uint32_t wx2 = 0;
-  uint32_t wd = 0;
+  uint32_t mg = 0;
+  uint32_t ms = 0;
+  uint32_t mx = 0;
+  uint32_t mx2 = 0;
+  uint32_t md = 0;
   uint32_t pa = 0;
   uint32_t c0 = 0;
   uint32_t b = 0;
   uint32_t nl = 0;
-  uint32_t c1 = 0;
-  bool neg_c1 = false;
+  uint32_t po = 0;
+  bool pv = false;
   bool mask_en = false;
   uint32_t red = 0;
   uint32_t wr = 1;
-  uint32_t sc = 0;
+  uint32_t sf = 0;
+  bool st = false;
+  bool srn = false;
+  bool seps = false;
   uint32_t px = 0;
-  uint32_t pcol = 0;
   uint32_t cmp = 0;
-  uint32_t cmp_src = 0;
+  uint32_t cl = 0;
+  bool cr = false;
   bool cmp_int = false;
   uint32_t sel = 0;
   uint32_t ialu = 0;
@@ -98,31 +104,36 @@ Instruction Encode(const Pass& p) {
       .Set(84, 5, p.rimm)
       .Set(79, 5, p.rimm2)
       .Set(78, 1, p.x2_en ? 1 : 0)
-      .Set(76, 2, p.wx)
-      .Set(74, 2, p.wx2)
-      .Set(72, 2, p.wd)
-      .Set(70, 2, p.pa)
-      .Set(66, 3, p.c0)
-      .Set(63, 3, p.b)
-      .Set(61, 2, p.nl)
-      .Set(59, 2, p.c1)
-      .Set(58, 1, p.neg_c1 ? 1 : 0)
-      .Set(57, 1, p.mask_en ? 1 : 0)
-      .Set(55, 2, p.red)
-      .Set(53, 2, p.wr)
-      .Set(50, 3, p.sc)
-      .Set(47, 3, p.px)
-      .Set(41, 3, p.pcol)
-      .Set(38, 3, p.cmp)
-      .Set(36, 2, p.cmp_src)
-      .Set(35, 1, p.cmp_int ? 1 : 0)
-      .Set(32, 3, p.sel)
-      .Set(29, 3, p.ialu)
-      .Set(28, 1, p.dst_s1 ? 1 : 0)
-      .Set(27, 1, p.c0_pred ? 1 : 0)
-      .Set(25, 1, p.x_s1 ? 1 : 0)
-      .Set(23, 2, p.ctx)
-      .Set(21, 2, p.rm);
+      .Set(76, 2, p.mg)
+      .Set(74, 2, p.ms)
+      .Set(72, 2, p.mx)
+      .Set(70, 2, p.mx2)
+      .Set(68, 2, p.md)
+      .Set(66, 2, p.pa)
+      .Set(63, 3, p.c0)
+      .Set(60, 3, p.b)
+      .Set(58, 2, p.nl)
+      .Set(56, 2, p.po)
+      .Set(55, 1, p.pv ? 1 : 0)
+      .Set(54, 1, p.mask_en ? 1 : 0)
+      .Set(52, 2, p.red)
+      .Set(50, 2, p.wr)
+      .Set(47, 3, p.sf)
+      .Set(46, 1, p.st ? 1 : 0)
+      .Set(45, 1, p.srn ? 1 : 0)
+      .Set(44, 1, p.seps ? 1 : 0)
+      .Set(24, 20, p.px)
+      .Set(21, 3, p.cmp)
+      .Set(19, 2, p.cl)
+      .Set(18, 1, p.cr ? 1 : 0)
+      .Set(17, 1, p.cmp_int ? 1 : 0)
+      .Set(14, 3, p.sel)
+      .Set(11, 3, p.ialu)
+      .Set(10, 1, p.c0_pred ? 1 : 0)
+      .Set(9, 1, p.x_s1 ? 1 : 0)
+      .Set(8, 1, p.dst_s1 ? 1 : 0)
+      .Set(6, 2, p.ctx)
+      .Set(4, 2, p.rm);
   return word;
 }
 
@@ -489,10 +500,9 @@ constexpr uint32_t kCmpEq = 3;
 constexpr uint32_t kCmpNe = 4;
 constexpr uint32_t kCmpGt = 5;
 constexpr uint32_t kCmpGe = 6;
-constexpr uint32_t kSrcImm2 = 0;
-constexpr uint32_t kSrcX2 = 1;
-constexpr uint32_t kSrcLane = 2;
-constexpr uint32_t kSrcX2Imm2 = 3;
+constexpr uint32_t kLeftX2 = 1;
+constexpr uint32_t kLeftColumn = 2;
+constexpr uint32_t kLeftPosition = 3;
 constexpr uint32_t kSelZero = 1;
 constexpr uint32_t kSelX2 = 2;
 constexpr uint32_t kSelImm = 3;
@@ -503,7 +513,7 @@ constexpr uint32_t kC0Imm = 4;
 constexpr uint32_t kBRs1 = 3;
 constexpr uint32_t kBPre = 5;
 constexpr uint32_t kRedMax = 2;
-constexpr uint32_t kScMax = 5;
+constexpr uint32_t kSfIdentity = 1;
 
 bool Relation(uint32_t cmp, bool integer, uint32_t a, uint32_t b) {
   bool less = false;
@@ -618,7 +628,6 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
        [](uint32_t a, uint32_t, uint32_t, uint32_t) { return kImm - a; }},
       {with([](Pass& p) {
          p.cmp = kCmpLt;
-         p.cmp_src = kSrcImm2;
          p.sel = kSelZero;
        }),
        [](uint32_t a, uint32_t, uint32_t, uint32_t) {
@@ -627,7 +636,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
       {with([](Pass& p) {
          p.x2_en = true;
          p.cmp = kCmpGe;
-         p.cmp_src = kSrcX2;
+         p.cr = true;
          p.sel = kSelX2;
        }),
        [](uint32_t a, uint32_t b, uint32_t, uint32_t) {
@@ -637,7 +646,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
          p.x2_en = true;
          p.rimm2 = kRegEqual;
          p.cmp = kCmpEq;
-         p.cmp_src = kSrcX2Imm2;
+         p.cl = kLeftX2;
          p.cmp_int = true;
          p.sel = kSelNull;
          p.ialu = 4;
@@ -648,8 +657,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
       {with([](Pass& p) {
          p.rimm2 = kRegThirteen;
          p.cmp = kCmpLt;
-         p.cmp_src = kSrcLane;
-         p.cmp_int = true;
+         p.cl = kLeftPosition;
          p.sel = kSelImm;
        }),
        [](uint32_t a, uint32_t, uint32_t e, uint32_t) {
@@ -658,7 +666,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
       {with([](Pass& p) {
          p.rimm2 = kRegFour;
          p.cmp = kCmpGt;
-         p.cmp_src = kSrcLane;
+         p.cl = kLeftColumn;
          p.sel = kSelRs1;
        }),
        [](uint32_t a, uint32_t, uint32_t e, uint32_t) {
@@ -667,7 +675,6 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
       {with([](Pass& p) {
          p.rimm2 = kRegEqual;
          p.cmp = kCmpNe;
-         p.cmp_src = kSrcImm2;
          p.cmp_int = true;
          p.sel = kSelRs1;
          p.x2_en = true;
@@ -681,7 +688,6 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
          p.c0 = kC0Imm;
          p.c0_pred = true;
          p.cmp = kCmpLe;
-         p.cmp_src = kSrcImm2;
          p.ialu = 1;
        }),
        [](uint32_t a, uint32_t, uint32_t, uint32_t) {
@@ -714,7 +720,7 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
                   .rn8 = kRegOne,
                   .red = kRedMax,
                   .wr = 0,
-                  .sc = kScMax}),
+                  .sf = kSfIdentity}),
   };
   FbufWord rs1_word{};
   rs1_word.fill(kRs1Value);
@@ -750,6 +756,25 @@ TEST(VecProgramTest, IntegerPathPredicatesAndSelection) {
             << "case " << i << " word " << w << " element " << e;
       }
     }
+  }
+}
+
+uint32_t PermutationCode(uint32_t px, uint32_t pcol) {
+  switch (px) {
+    case 1:
+      return (((pcol >> 2) & 1U) != 0 ? 7U : 6U) << 8 |
+             (((pcol >> 1) & 1U) != 0 ? 7U : 6U) << 4 |
+             ((pcol & 1U) != 0 ? 7U : 6U);
+    case 2:
+      return 8U << 12;
+    case 3:
+      return 8U << 16;
+    case 4:
+      return (4U << 16) | (5U << 12) | (1U << 8) | (2U << 4) | 3U;
+    case 5:
+      return (2U << 16) | (3U << 12) | (1U << 8);
+    default:
+      return 0;
   }
 }
 
@@ -804,8 +829,7 @@ TEST(VecProgramTest, PermutationsAndWordMappings) {
                                   .rq = kRegOne,
                                   .rnw = kRegTwo,
                                   .rn8 = kRegTwo,
-                                  .px = px,
-                                  .pcol = pcol}));
+                                  .px = PermutationCode(px, pcol)}));
     program.push_back(SaluImm(kSaluAdd, kRegOut, kRegOut, 2));
     for (uint32_t w = 0; w < 2; ++w) {
       FbufWord word{};
@@ -820,7 +844,9 @@ TEST(VecProgramTest, PermutationsAndWordMappings) {
                                 .rq = kRegTwo,
                                 .rnw = kRegFour,
                                 .rn8 = kRegSixteen,
-                                .wx = 2}));
+                                .mg = 2,
+                                .ms = 3,
+                                .mx = 2}));
   program.push_back(SaluImm(kSaluAdd, kRegOut, kRegOut, 32));
   std::vector<FbufWord> mapped(32);
   for (uint32_t q = 0; q < 2; ++q) {
@@ -835,8 +861,8 @@ TEST(VecProgramTest, PermutationsAndWordMappings) {
                                 .rnw = kRegFour,
                                 .rn8 = kRegSixteen,
                                 .x2_en = true,
-                                .wx2 = 1,
-                                .wd = 3,
+                                .ms = 2,
+                                .md = 1,
                                 .c0 = kC0X2,
                                 .dst_s1 = true,
                                 .x_s1 = true}));
@@ -927,9 +953,25 @@ TEST(VecProgramTest, RowScalarsAndReductions) {
                     .red = 1,
                     .wr = 0};
   const auto pass_with = [&](uint32_t red, uint32_t sc, uint32_t b) {
+    struct Scalar {
+      uint32_t sf;
+      bool st;
+      bool srn;
+      bool seps;
+    };
+    const std::array<Scalar, 6> scalars = {
+        {{.sf = 0, .st = false, .srn = false, .seps = false},
+         {.sf = 2, .st = true, .srn = true, .seps = false},
+         {.sf = 4, .st = false, .srn = true, .seps = true},
+         {.sf = 2, .st = true, .srn = false, .seps = false},
+         {.sf = 3, .st = false, .srn = false, .seps = false},
+         {.sf = 1, .st = false, .srn = false, .seps = false}}};
     Pass pass = reduce;
     pass.red = red;
-    pass.sc = sc;
+    pass.sf = scalars.at(sc).sf;
+    pass.st = scalars.at(sc).st;
+    pass.srn = scalars.at(sc).srn;
+    pass.seps = scalars.at(sc).seps;
     pass.b = b;
     return Encode(pass);
   };
@@ -1064,7 +1106,11 @@ TEST(VecProgramTest, FractionTable) {
   }
 }
 
-void CheckTransposeProgram(uint32_t rows, bool zip4) {
+uint32_t RotatedColumn(uint32_t column, uint32_t rotation) {
+  return ((column >> rotation) | (column << (3 - rotation))) & 7U;
+}
+
+void CheckTransposeProgram(uint32_t rows, uint32_t rotation) {
   std::mt19937 rng(913 + rows);
   std::vector<FbufWord> input(size_t{8} * rows);
   for (auto& word : input) {
@@ -1081,7 +1127,7 @@ void CheckTransposeProgram(uint32_t rows, bool zip4) {
       .Set(99, 5, 11)
       .Set(94, 5, kRegN8)
       .Set(89, 5, kRegRowsQ)
-      .Set(88, 1, zip4 ? 1 : 0);
+      .Set(87, 2, rotation);
   const auto output =
       RunProgram({.program = {SaluImm(kSaluMov, 11, 0, 1), transpose, Ret()},
                   .args = {.src = 0, .dst = 2048, .rows_q = rows, .n8 = 8},
@@ -1095,7 +1141,7 @@ void CheckTransposeProgram(uint32_t rows, bool zip4) {
     for (uint32_t q = 0; q < rows; ++q) {
       for (uint32_t t = 0; t < 4; ++t) {
         for (uint32_t field = 0; field < 8; ++field) {
-          const uint32_t row = zip4 ? (field / 2) + (4 * (field % 2)) : field;
+          const uint32_t row = RotatedColumn(field, rotation);
           EXPECT_EQ(output[(sample * rows) + q][(t * 8) + field],
                     input[(q * 8) + row][(t * 8) + sample]);
         }
@@ -1104,15 +1150,15 @@ void CheckTransposeProgram(uint32_t rows, bool zip4) {
   }
 }
 
-TEST(VecProgramTest, Transpose8PreservesEveryBitInBothPackModes) {
-  for (const bool zip4 : {false, true}) {
+TEST(VecProgramTest, Transpose8PreservesEveryBitInEveryRotation) {
+  for (const uint32_t rotation : {0U, 1U, 2U}) {
     for (const uint32_t rows : {1U, 3U, 32U}) {
-      CheckTransposeProgram(rows, zip4);
+      CheckTransposeProgram(rows, rotation);
     }
   }
 }
 
-void CheckStridedTransposeProgram(bool zip4) {
+void CheckStridedTransposeProgram(uint32_t rotation) {
   std::mt19937 rng(947);
   std::vector<FbufWord> input(377);
   for (auto& word : input) {
@@ -1129,8 +1175,7 @@ void CheckStridedTransposeProgram(bool zip4) {
     for (uint32_t row = 0; row < 8; ++row) {
       for (uint32_t t = 0; t < 4; ++t) {
         for (uint32_t column = 0; column < 8; ++column) {
-          const uint32_t source_row =
-              zip4 ? (column / 2) + (4 * (column % 2)) : column;
+          const uint32_t source_row = RotatedColumn(column, rotation);
           expected.at((q * 259) + (row * 19)).at((t * 8) + column) =
               input.at((q * 257) + (source_row * 17)).at((t * 8) + row);
         }
@@ -1146,7 +1191,7 @@ void CheckStridedTransposeProgram(bool zip4) {
       .Set(99, 5, 12)
       .Set(94, 5, 14)
       .Set(89, 5, 13)
-      .Set(88, 1, zip4 ? 1 : 0);
+      .Set(87, 2, rotation);
   const auto output = RunProgram(
       {.program = {SaluImm(kSaluMov, 11, 0, 17), SaluImm(kSaluMov, 12, 0, 259),
                    SaluImm(kSaluMov, 13, 0, 19), SaluImm(kSaluMov, 14, 0, 257),
@@ -1161,11 +1206,12 @@ void CheckStridedTransposeProgram(bool zip4) {
 }
 
 TEST(VecProgramTest, Transpose8UsesIndependentTwelveBitStrides) {
-  CheckStridedTransposeProgram(false);
-  CheckStridedTransposeProgram(true);
+  CheckStridedTransposeProgram(0);
+  CheckStridedTransposeProgram(1);
+  CheckStridedTransposeProgram(2);
 }
 
-TEST(VecProgramTest, Transpose8ChangesPackModeBetweenConsecutiveInstructions) {
+TEST(VecProgramTest, Transpose8ChangesRotationBetweenConsecutiveInstructions) {
   std::mt19937 generator(967);
   std::vector<FbufWord> input(24);
   for (auto& word : input) {
@@ -1178,11 +1224,11 @@ TEST(VecProgramTest, Transpose8ChangesPackModeBetweenConsecutiveInstructions) {
     for (uint32_t t = 0; t < 4; ++t) {
       for (uint32_t column = 0; column < 8; ++column) {
         expected[word][(t * 8) + column] =
-            input[word][(t * 8) + (column / 2) + (4 * (column % 2))];
+            input[word][(t * 8) + RotatedColumn(column, 1)];
       }
     }
   }
-  const auto transpose = [](uint32_t src, uint32_t dst, bool zip4) {
+  const auto transpose = [](uint32_t src, uint32_t dst, uint32_t rotation) {
     Instruction instruction;
     instruction.Set(124, 4, 7)
         .Set(119, 5, src)
@@ -1192,13 +1238,13 @@ TEST(VecProgramTest, Transpose8ChangesPackModeBetweenConsecutiveInstructions) {
         .Set(99, 5, 12)
         .Set(94, 5, 12)
         .Set(89, 5, 11)
-        .Set(88, 1, zip4 ? 1 : 0);
+        .Set(87, 2, rotation);
     return instruction;
   };
   const auto output = RunProgram(
       {.program = {SaluImm(kSaluMov, 11, 0, 1), SaluImm(kSaluMov, 12, 0, 8),
-                   SaluImm(kSaluMov, 13, 0, 1024), transpose(1, 13, false),
-                   transpose(13, 3, true), Ret()},
+                   SaluImm(kSaluMov, 13, 0, 1024), transpose(1, 13, 0),
+                   transpose(13, 3, 1), Ret()},
        .args = {.src = 0, .dst = 2048, .rows_q = 3},
        .fbuf = {{0, input}},
        .pbuf = {},

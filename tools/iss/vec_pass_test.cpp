@@ -100,13 +100,25 @@ bool Holds(const CompareCase& c, uint32_t x, uint32_t x2, uint32_t position) {
   return Relation(c.cmp, Order(left, right));
 }
 
-uint32_t PostExpected(uint32_t c1, bool negate, uint32_t x, uint32_t x2) {
-  if (c1 == 1) {
-    return reference::Add(x, negate ? x2 ^ 0x80000000U : x2);
+uint32_t CompareLeft(const CompareCase& c) {
+  if (c.source == 3) {
+    return 1;
   }
-  return reference::Add(reference::RowMax(std::vector<uint32_t>{
-                            reference::Add(x, 0), negate ? 0U : x2}),
-                        0);
+  if (c.source == 2) {
+    return c.integer != 0 ? 3 : 2;
+  }
+  return 0;
+}
+
+uint32_t PostExpected(uint32_t op, uint32_t c1, uint32_t x) {
+  if (op == 0) {
+    return reference::Add(x, c1);
+  }
+  if (op == 1) {
+    return reference::Add(x, c1 ^ 0x80000000U);
+  }
+  return reference::Add(
+      reference::RowMax(std::vector<uint32_t>{reference::Add(x, 0), c1}), 0);
 }
 
 struct RowExpectation {
@@ -184,6 +196,24 @@ class VecPassTest : public testing::Test {
     return memories_.fbuf.at(word).at(element);
   }
 
+  void RunCompare(const CompareCase& c, const PassFields& row_max) {
+    PassFields pass = Copy();
+    pass.rx2 = kSrc2;
+    pass.x2_en = 1;
+    pass.rimm = kR12;
+    pass.rimm2 = kR11;
+    pass.cmp = c.cmp;
+    pass.cl = CompareLeft(c);
+    pass.cr = c.source == 1 ? 1U : 0U;
+    pass.cmp_int = c.integer;
+    pass.sel = c.sel;
+    Run({encoding::SaluImm(12, kR11, 0, c.imm2),
+         encoding::SaluImm(12, kR12, 0, 0x5A5A5A5A),
+         encoding::SaluImm(12, kR13, 0, 50), encoding::SaluImm(12, kR14, 0, 1),
+         encoding::Pass(row_max), encoding::Pass(pass), encoding::Ret()},
+        {0, 10}, 100, 1, 4);
+  }
+
   void CheckSelect(const CompareCase& c,
                    const std::array<uint32_t, kTokens>& rs1) const {
     for (uint32_t w = 0; w < 4; ++w) {
@@ -241,35 +271,37 @@ class VecPassTest : public testing::Test {
 };
 
 TEST_F(VecPassTest, PermutesTokensAndColumns) {
-  const auto source = [](uint32_t px, uint32_t position) -> uint32_t {
-    const uint32_t t = position / 8;
-    const uint32_t l = position % 8;
-    switch (px) {
-      case 1:
-        return (t * 8) + 5;
-      case 2:
-        return ((t ^ 1U) * 8) + l;
-      case 3:
-        return ((t ^ 2U) * 8) + l;
-      case 4:
-        return ((position % 4) * 8) + (position / 4);
-      case 5:
-        return (((position / 4) % 4) * 8) + (position % 4) +
-               (4 * (position / 16));
-      default:
-        return position;
-    }
+  struct PermutationCase {
+    uint32_t px;
+    uint32_t (*source)(uint32_t);
   };
-  for (uint32_t px = 0; px < 8; ++px) {
+  const std::array<PermutationCase, 8> cases = {{
+      {.px = 0, .source = [](uint32_t p) { return p; }},
+      {.px = (7U << 8) | (6U << 4) | 7U,
+       .source = [](uint32_t p) { return (p & ~7U) + 5; }},
+      {.px = 8U << 12, .source = [](uint32_t p) { return p ^ 8U; }},
+      {.px = 8U << 16, .source = [](uint32_t p) { return p ^ 16U; }},
+      {.px = (4U << 16) | (5U << 12) | (1U << 8) | (2U << 4) | 3U,
+       .source = [](uint32_t p) { return ((p % 4) * 8) + (p / 4); }},
+      {.px = (2U << 16) | (3U << 12) | (1U << 8),
+       .source =
+           [](uint32_t p) {
+             return (((p / 4) % 4) * 8) + (p % 4) + (4 * (p / 16));
+           }},
+      {.px = (8U << 8) | (8U << 4) | 8U,
+       .source = [](uint32_t p) { return p ^ 7U; }},
+      {.px = (7U << 16) | (7U << 12),
+       .source = [](uint32_t p) { return 24 + (p % 8); }},
+  }};
+  for (const PermutationCase& c : cases) {
     Fill(0, 6);
     PassFields pass = Copy();
-    pass.px = px;
-    pass.pcol = 5;
+    pass.px = c.px;
     Run({encoding::Pass(pass), encoding::Ret()}, {0, 0}, 100, 2, 3);
     for (uint32_t w = 0; w < 6; ++w) {
       for (uint32_t e = 0; e < kFbufElements; ++e) {
-        ASSERT_EQ(After(100 + w, e), Before(w, source(px < 6 ? px : 0, e)))
-            << "px " << px << " word " << w << " element " << e;
+        ASSERT_EQ(After(100 + w, e), Before(w, c.source(e)))
+            << "px " << c.px << " word " << w << " element " << e;
       }
     }
   }
@@ -296,7 +328,7 @@ TEST_F(VecPassTest, ComparesAndSelects) {
   row_max.rn8 = kR14;
   row_max.wr = 0;
   row_max.red = 2;
-  row_max.sc = 5;
+  row_max.sf = 1;
   for (uint32_t cmp = 1; cmp <= 7; ++cmp) {
     for (uint32_t source = 0; source < 4; ++source) {
       for (uint32_t integer = 0; integer < 2; ++integer) {
@@ -305,21 +337,7 @@ TEST_F(VecPassTest, ComparesAndSelects) {
                             .integer = integer,
                             .sel = 1 + ((cmp + source + integer) % 5),
                             .imm2 = source == 2 ? 13 : threshold};
-        PassFields pass = Copy();
-        pass.rx2 = kSrc2;
-        pass.x2_en = 1;
-        pass.rimm = kR12;
-        pass.rimm2 = kR11;
-        pass.cmp = c.cmp;
-        pass.cmp_src = c.source;
-        pass.cmp_int = c.integer;
-        pass.sel = c.sel;
-        Run({encoding::SaluImm(12, kR11, 0, c.imm2),
-             encoding::SaluImm(12, kR12, 0, 0x5A5A5A5A),
-             encoding::SaluImm(12, kR13, 0, 50),
-             encoding::SaluImm(12, kR14, 0, 1), encoding::Pass(row_max),
-             encoding::Pass(pass), encoding::Ret()},
-            {0, 10}, 100, 1, 4);
+        RunCompare(c, row_max);
         CheckSelect(c, rs1);
       }
     }
@@ -379,34 +397,34 @@ TEST_F(VecPassTest, IntegerPathBypassesTheFloatingPointUnits) {
 
 TEST_F(VecPassTest, MapsWordIndicesAndStrides) {
   struct Case {
-    uint32_t wx;
-    uint32_t wd;
+    uint32_t mg;
+    uint32_t ms;
+    uint32_t mx;
+    uint32_t md;
     uint32_t x_s1;
     uint32_t dst_s1;
   };
-  const auto map = [](uint32_t mapping, uint32_t w) -> uint32_t {
-    const uint32_t h = (w >> 2) & 0xFU;
-    const uint32_t gg = w & 3U;
-    switch (mapping) {
-      case 1:
-        return (h * 8) + gg;
-      case 2:
-        return (h * 8) + 4 + gg;
-      case 3:
-        return 4 * w;
-      default:
-        return w;
+  const auto map = [](const Case& c, uint32_t mode, uint32_t w) -> uint32_t {
+    if (mode == 0) {
+      return w;
     }
+    const uint32_t group = 1U << c.mg;
+    const uint32_t mapped = ((w >> c.mg) << c.ms) + (w % group);
+    return mode == 2 ? mapped + group : mapped;
   };
-  for (const Case c : {Case{.wx = 1, .wd = 2, .x_s1 = 0, .dst_s1 = 0},
-                       Case{.wx = 2, .wd = 1, .x_s1 = 1, .dst_s1 = 0},
-                       Case{.wx = 3, .wd = 0, .x_s1 = 0, .dst_s1 = 1},
-                       Case{.wx = 0, .wd = 3, .x_s1 = 1, .dst_s1 = 1}}) {
+  for (const Case c :
+       {Case{.mg = 2, .ms = 3, .mx = 1, .md = 2, .x_s1 = 0, .dst_s1 = 0},
+        Case{.mg = 2, .ms = 3, .mx = 2, .md = 1, .x_s1 = 1, .dst_s1 = 0},
+        Case{.mg = 0, .ms = 2, .mx = 1, .md = 0, .x_s1 = 0, .dst_s1 = 1},
+        Case{.mg = 0, .ms = 2, .mx = 0, .md = 1, .x_s1 = 1, .dst_s1 = 1},
+        Case{.mg = 1, .ms = 2, .mx = 2, .md = 1, .x_s1 = 0, .dst_s1 = 0}}) {
     Fill(0, 200);
     PassFields pass = Copy();
     pass.rnw = kR11;
-    pass.wx = c.wx;
-    pass.wd = c.wd;
+    pass.mg = c.mg;
+    pass.ms = c.ms;
+    pass.mx = c.mx;
+    pass.md = c.md;
     pass.x_s1 = c.x_s1;
     pass.dst_s1 = c.dst_s1;
     Run({encoding::SaluImm(12, kR11, 0, 8), encoding::Pass(pass),
@@ -415,15 +433,15 @@ TEST_F(VecPassTest, MapsWordIndicesAndStrides) {
     std::vector<FbufWord> expected = before_;
     for (uint32_t q = 0; q < 3; ++q) {
       for (uint32_t w = 0; w < 8; ++w) {
-        const uint32_t in = (q * (c.x_s1 != 0 ? 1 : 40)) + map(c.wx, w);
+        const uint32_t in = (q * (c.x_s1 != 0 ? 1 : 40)) + map(c, c.mx, w);
         const uint32_t out =
-            1000 + (q * (c.dst_s1 != 0 ? 1 : 40)) + map(c.wd, w);
+            1000 + (q * (c.dst_s1 != 0 ? 1 : 40)) + map(c, c.md, w);
         expected.at(out) = before_.at(in);
       }
     }
     for (uint32_t w = 0; w < kFbufDepth; ++w) {
       ASSERT_EQ(memories_.fbuf.at(w), expected.at(w))
-          << "wx " << c.wx << " wd " << c.wd << " word " << w;
+          << "mg " << c.mg << " mx " << c.mx << " md " << c.md << " word " << w;
     }
   }
 }
@@ -474,20 +492,19 @@ TEST_F(VecPassTest, PostAddsAndTakesMaxima) {
   Fill(10, 2);
   memories_.fbuf.at(0).at(0) = 0x80000000;
   memories_.fbuf.at(10).at(0) = 0x00000000;
-  for (uint32_t c1 = 1; c1 < 3; ++c1) {
-    for (uint32_t negate = 0; negate < 2; ++negate) {
+  for (uint32_t op = 0; op < 3; ++op) {
+    for (uint32_t operand = 0; operand < 2; ++operand) {
       PassFields pass = Copy();
       pass.rx2 = kSrc2;
       pass.x2_en = 1;
-      pass.c1 = c1;
-      pass.neg_c1 = negate;
+      pass.po = op;
+      pass.pv = operand;
       Run({encoding::Pass(pass), encoding::Ret()}, {0, 10}, 100, 1, 2);
       for (uint32_t w = 0; w < 2; ++w) {
         for (uint32_t e = 0; e < kFbufElements; ++e) {
-          ASSERT_EQ(
-              After(100 + w, e),
-              PostExpected(c1, negate != 0, Before(w, e), Before(10 + w, e)))
-              << "c1 " << c1 << " negate " << negate;
+          const uint32_t c1 = operand != 0 ? Before(10 + w, e) : 0U;
+          ASSERT_EQ(After(100 + w, e), PostExpected(op, c1, Before(w, e)))
+              << "op " << op << " operand " << operand;
         }
       }
     }
@@ -543,8 +560,18 @@ TEST_F(VecPassTest, ReducesMaskedRowsIntoRowScalars) {
     pass.rimm = kR12;
     pass.rimm2 = kR11;
     pass.mask_en = 1;
+    const std::array<PassFields, 6> scalars = {
+        PassFields{},
+        PassFields{.sf = 2, .st = 1, .srn = 1},
+        PassFields{.sf = 4, .srn = 1, .seps = 1},
+        PassFields{.sf = 2, .st = 1},
+        PassFields{.sf = 3},
+        PassFields{.sf = 1}};
     pass.red = (sc == 3 || sc == 5) ? 2 : 1;
-    pass.sc = sc;
+    pass.sf = scalars.at(sc).sf;
+    pass.st = scalars.at(sc).st;
+    pass.srn = scalars.at(sc).srn;
+    pass.seps = scalars.at(sc).seps;
     if (sc == 2) {
       pass.b = 5;
     }
@@ -645,9 +672,11 @@ TEST_F(VecPassTest, ScalarMemoryInstructions) {
   PassFields negmax = Copy();
   negmax.wr = 0;
   negmax.red = 2;
-  negmax.sc = 3;
+  negmax.sf = 2;
+  negmax.st = 1;
   PassFields row_max = negmax;
-  row_max.sc = 5;
+  row_max.sf = 1;
+  row_max.st = 0;
   Run({encoding::SaluImm(12, kR11, 0, 4095), encoding::SaluImm(12, kR12, 0, 9),
        encoding::Smem({.op = 0, .rd = 20, .ra = kR11, .rb = kR12, .imm = 3}),
        encoding::Smem(
@@ -924,7 +953,7 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().overlaps, 0U);
   PassFields reduce = Copy();
   reduce.red = 1;
-  reduce.sc = 4;
+  reduce.sf = 3;
   PassFields scaled = second;
   scaled.b = 3;
   Run({encoding::Pass(reduce), encoding::Pass(scaled), encoding::Ret()},
@@ -933,7 +962,10 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().overlaps, 1U);
   EXPECT_EQ(engine_.Activity().context_stall_words,
             kReductionLatencyWords +
-                ((ScalarProgramCycles(kScalarPrograms.at(4)) + 3) / 4));
+                ((ScalarProgramCycles(RowScalarProgram(
+                      Reduction::kSum, ScalarFn::kReciprocal, false, false)) +
+                  3) /
+                 4));
   scaled.ctx = 1;
   Run({encoding::Pass(reduce), encoding::Pass(scaled), encoding::Ret()},
       {0, 50}, 100, 1, 4);

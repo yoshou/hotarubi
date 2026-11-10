@@ -129,14 +129,14 @@ class VecEngineTest : public testing::Test {
     }
   }
 
-  void ExpectTransposed(uint32_t dst, uint32_t tiles, bool zip4) const {
+  void ExpectTransposed(uint32_t dst, uint32_t tiles, uint32_t rotation) const {
     for (uint32_t q = 0; q < tiles; ++q) {
       for (uint32_t row = 0; row < 8; ++row) {
         const FbufWord& out = memories_.fbuf.at(dst + q + (row * tiles));
         for (uint32_t t = 0; t < 4; ++t) {
           for (uint32_t column = 0; column < 8; ++column) {
             const uint32_t source_row =
-                zip4 ? (column / 2) + (4 * (column % 2)) : column;
+                ((column >> rotation) | (column << (3 - rotation))) & 7U;
             ASSERT_EQ(out.at((t * 8) + column),
                       memories_.fbuf.at((q * 8) + source_row).at((t * 8) + row))
                 << "tile " << q << " row " << row;
@@ -160,7 +160,7 @@ TEST_F(VecEngineTest, TransposeProgramPermutesFourMatricesPerTile) {
       memories_.fbuf.at(word).at(i) = generator_();
     }
   }
-  for (const bool zip4 : {false, true}) {
+  for (const uint32_t rotation : {0U, 1U, 2U}) {
     Word128 transpose;
     encoding::Set(transpose, 124, 4, 7);
     encoding::Set(transpose, 119, 5, 1);
@@ -170,7 +170,7 @@ TEST_F(VecEngineTest, TransposeProgramPermutesFourMatricesPerTile) {
     encoding::Set(transpose, 99, 5, 11);
     encoding::Set(transpose, 94, 5, 5);
     encoding::Set(transpose, 89, 5, 4);
-    encoding::Set(transpose, 88, 1, zip4 ? 1 : 0);
+    encoding::Set(transpose, 87, 2, rotation);
     memories_.cbuf.at(kPc) = encoding::SaluImm(12, 11, 0, 1);
     memories_.cbuf.at(kPc + 1) = transpose;
     memories_.cbuf.at(kPc + 2) = encoding::Ret();
@@ -181,7 +181,7 @@ TEST_F(VecEngineTest, TransposeProgramPermutesFourMatricesPerTile) {
                      .n8 = 8,
                      .aux = kPc},
                     memories_);
-    ExpectTransposed(kDst, kTiles, zip4);
+    ExpectTransposed(kDst, kTiles, rotation);
     EXPECT_EQ(engine_.Activity().transposes, 1U);
     EXPECT_EQ(engine_.Activity().transpose_tiles, kTiles);
     EXPECT_EQ(engine_.Activity().salu, 1U);

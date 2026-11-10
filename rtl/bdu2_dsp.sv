@@ -22,7 +22,6 @@ module bdu2_dsp #(
   input  logic [31:0]         init0_i,
   input  logic [31:0]         init1_i,
   output logic                out_valid_o,
-  output logic [SelWidth-1:0] out_sel_o,
   output logic [TagWidth-1:0] out_tag_o,
   output logic [31:0]         out_acc0_o,
   output logic [31:0]         out_acc1_o
@@ -317,7 +316,6 @@ module bdu2_dsp #(
     acc_wa     <= s10;
     acc0_wd    <= y0;
     acc1_wd    <= y1;
-    out_sel_o  <= s10;
     out_tag_o  <= t10;
     out_acc0_o <= y0;
     out_acc1_o <= y1;

@@ -57,7 +57,6 @@ struct AccessSet {
   void Add(Mem mem, uint32_t address);
   void AddRange(Mem mem, uint32_t lo, uint32_t hi);
   void AddTable(Mem mem);
-  void ClearTables();
 };
 
 struct Conflict {

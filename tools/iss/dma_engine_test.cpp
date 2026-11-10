@@ -244,7 +244,7 @@ class RowFormatTest : public DmaEngineTest,
   void SetUp() override {
     const RowCase c = GetParam();
     mxint8_ = c.mem == kAbuf;
-    blocks_ = c.tok == 0 ? 1 : std::min(c.tok, 32U);
+    blocks_ = c.tok;
     size_ =
         mxint8_ ? (32 * blocks_) + (16 * ((blocks_ + 15) / 16)) : 128 * blocks_;
     words_ = mxint8_ ? blocks_ : 4 * blocks_;
@@ -356,8 +356,8 @@ INSTANTIATE_TEST_SUITE_P(
     DmaEngine, RowFormatTest,
     testing::Values(RowCase{.mem = kAbuf, .tok = 3, .indexed = false},
                     RowCase{.mem = kAbuf, .tok = 17, .indexed = false},
-                    RowCase{.mem = kAbuf, .tok = 0, .indexed = true},
-                    RowCase{.mem = kAbuf, .tok = 40, .indexed = true},
+                    RowCase{.mem = kAbuf, .tok = 1, .indexed = true},
+                    RowCase{.mem = kAbuf, .tok = 32, .indexed = true},
                     RowCase{.mem = kFbuf, .tok = 2, .indexed = false},
                     RowCase{.mem = kFbuf, .tok = 1, .indexed = true}));
 
@@ -502,7 +502,6 @@ class GatherTest : public DmaEngineTest {
   static constexpr uint32_t kRowBytes = (32 * kBlocks) + 16;
   static constexpr uint32_t kFeatureRows = 10;
   static constexpr uint32_t kFeatures = 0x10000;
-  static constexpr uint32_t kQuad = 5;
   static constexpr uint32_t kDst = 300;
 
   struct List {
@@ -510,7 +509,6 @@ class GatherTest : public DmaEngineTest {
     uint32_t slots = 0;
     uint32_t w_area = 0;
     uint32_t stride = 0;
-    uint32_t quad_words = 0;
   };
 
   uint32_t RandomFloat(uint32_t low) {
@@ -533,9 +531,7 @@ class GatherTest : public DmaEngineTest {
   [[nodiscard]] uint32_t Coefficient(const List& list, uint32_t s, uint32_t t,
                                      uint32_t b, uint32_t bw,
                                      uint32_t row) const {
-    const uint32_t w_word =
-        list.w_area +
-        (((b * list.stride) + (kQuad * list.quad_words) + (s / 8)) * 128);
+    const uint32_t w_word = list.w_area + (((b * list.stride) + (s / 8)) * 128);
     const uint32_t c = reference::Mul(
         static_cast<uint32_t>(Little(w_word + (4 * ((t * 8) + (s % 8))), 4)),
         bw);
@@ -551,10 +547,7 @@ class GatherTest : public DmaEngineTest {
   }
 
   void WriteList(const List& list) {
-    Put(list.offset,
-        Entry(list.w_area) | (uint64_t{list.stride} << 32) |
-            (uint64_t{list.quad_words} << 48),
-        8);
+    Put(list.offset, Entry(list.w_area) | (uint64_t{list.stride} << 32), 8);
     for (uint32_t i = 0; i < 0x2000; i += 4) {
       Put(list.w_area + i, RandomFloat(118), 4);
     }
@@ -595,27 +588,20 @@ class GatherTest : public DmaEngineTest {
 
 TEST_F(GatherTest, AccumulatesWeightedRows) {
   WriteFeatures();
-  const std::array<List, 2> lists = {{{.offset = 0x30000,
-                                       .slots = 12,
-                                       .w_area = 0x40000,
-                                       .stride = 4,
-                                       .quad_words = 2},
-                                      {.offset = 0x34000,
-                                       .slots = 3,
-                                       .w_area = 0x50000,
-                                       .stride = 1,
-                                       .quad_words = 1}}};
+  const std::array<List, 2> lists = {
+      {{.offset = 0x30000, .slots = 12, .w_area = 0x40000, .stride = 4},
+       {.offset = 0x34000, .slots = 3, .w_area = 0x50000, .stride = 1}}};
   for (const List& list : lists) {
     WriteList(list);
   }
   const std::vector<FbufWord> before = memories_.fbuf;
   DmaCommand first =
-      Load(0, lists.at(0).offset, kDst, lists.at(0).slots, kBlocks, kQuad);
+      Load(kFbuf, lists.at(0).offset, kDst, lists.at(0).slots, kBlocks, 0);
   first.mode = 3;
   Execute(first);
   ASSERT_EQ(memories_.fbuf, before);
   DmaCommand second =
-      Load(0, lists.at(1).offset, kDst, lists.at(1).slots, kBlocks, kQuad);
+      Load(kFbuf, lists.at(1).offset, kDst, lists.at(1).slots, kBlocks, 0);
   second.mode = 3;
   second.flags = 3;
   Execute(second);
@@ -632,11 +618,8 @@ TEST_F(GatherTest, AccumulatesWeightedRows) {
 
 TEST_F(GatherTest, ReadsCoefficientsOnlyForSlotGroupsWithRows) {
   WriteFeatures();
-  const List list{.offset = 0x30000,
-                  .slots = 24,
-                  .w_area = 0x40000,
-                  .stride = 4,
-                  .quad_words = 3};
+  const List list{
+      .offset = 0x30000, .slots = 24, .w_area = 0x40000, .stride = 4};
   WriteList(list);
   for (uint32_t s = 0; s < list.slots; ++s) {
     for (uint32_t e = 0; e < 16; ++e) {
@@ -646,7 +629,7 @@ TEST_F(GatherTest, ReadsCoefficientsOnlyForSlotGroupsWithRows) {
       Put(list.offset + 16 + (((s * 16) + e) * 8), entry, 4);
     }
   }
-  DmaCommand command = Load(0, list.offset, kDst, list.slots, kBlocks, kQuad);
+  DmaCommand command = Load(kFbuf, list.offset, kDst, list.slots, kBlocks, 0);
   command.mode = 3;
   Execute(command);
   const DmaActivity& activity = engine_.Activity();
@@ -656,6 +639,26 @@ TEST_F(GatherTest, ReadsCoefficientsOnlyForSlotGroupsWithRows) {
   EXPECT_EQ(activity.gather_row_beats, 8U * 16 * ((2 * kBlocks) + 1));
   EXPECT_EQ(activity.gather_fetches, 1U);
   EXPECT_EQ(activity.read_beats, 1U + (24 * 8) + (2 * kBlocks * 8));
+}
+
+using DmaEngineDeathTest = DmaEngineTest;
+
+TEST_F(DmaEngineDeathTest, RejectsATokenSizeOutsideTheFormat) {
+  DmaCommand command = Load(kAbuf, 0, 0, 1, 4, 0);
+  command.flags = 2;
+  command.tok = 0;
+  EXPECT_DEATH(Execute(command), "row format with tok = 0");
+  command.tok = 33;
+  EXPECT_DEATH(Execute(command), "row format with tok = 33");
+  command.mem = kFbuf;
+  command.tok = 9;
+  EXPECT_DEATH(Execute(command), "row format with tok = 9");
+}
+
+TEST_F(DmaEngineDeathTest, RejectsAGatherIntoAnotherMemory) {
+  DmaCommand command = Load(kAbuf, 0, 0, 1, 1, 0);
+  command.mode = 3;
+  EXPECT_DEATH(Execute(command), "GACC writes FBUF");
 }
 
 TEST_F(DmaEngineTest, EmptyTransfersChangeNothing) {

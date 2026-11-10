@@ -382,10 +382,10 @@ SparseHead::SparseHead(DdrImage& image, uint64_t base, HeadParams params,
     PutEntries(image, order[k], entries);
   }
   PutEntries(image, keep, std::vector<uint32_t>(cf.ntp, kNull));
-  const auto block = [&](uint32_t camera, uint32_t slots) {
+  const auto block = [&](uint32_t q, uint32_t camera, uint32_t slots) {
     std::vector<uint32_t> entries = {
-        Entry(base_, w) + (camera * (cf.scam / 8) * 8),
-        (wg & 0xFFFFU) | ((wq & 0xFFFFU) << 16), 0, 0};
+        Entry(base_, w) + (((camera * (cf.scam / 8)) + (q * wq)) * 8),
+        wg & 0xFFFFU, 0, 0};
     for (uint32_t i = 0; i < slots * 16; ++i) {
       entries.push_back(kNull);
       entries.push_back(0);
@@ -395,13 +395,13 @@ SparseHead::SparseHead(DdrImage& image, uint64_t base, HeadParams params,
   std::vector<uint32_t> all;
   for (uint32_t q = 0; q < nq; ++q) {
     for (uint32_t camera = 0; camera < ncam; ++camera) {
-      const std::vector<uint32_t> one = block(camera, cf.scam);
+      const std::vector<uint32_t> one = block(q, camera, cf.scam);
       all.insert(all.end(), one.begin(), one.end());
     }
   }
   PutEntries(image, lists, all);
   null_list = image.Alloc(tag + ".gacc_null", 16 + (8 * 16));
-  PutEntries(image, null_list, block(0, 1));
+  PutEntries(image, null_list, block(0, 0, 1));
   PlaceParams();
 }
 
@@ -1108,7 +1108,6 @@ void SparseHead::Deformable(const HeadLayer& layer, size_t index,
                         .dst = dst,
                         .slots = cf.scam,
                         .blocks = kKbD,
-                        .quad = q,
                         .acc = camera > 0,
                         .flush = camera == ncam - 1},
                        std::format("{} gacc q{} c{}", note, q, camera));
@@ -1118,7 +1117,6 @@ void SparseHead::Deformable(const HeadLayer& layer, size_t index,
                       .dst = dst,
                       .slots = 1,
                       .blocks = kKbD,
-                      .quad = 0,
                       .acc = false,
                       .flush = true},
                      std::format("{} gacc pad q{}", note, q));

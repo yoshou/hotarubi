@@ -11,7 +11,7 @@ module vec_transpose #(
   input  logic [11:0]   src_word_stride_i,
   input  logic [11:0]   dst_tile_stride_i,
   input  logic [11:0]   dst_word_stride_i,
-  input  logic          pack_zip4_i,
+  input  logic [1:0]    rotation_i,
   output logic          busy_o,
   output logic          rd_req_o,
   input  logic          rd_grant_i,
@@ -29,7 +29,8 @@ module vec_transpose #(
   logic [11:0] src_base, dst_base, read_addr;
   logic [11:0] src_tile_stride, src_word_stride, dst_tile_stride, dst_word_stride;
   logic [8:0] tiles, read_tile;
-  logic read_bank, write_bank, all_read, zip4;
+  logic       read_bank, write_bank, all_read;
+  logic [1:0] rotation;
   logic [2:0] read_row, write_row;
   logic running, read_fire, write_fire, load_output, output_valid;
   logic [1023:0] tile_data;
@@ -74,7 +75,11 @@ module vec_transpose #(
     for (int t = 0; t < 4; t++) begin
       for (int f = 0; f < 8; f++) begin
         logic [2:0] column;
-        column = zip4 ? {1'(f), 2'(f >> 1)} : 3'(f);
+        case (rotation)
+          2'd1:    column = {1'(f), 2'(f >> 1)};
+          2'd2:    column = {2'(f), 1'(f >> 2)};
+          default: column = 3'(f);
+        endcase
         tile_data[(t*8+f)*32 +: 32] =
             tile_read[3'(write_row + column)][t*32 +: 32];
       end
@@ -119,7 +124,7 @@ module vec_transpose #(
         src_word_stride <= src_word_stride_i;
         dst_tile_stride <= dst_tile_stride_i;
         dst_word_stride <= dst_word_stride_i;
-        zip4 <= pack_zip4_i;
+        rotation <= rotation_i;
         read_tile <= '0;
         read_row <= '0;
         write_row <= '0;

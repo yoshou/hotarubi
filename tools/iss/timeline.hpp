@@ -23,8 +23,7 @@ class Timeline {
       : start_cycles_(parameters.start_cycles) {}
 
   void Start();
-  Span Issue(Source source, uint32_t wait, uint64_t cost,
-             uint64_t earliest_start = 0);
+  Span Issue(Source source, uint32_t wait, uint64_t cost);
 
   [[nodiscard]] uint64_t EngineFree(Source source) const {
     return free_.at(static_cast<size_t>(source));

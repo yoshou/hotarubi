@@ -48,7 +48,6 @@ struct GaccArgs {
   uint32_t dst = 0;
   uint32_t slots = 0;
   uint32_t blocks = 1;
-  uint32_t quad = 0;
   bool acc = false;
   bool flush = true;
 };

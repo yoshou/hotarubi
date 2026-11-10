@@ -22,6 +22,7 @@ package vec_pkg;
   localparam int CtxW          = 2;
   localparam int CtxIdxW       = (NumContexts > 1) ? $clog2(NumContexts) : 1;
   localparam int AccAw         = CtxIdxW + 5;
+  localparam int CmdRegs       = 10;
 
   typedef enum logic [4:0] {
     OpAdd       = 5'd0,
@@ -58,13 +59,12 @@ package vec_pkg;
   } c0_e;
 
   typedef enum logic [2:0] {
-    BOne   = 3'd0,
-    BX2    = 3'd1,
-    BPbuf  = 3'd2,
-    BRs1   = 3'd3,
-    BImm   = 3'd4,
-    BPre   = 3'd5,
-    BLog2e = 3'd6
+    BOne  = 3'd0,
+    BX2   = 3'd1,
+    BPbuf = 3'd2,
+    BRs1  = 3'd3,
+    BImm  = 3'd4,
+    BPre  = 3'd5
   } b_e;
 
   typedef enum logic [1:0] {
@@ -94,30 +94,34 @@ package vec_pkg;
     WrFinal = 2'd3
   } wr_e;
 
+  typedef enum logic [1:0] {
+    PoAdd     = 2'd0,
+    PoSub     = 2'd1,
+    PoMax     = 2'd2,
+    PoSignfix = 2'd3
+  } po_e;
+
   typedef enum logic [2:0] {
-    ScNone     = 3'd0,
-    ScMean     = 3'd1,
-    ScRstd     = 3'd2,
-    ScNegmax   = 3'd3,
-    ScRecipsum = 3'd4,
-    ScMax      = 3'd5
-  } sc_e;
+    SfNone       = 3'd0,
+    SfIdentity   = 3'd1,
+    SfNegate     = 3'd2,
+    SfReciprocal = 3'd3,
+    SfRsqrt      = 3'd4
+  } sf_e;
+
+  typedef struct packed {
+    sf_e  fn;
+    logic rs0;
+    logic rn;
+    logic eps;
+    logic max;
+  } sc_t;
 
   typedef enum logic [1:0] {
-    MapNorm = 2'd0,
-    MapX1   = 2'd1,
-    MapX2   = 2'd2,
-    MapS4   = 2'd3
-  } rw_e;
-
-  typedef enum logic [2:0] {
-    PxNone   = 3'd0,
-    PxBcast  = 3'd1,
-    PxTswap1 = 3'd2,
-    PxTswap2 = 3'd3,
-    PxT4     = 3'd4,
-    PxT4b    = 3'd5
-  } px_e;
+    MmNone  = 2'd0,
+    MmGroup = 2'd1,
+    MmUpper = 2'd2
+  } mm_e;
 
   typedef enum logic [2:0] {
     CmpNone = 3'd0,
@@ -130,11 +134,11 @@ package vec_pkg;
   } cmp_e;
 
   typedef enum logic [1:0] {
-    CmpSrcImm2   = 2'd0,
-    CmpSrcX2     = 2'd1,
-    CmpSrcLane   = 2'd2,
-    CmpSrcX2Imm2 = 2'd3
-  } cs_e;
+    ClX        = 2'd0,
+    ClX2       = 2'd1,
+    ClColumn   = 2'd2,
+    ClPosition = 2'd3
+  } cl_e;
 
   typedef enum logic [2:0] {
     SelNone = 3'd0,
@@ -163,72 +167,85 @@ package vec_pkg;
   } ia_e;
 
   typedef struct packed {
-    logic [4:0] rx, rx2, rd, rq, rnw, rn8, rpb, rimm, rimm2;
-    logic       x2_en;
-    rw_e        wx, wx2, wd;
-    pa_e        pa;
-    c0_e        c0;
-    b_e         b;
-    nl_e        nl;
-    c1_e        c1;
-    logic       neg_c1;
-    logic       mask_en;
-    red_e       red;
-    wr_e        wr;
-    sc_e        sc;
-    px_e        px;
-    logic [2:0] pcol;
-    cmp_e       cmp;
-    cs_e        cmp_src;
-    logic       cmp_int;
-    sel_e       sel;
-    ia_e        ialu;
-    logic       dst_s1;
-    logic       x_s1;
-    logic       c0_pred;
+    logic [4:0]  rx, rx2, rd, rq, rnw, rn8, rpb, rimm, rimm2;
+    logic        x2_en;
+    logic [1:0]  mg, ms;
+    mm_e         mx, mx2, md;
+    pa_e         pa;
+    c0_e         c0;
+    b_e          b;
+    nl_e         nl;
+    po_e         po;
+    logic        pv;
+    logic        mask_en;
+    red_e        red;
+    wr_e         wr;
+    sf_e         sf;
+    logic        st;
+    logic        srn;
+    logic        seps;
+    logic [19:0] px;
+    cmp_e        cmp;
+    cl_e         cl;
+    logic        cr;
+    logic        cmp_int;
+    sel_e        sel;
+    ia_e         ialu;
+    logic        c0_pred;
+    logic        x_s1;
+    logic        dst_s1;
     logic [CtxW-1:0] ctx;
-    rm_e        rm;
+    rm_e         rm;
   } pass_t;
+
+  function automatic mm_e dec_map(input logic [1:0] v);
+    return (v == 2'd3) ? MmNone : mm_e'(v);
+  endfunction
 
   function automatic pass_t dec_pass(input logic [127:0] w);
     pass_t d;
     logic  unused_w;
-    unused_w = ^{w[127:124], w[69], w[46:44], w[26], w[20:0]};
-    d.rx        = w[123:119];
-    d.rx2       = w[118:114];
-    d.rd        = w[113:109];
-    d.rq        = w[108:104];
-    d.rnw       = w[103:99];
-    d.rn8       = w[98:94];
-    d.rpb       = w[93:89];
-    d.rimm      = w[88:84];
-    d.rimm2     = w[83:79];
-    d.x2_en     = w[78];
-    d.wx        = rw_e'(w[77:76]);
-    d.wx2       = rw_e'(w[75:74]);
-    d.wd        = rw_e'(w[73:72]);
-    d.pa        = pa_e'(w[71:70]);
-    d.c0        = c0_e'(w[68:66]);
-    d.b         = b_e'(w[65:63]);
-    d.nl        = nl_e'(w[62:61]);
-    d.c1        = c1_e'(w[60:59]);
-    d.neg_c1    = w[58];
-    d.mask_en   = w[57];
-    d.red       = red_e'(w[56:55]);
-    d.wr        = wr_e'(w[54:53]);
-    d.sc        = (w[52:50] > 3'd5) ? ScNone : sc_e'(w[52:50]);
-    d.px        = px_e'(w[49:47]);
-    d.pcol      = w[43:41];
-    d.cmp       = cmp_e'(w[40:38]);
-    d.cmp_src   = cs_e'(w[37:36]);
-    d.cmp_int   = w[35];
-    d.sel       = (w[34:32] > 3'd5) ? SelZero : sel_e'(w[34:32]);
-    d.ialu      = ia_e'(w[31:29]);
-    d.dst_s1    = w[28];
-    d.c0_pred   = w[27];
-    d.x_s1      = w[25];
-    d.ctx       = w[24:23];
-    d.rm        = (w[22:21] == 2'd3) ? RmNone : rm_e'(w[22:21]);
+    unused_w  = ^{w[127:124], w[3:0]};
+    d.rx      = w[123:119];
+    d.rx2     = w[118:114];
+    d.rd      = w[113:109];
+    d.rq      = w[108:104];
+    d.rnw     = w[103:99];
+    d.rn8     = w[98:94];
+    d.rpb     = w[93:89];
+    d.rimm    = w[88:84];
+    d.rimm2   = w[83:79];
+    d.x2_en   = w[78];
+    d.mg      = w[77:76];
+    d.ms      = w[75:74];
+    d.mx      = dec_map(w[73:72]);
+    d.mx2     = dec_map(w[71:70]);
+    d.md      = dec_map(w[69:68]);
+    d.pa      = (w[67:66] == 2'd3) ? PaNone : pa_e'(w[67:66]);
+    d.c0      = (w[65:63] > 3'd4) ? C0Zero : c0_e'(w[65:63]);
+    d.b       = (w[62:60] > 3'd5) ? BOne : b_e'(w[62:60]);
+    d.nl      = nl_e'(w[59:58]);
+    d.po      = po_e'(w[57:56]);
+    d.pv      = w[55];
+    d.mask_en = w[54];
+    d.red     = (w[53:52] == 2'd3) ? RedNone : red_e'(w[53:52]);
+    d.wr      = wr_e'(w[51:50]);
+    d.sf      = (w[49:47] > 3'd4) ? SfNone : sf_e'(w[49:47]);
+    d.st      = w[46];
+    d.srn     = w[45];
+    d.seps    = w[44];
+    d.px      = w[43:24];
+    d.cmp     = (w[23:21] == 3'd7) ? CmpNone : cmp_e'(w[23:21]);
+    d.cl      = cl_e'(w[20:19]);
+    d.cr      = w[18];
+    d.cmp_int = w[17];
+    d.sel     = (w[16:14] > 3'd5) ? SelZero : sel_e'(w[16:14]);
+    d.ialu    = ia_e'(w[13:11]);
+    d.c0_pred = w[10];
+    d.x_s1    = w[9];
+    d.dst_s1  = w[8];
+    d.ctx     = w[7:6];
+    d.rm      = (w[5:4] == 2'd3) ? RmNone : rm_e'(w[5:4]);
     return d;
   endfunction
 
@@ -273,10 +290,10 @@ package vec_pkg;
     logic [1:0]  qw;
     logic [1:0]  pa_slice;
     logic        pa_tile;
-    px_e         px;
-    logic [2:0]  pcol;
+    logic [19:0] px;
     cmp_e        cmp;
-    cs_e         cmp_src;
+    cl_e         cl;
+    logic        cr;
     logic        cmp_int;
     sel_e        sel;
     ia_e         ialu;
@@ -292,7 +309,6 @@ package vec_pkg;
   localparam logic [31:0] FpTwo          = 32'h40000000;
   localparam logic [31:0] FpHalf         = 32'h3F000000;
   localparam logic [31:0] FpOnePointFive = 32'h3FC00000;
-  localparam logic [31:0] FpLog2e        = 32'h3FB8AA3B;
   localparam logic [31:0] FpNegInf       = 32'hFF800000;
   localparam logic [31:0] NullEntry      = 32'hFFFFFFFF;
 

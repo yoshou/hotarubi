@@ -5,6 +5,8 @@ module dma_rowfmt (
   input  logic          cfg_unpack_i,
   input  logic          cfg_abuf_i,
   input  logic [5:0]    cfg_tok_i,
+  input  logic [6:0]    cfg_words_i,
+  input  logic [7:0]    cfg_beats_i,
   input  logic          in_valid_i,
   output logic          in_ready_o,
   input  logic [127:0]  in_data_i,
@@ -21,13 +23,11 @@ module dma_rowfmt (
 );
 
   logic [6:0] nw;
-  logic [1:0] nsc;
   logic [7:0] nd, tbeats;
 
-  assign nw     = cfg_abuf_i ? 7'(cfg_tok_i) : 7'({cfg_tok_i, 2'b00});
-  assign nsc    = cfg_abuf_i ? ((cfg_tok_i > 6'd16) ? 2'd2 : 2'd1) : 2'd0;
+  assign nw     = cfg_words_i;
   assign nd     = 8'({nw, 1'b0});
-  assign tbeats = nd + 8'(nsc);
+  assign tbeats = cfg_beats_i;
 
   logic          p_q;
   logic [1:0]    p_j;
@@ -45,7 +45,7 @@ module dma_rowfmt (
   logic [1:0]    u_j;
   logic [1151:0] u_word;
   logic [1:0]    ufull;
-  logic          v_q, v_busy, v_rd_v, v_last_d, v_is_data_d;
+  logic          v_q, v_rd_v, v_last_d, v_is_data_d;
   logic [1:0]    v_j, v_j_d;
   logic [7:0]    v_b, v_b_d;
   logic [2:0]    credit;
@@ -254,7 +254,6 @@ module dma_rowfmt (
       v_j      <= '0;
       v_b      <= '0;
       v_rd_v   <= 1'b0;
-      v_busy   <= 1'b0;
       v_last_d <= 1'b0;
       credit   <= 3'd4;
     end else begin
@@ -265,7 +264,6 @@ module dma_rowfmt (
         v_is_data_d <= v_is_data;
         v_b_d       <= v_b;
         v_j_d       <= v_j;
-        v_busy      <= 1'b1;
         if (v_b == tbeats - 1'b1) begin
           v_b <= '0;
           if (v_j == 2'd3) begin
@@ -279,8 +277,7 @@ module dma_rowfmt (
         end
       end
       if (v_rd_v && v_last_d) begin
-        v_busy <= 1'b0;
-        v_q    <= ~v_q;
+        v_q <= ~v_q;
       end
     end
   end
@@ -335,9 +332,8 @@ module dma_rowfmt (
     end
   end
 
-  assign idle_o = (full == 2'b00) && (ufull == 2'b00) && !o_busy && !o_pend && !out_v &&
-                  !u_busy && !v_busy && bf_empty && (p_b == 8'd0) && (p_j == 2'd0) &&
-                  (u_w == 7'd0);
+  assign idle_o = (full == 2'b00) && (ufull == 2'b00) && !out_v && !u_busy && bf_empty &&
+                  (p_b == 8'd0) && (p_j == 2'd0) && (u_w == 7'd0);
 
   logic unused_rowfmt;
 

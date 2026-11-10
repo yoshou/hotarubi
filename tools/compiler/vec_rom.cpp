@@ -42,6 +42,7 @@ constexpr uint32_t kTail = 19;
 constexpr uint32_t kGroupN8 = 20;
 constexpr uint32_t kGroupDstStep = 21;
 constexpr uint32_t kSlotBase = 22;
+constexpr uint32_t kLog2eRegister = 25;
 constexpr uint32_t kContexts = iss::kContexts;
 
 struct Slot {
@@ -146,7 +147,7 @@ void LayerNorm(vp::Assembler& a) {
   Grouped(a, {[](const Slot& s) {
                 vp::Pass sum = Quad(s);
                 sum.red = vp::Reduce::kSum;
-                sum.sc = vp::RowScalar::kMean;
+                sum.sc = vp::kMean;
                 return sum;
               },
               [](const Slot& s) {
@@ -155,7 +156,7 @@ void LayerNorm(vp::Assembler& a) {
                 squares.c0 = vp::C0::kRs0;
                 squares.b = vp::B::kPre;
                 squares.red = vp::Reduce::kSum;
-                squares.sc = vp::RowScalar::kRstd;
+                squares.sc = vp::kRstd;
                 return squares;
               },
               [](const Slot& s) {
@@ -196,7 +197,7 @@ void RmsNorm(vp::Assembler& a) {
                 squares.rimm = kImm;
                 squares.b = vp::B::kPre;
                 squares.red = vp::Reduce::kSum;
-                squares.sc = vp::RowScalar::kRstd;
+                squares.sc = vp::kRstd;
                 return squares;
               },
               [](const Slot& s) {
@@ -227,7 +228,7 @@ void Activation(vp::Assembler& a, bool multiply) {
   vp::Pass gate = Whole();
   gate.rx2 = kScratch;
   gate.b = vp::B::kX2;
-  gate.c1 = vp::C1::kSignfix;
+  gate.post = vp::Post::kSignfix;
   if (multiply) {
     gate.rd = kScratch;
     gate.wr = vp::Write::kFbuf;
@@ -244,26 +245,28 @@ void Activation(vp::Assembler& a, bool multiply) {
 }
 
 void Softmax(vp::Assembler& a) {
+  a.LoadImmediate(kLog2eRegister, vp::kLog2e);
   QuadPrologue(a);
   Grouped(a, {[](const Slot& s) {
                 vp::Pass maximum = Quad(s);
                 maximum.rimm2 = kAux;
                 maximum.mask_en = true;
                 maximum.red = vp::Reduce::kMax;
-                maximum.sc = vp::RowScalar::kNegMax;
+                maximum.sc = vp::kNegMax;
                 return maximum;
               },
               [](const Slot& s) {
                 vp::Pass exponent = Quad(s);
                 exponent.rd = s.scratch;
+                exponent.rimm = kLog2eRegister;
                 exponent.rimm2 = kAux;
                 exponent.c0 = vp::C0::kRs0;
-                exponent.b = vp::B::kLog2e;
+                exponent.b = vp::B::kImm;
                 exponent.nl = vp::Nl::kExp2;
                 exponent.mask_en = true;
                 exponent.red = vp::Reduce::kSum;
                 exponent.wr = vp::Write::kFbuf;
-                exponent.sc = vp::RowScalar::kRecipSum;
+                exponent.sc = vp::kRecipSum;
                 return exponent;
               },
               [](const Slot& s) {
@@ -280,36 +283,34 @@ void Rope(vp::Assembler& a) {
   a.Alu(vp::Salu::kShl, kHeadWords, kAux, 0, 2);
   a.Alu(vp::Salu::kShl, kTilePbuf, kRowsQ, 0, 2);
   a.Alu(vp::Salu::kAdd, kTilePbuf, kTilePbuf, kPBase);
-  const auto half = [](vp::WordMap x, vp::WordMap d) {
+  const auto half = [](vp::Map x, vp::Map d) {
     vp::Pass pass = Whole();
     pass.rd = kScratch;
     pass.rnw = kHeadWords;
     pass.rpb = kTilePbuf;
-    pass.wx = x;
-    pass.wd = d;
+    pass.map = {
+        .group = 2, .stride = 3, .x = x, .x2 = vp::Map::kNone, .dst = d};
     pass.pa = vp::Pbuf::kTile;
     pass.b = vp::B::kPbuf;
     pass.wr = vp::Write::kFbuf;
     return pass;
   };
-  const auto combine = [](vp::WordMap x, vp::WordMap d, bool negate) {
+  const auto combine = [](vp::Map x, vp::Map d, bool negate) {
     vp::Pass pass = Whole();
     pass.rx2 = kScratch;
     pass.rnw = kHeadWords;
     pass.rpb = kPBase;
-    pass.wx = x;
-    pass.wx2 = d;
-    pass.wd = d;
+    pass.map = {.group = 2, .stride = 3, .x = x, .x2 = d, .dst = d};
     pass.pa = vp::Pbuf::kTile;
     pass.b = vp::B::kPbuf;
-    pass.c1 = vp::C1::kX2;
-    pass.neg_c1 = negate;
+    pass.post = negate ? vp::Post::kSub : vp::Post::kAdd;
+    pass.post_x2 = true;
     return pass;
   };
-  a.Emit(half(vp::WordMap::kX2, vp::WordMap::kX1));
-  a.Emit(combine(vp::WordMap::kX1, vp::WordMap::kX1, true));
-  a.Emit(half(vp::WordMap::kX1, vp::WordMap::kX2));
-  a.Emit(combine(vp::WordMap::kX2, vp::WordMap::kX2, false));
+  a.Emit(half(vp::Map::kUpper, vp::Map::kGroup));
+  a.Emit(combine(vp::Map::kGroup, vp::Map::kGroup, true));
+  a.Emit(half(vp::Map::kGroup, vp::Map::kUpper));
+  a.Emit(combine(vp::Map::kUpper, vp::Map::kUpper, false));
   a.Ret();
 }
 
@@ -382,15 +383,15 @@ void Program(uint32_t op, vp::Assembler& a) {
     }
     case 14: {
       vp::Pass pass = Whole();
-      pass.c1 = vp::C1::kMax;
-      pass.neg_c1 = true;
+      pass.post = vp::Post::kMax;
       Elementwise(a, pass);
       break;
     }
     default: {
       vp::Pass pass = Whole();
       pass.rx2 = kSrc2;
-      pass.c1 = vp::C1::kMax;
+      pass.post = vp::Post::kMax;
+      pass.post_x2 = true;
       Elementwise(a, pass);
       break;
     }

@@ -159,7 +159,7 @@ module dma_t32 (
     end
   end
 
-  logic         a_v, b_v, c1_v, c2_v, a_zero, b_zero, c1_zero;
+  logic         a_v, b_v, c1_v, a_zero, b_zero, c1_zero;
   logic [6:0]   a_addr;
   logic [4:0]   a_t, b_t, c1_t;
   logic [3:0]   a_s, b_s;
@@ -186,7 +186,6 @@ module dma_t32 (
     for (int k = 0; k < 16; k++) begin
       c1_v16[k] <= $signed({b_d[k*8 +: 8], 8'b0}) >>> b_s;
     end
-    c2_v <= c1_v;
   end
 
   logic [1023:0] acc_hi [2], acc_lo [2];
@@ -220,9 +219,5 @@ module dma_t32 (
   assign out_cg_o    = {d_h, d_cnt[0]};
   assign out_lo_o    = d_cnt[1];
   assign idle_o      = (ds == DIdle) && (full == 2'b00) && (f_w == 3'd0) && (f_b == 4'd0);
-
-  logic unused_c2_v;
-
-  assign unused_c2_v = c2_v;
 
 endmodule

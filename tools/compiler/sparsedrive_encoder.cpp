@@ -1059,10 +1059,10 @@ std::vector<Instruction> StemQuantKernel() {
                   .rnw = 12,
                   .rn8 = 5,
                   .rimm2 = 28,
-                  .wx = vprog::WordMap::kS4,
+                  .map = {.stride = 2, .x = vprog::Map::kGroup},
                   .wr = vprog::Write::kAbuf,
                   .cmp = vprog::Cmp::kNe,
-                  .cmp_src = vprog::CmpSrc::kLane,
+                  .cmp_left = vprog::CmpLeft::kColumn,
                   .sel = vprog::Sel::kZero});
   assembler.Ret();
   return assembler.Words(vprog::kRomWords);

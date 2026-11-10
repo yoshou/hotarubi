@@ -49,11 +49,9 @@ module npu_trace #(
 
   logic        aw_p, w_p, b_p;
   logic [31:0] wptr;
-  logic        busy;
 
-  assign busy   = aw_p || w_p || b_p;
-  assign pop    = !busy && !empty && !clear_i;
-  assign idle_o = empty && !busy;
+  assign pop    = !b_p && !empty && !clear_i;
+  assign idle_o = empty && !b_p;
 
   assign m_axi_awaddr_o  = wptr;
   assign m_axi_awlen_o   = 8'd0;

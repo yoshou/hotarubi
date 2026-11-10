@@ -12,41 +12,44 @@ namespace hotarubi::compiler::vprog {
 namespace {
 
 TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
-  const Instruction word = EncodePass({.rx = 1,
-                                       .rx2 = 2,
-                                       .rd = 3,
-                                       .rq = 4,
-                                       .rnw = 5,
-                                       .rn8 = 6,
-                                       .rpb = 7,
-                                       .rimm = 8,
-                                       .rimm2 = 9,
-                                       .x2_en = true,
-                                       .wx = WordMap::kX1,
-                                       .wx2 = WordMap::kX2,
-                                       .wd = WordMap::kS4,
-                                       .pa = Pbuf::kTile,
-                                       .c0 = C0::kImm,
-                                       .b = B::kLog2e,
-                                       .nl = Nl::kTab01,
-                                       .c1 = C1::kSignfix,
-                                       .neg_c1 = true,
-                                       .mask_en = true,
-                                       .red = Reduce::kMax,
-                                       .wr = Write::kFinal,
-                                       .sc = RowScalar::kMax,
-                                       .px = Perm::kT4b,
-                                       .pcol = 6,
-                                       .cmp = Cmp::kGe,
-                                       .cmp_src = CmpSrc::kX2Imm2,
-                                       .cmp_int = true,
-                                       .sel = Sel::kRs1,
-                                       .ialu = Ialu::kRsub,
-                                       .dst_s1 = true,
-                                       .c0_pred = true,
-                                       .x_s1 = true,
-                                       .ctx = 1,
-                                       .rm = RowMask::kSet});
+  const Instruction word = EncodePass(
+      {.rx = 1,
+       .rx2 = 2,
+       .rd = 3,
+       .rq = 4,
+       .rnw = 5,
+       .rn8 = 6,
+       .rpb = 7,
+       .rimm = 8,
+       .rimm2 = 9,
+       .x2_en = true,
+       .map = {.group = 2,
+               .stride = 3,
+               .x = Map::kGroup,
+               .x2 = Map::kUpper,
+               .dst = Map::kGroup},
+       .pa = Pbuf::kTile,
+       .c0 = C0::kImm,
+       .b = B::kPre,
+       .nl = Nl::kTab01,
+       .post = Post::kSignfix,
+       .post_x2 = true,
+       .mask_en = true,
+       .red = Reduce::kMax,
+       .wr = Write::kFinal,
+       .sc = {.fn = ScalarFn::kRsqrt, .rs0 = true, .rn = true, .eps = true},
+       .px = 0xABCDE,
+       .cmp = Cmp::kGe,
+       .cmp_left = CmpLeft::kPosition,
+       .cmp_right_x2 = true,
+       .cmp_int = true,
+       .sel = Sel::kRs1,
+       .ialu = Ialu::kRsub,
+       .dst_s1 = true,
+       .c0_pred = true,
+       .x_s1 = true,
+       .ctx = 1,
+       .rm = RowMask::kSet});
   EXPECT_EQ(word.Get(124, 4), 0U);
   EXPECT_EQ(word.Get(119, 5), 1U);
   EXPECT_EQ(word.Get(114, 5), 2U);
@@ -58,35 +61,47 @@ TEST(VprogTest, PassPlacesEveryFieldAsSpecified) {
   EXPECT_EQ(word.Get(84, 5), 8U);
   EXPECT_EQ(word.Get(79, 5), 9U);
   EXPECT_EQ(word.Get(78, 1), 1U);
-  EXPECT_EQ(word.Get(76, 2), 1U);
-  EXPECT_EQ(word.Get(74, 2), 2U);
-  EXPECT_EQ(word.Get(72, 2), 3U);
+  EXPECT_EQ(word.Get(76, 2), 2U);
+  EXPECT_EQ(word.Get(74, 2), 3U);
+  EXPECT_EQ(word.Get(72, 2), 1U);
   EXPECT_EQ(word.Get(70, 2), 2U);
-  EXPECT_EQ(word.Get(69, 1), 0U);
-  EXPECT_EQ(word.Get(66, 3), 4U);
-  EXPECT_EQ(word.Get(63, 3), 6U);
-  EXPECT_EQ(word.Get(61, 2), 3U);
-  EXPECT_EQ(word.Get(59, 2), 3U);
-  EXPECT_EQ(word.Get(58, 1), 1U);
-  EXPECT_EQ(word.Get(57, 1), 1U);
-  EXPECT_EQ(word.Get(55, 2), 2U);
-  EXPECT_EQ(word.Get(53, 2), 3U);
-  EXPECT_EQ(word.Get(50, 3), 5U);
-  EXPECT_EQ(word.Get(47, 3), 5U);
-  EXPECT_EQ(word.Get(44, 3), 0U);
-  EXPECT_EQ(word.Get(41, 3), 6U);
-  EXPECT_EQ(word.Get(38, 3), 6U);
-  EXPECT_EQ(word.Get(36, 2), 3U);
-  EXPECT_EQ(word.Get(35, 1), 1U);
-  EXPECT_EQ(word.Get(32, 3), 5U);
-  EXPECT_EQ(word.Get(29, 3), 7U);
-  EXPECT_EQ(word.Get(28, 1), 1U);
-  EXPECT_EQ(word.Get(27, 1), 1U);
-  EXPECT_EQ(word.Get(26, 1), 0U);
-  EXPECT_EQ(word.Get(25, 1), 1U);
-  EXPECT_EQ(word.Get(23, 2), 1U);
-  EXPECT_EQ(word.Get(21, 2), 2U);
-  EXPECT_EQ(word.Get(0, 21), 0U);
+  EXPECT_EQ(word.Get(68, 2), 1U);
+  EXPECT_EQ(word.Get(66, 2), 2U);
+  EXPECT_EQ(word.Get(63, 3), 4U);
+  EXPECT_EQ(word.Get(60, 3), 5U);
+  EXPECT_EQ(word.Get(58, 2), 3U);
+  EXPECT_EQ(word.Get(56, 2), 3U);
+  EXPECT_EQ(word.Get(55, 1), 1U);
+  EXPECT_EQ(word.Get(54, 1), 1U);
+  EXPECT_EQ(word.Get(52, 2), 2U);
+  EXPECT_EQ(word.Get(50, 2), 3U);
+  EXPECT_EQ(word.Get(47, 3), 4U);
+  EXPECT_EQ(word.Get(46, 1), 1U);
+  EXPECT_EQ(word.Get(45, 1), 1U);
+  EXPECT_EQ(word.Get(44, 1), 1U);
+  EXPECT_EQ(word.Get(24, 20), 0xABCDEU);
+  EXPECT_EQ(word.Get(21, 3), 6U);
+  EXPECT_EQ(word.Get(19, 2), 3U);
+  EXPECT_EQ(word.Get(18, 1), 1U);
+  EXPECT_EQ(word.Get(17, 1), 1U);
+  EXPECT_EQ(word.Get(14, 3), 5U);
+  EXPECT_EQ(word.Get(11, 3), 7U);
+  EXPECT_EQ(word.Get(10, 1), 1U);
+  EXPECT_EQ(word.Get(9, 1), 1U);
+  EXPECT_EQ(word.Get(8, 1), 1U);
+  EXPECT_EQ(word.Get(6, 2), 1U);
+  EXPECT_EQ(word.Get(4, 2), 2U);
+  EXPECT_EQ(word.Get(0, 4), 0U);
+}
+
+TEST(VprogTest, PermutationHelpersSelectTheSourceBits) {
+  EXPECT_EQ(Bcast(5), (kPermOne << 8) | (kPermZero << 4) | kPermOne);
+  EXPECT_EQ(TokenXor(1), (kPermSame | kPermInvert) << 12);
+  EXPECT_EQ(TokenXor(3), ((kPermSame | kPermInvert) << 12) |
+                             ((kPermSame | kPermInvert) << 16));
+  EXPECT_EQ(kTokensToLanes,
+            (4U << 16) | (5U << 12) | (1U << 8) | (2U << 4) | 3U);
+  EXPECT_EQ(kTokenPairsToLanes, (2U << 16) | (3U << 12) | (1U << 8));
 }
 
 TEST(VprogTest, ScalarInstructionsPlaceTheirFieldsAsSpecified) {
@@ -146,20 +161,20 @@ TEST(VprogTest, AssemblerEnablesX2AndRawCopies) {
   raw.Emit({.rx = 1, .rd = 3, .c0 = C0::kImm, .wr = Write::kFbuf});
   const std::vector<Instruction> words = raw.Words();
   EXPECT_EQ(words[0].Get(78, 1), 1U);
-  EXPECT_EQ(words[0].Get(29, 3), static_cast<uint64_t>(Ialu::kOr));
+  EXPECT_EQ(words[0].Get(11, 3), static_cast<uint64_t>(Ialu::kOr));
   EXPECT_EQ(words[1].Get(78, 1), 0U);
-  EXPECT_EQ(words[1].Get(29, 3), 0U);
+  EXPECT_EQ(words[1].Get(11, 3), 0U);
   Assembler plain;
   plain.Emit({.rx = 1, .rd = 3, .wr = Write::kFbuf});
-  EXPECT_EQ(plain.Words()[0].Get(29, 3), 0U);
+  EXPECT_EQ(plain.Words()[0].Get(11, 3), 0U);
 }
 
 TEST(VprogTest, PassPlacesTheContextAndRowMask) {
   const Instruction word =
       EncodePass({.wr = Write::kNone, .ctx = 1, .rm = RowMask::kSet});
-  EXPECT_EQ(word.Get(23, 2), 1U);
-  EXPECT_EQ(word.Get(21, 2), 2U);
-  EXPECT_EQ(word.Get(0, 21), 0U);
+  EXPECT_EQ(word.Get(6, 2), 1U);
+  EXPECT_EQ(word.Get(4, 2), 2U);
+  EXPECT_EQ(word.Get(0, 4), 0U);
 }
 
 TEST(VprogTest, AssemblerSkipsMaskedRowsInsideARegion) {
@@ -171,15 +186,15 @@ TEST(VprogTest, AssemblerSkipsMaskedRowsInsideARegion) {
   a.SkipMaskedRows(false);
   a.Emit({.rx = 1, .rd = 3, .wr = Write::kFbuf});
   const std::vector<Instruction> words = a.Words();
-  EXPECT_EQ(words[0].Get(21, 2), 0U);
-  EXPECT_EQ(words[1].Get(21, 2), static_cast<uint64_t>(RowMask::kSkip));
-  EXPECT_EQ(words[2].Get(21, 2), static_cast<uint64_t>(RowMask::kSet));
-  EXPECT_EQ(words[3].Get(21, 2), 0U);
+  EXPECT_EQ(words[0].Get(4, 2), 0U);
+  EXPECT_EQ(words[1].Get(4, 2), static_cast<uint64_t>(RowMask::kSkip));
+  EXPECT_EQ(words[2].Get(4, 2), static_cast<uint64_t>(RowMask::kSet));
+  EXPECT_EQ(words[3].Get(4, 2), 0U);
 }
 
-TEST(VprogTest, Transpose8PlacesItsRegistersAndPackBit) {
+TEST(VprogTest, Transpose8PlacesItsRegistersAndRotation) {
   Assembler a(true);
-  a.Transpose8(11, 3, 4, 5, 12, 13, 4, TransposePack::kZip4);
+  a.Transpose8(11, 3, 4, 5, 12, 13, 4, 2);
   a.Transpose8(1, 2, 3, 4, 5, 6, 7);
   const auto words = a.Words(0);
   ASSERT_EQ(words.size(), 2U);
@@ -191,16 +206,30 @@ TEST(VprogTest, Transpose8PlacesItsRegistersAndPackBit) {
   EXPECT_EQ(words[0].Get(99, 5), 13U);
   EXPECT_EQ(words[0].Get(94, 5), 5U);
   EXPECT_EQ(words[0].Get(89, 5), 4U);
-  EXPECT_EQ(words[0].Get(88, 1), 1U);
-  EXPECT_EQ(words[1].Get(88, 1), 0U);
+  EXPECT_EQ(words[0].Get(87, 2), 2U);
+  EXPECT_EQ(words[1].Get(87, 2), 0U);
   EXPECT_EQ(words[1].Get(0, 64), 0U);
-  EXPECT_EQ(words[1].Get(64, 24), 0U);
+  EXPECT_EQ(words[1].Get(64, 23), 0U);
 }
 
 TEST(VprogDeathTest, RejectsAnUndefinedLabel) {
   Assembler program;
   program.Branch(Cond::kAlways, 0, "missing");
   EXPECT_DEATH(static_cast<void>(program.Words()), "undefined label");
+}
+
+TEST(VprogDeathTest, RejectsAWordMapStrideBelowItsGroup) {
+  Assembler program;
+  program.Emit({.map = {.group = 1, .stride = 1, .x = Map::kGroup}});
+  program.Emit({.map = {.group = 1, .stride = 2, .x2 = Map::kUpper}});
+  program.Emit({.map = {.group = 3, .stride = 0}});
+  EXPECT_EQ(program.Size(), 3U);
+  EXPECT_DEATH(
+      program.Emit({.map = {.group = 2, .stride = 1, .x = Map::kGroup}}),
+      "word map stride");
+  EXPECT_DEATH(
+      program.Emit({.map = {.group = 1, .stride = 1, .dst = Map::kUpper}}),
+      "word map stride");
 }
 
 }  // namespace

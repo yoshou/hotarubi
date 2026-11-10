@@ -24,8 +24,6 @@ constexpr uint32_t kOpDmaLoad = 1;
 constexpr uint32_t kOpDmaStore = 2;
 constexpr uint32_t kOpVec = 5;
 constexpr uint32_t kModeGather = 3;
-constexpr uint32_t kMemTbuf = 4;
-constexpr uint32_t kMemCbuf = 5;
 
 struct Node {
   int engine = 0;
@@ -34,7 +32,6 @@ struct Node {
   bool store = false;
   bool gather = false;
   bool run = false;
-  bool table_load = false;
   iss::DdrExtent extent;
   uint64_t cost = 0;
 };
@@ -81,8 +78,6 @@ Node Describe(const Program& program, size_t index, Estimator* estimator) {
     node.dma = true;
     node.store = command.store;
     node.gather = !command.store && command.mode == kModeGather;
-    node.table_load =
-        !command.store && (command.mem == kMemTbuf || command.mem == kMemCbuf);
     node.extent = iss::EstimateDdrExtent(command);
   } else if (opcode == kOpVec) {
     node.run = iss::DecodeVec(word).op >= iss::kVecRun;
@@ -224,11 +219,7 @@ class Scheduler {
         result.issue = std::max(result.issue, free_.at(e) + 1);
       }
     }
-    uint64_t start = result.issue;
-    if (node.table_load) {
-      start = std::max(start, free_.at(static_cast<int>(Engine::kVec)));
-    }
-    result.completion = node.barrier ? result.issue : start + node.cost;
+    result.completion = node.barrier ? result.issue : result.issue + node.cost;
     return result;
   }
 

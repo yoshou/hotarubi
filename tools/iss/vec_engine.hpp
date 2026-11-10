@@ -15,7 +15,6 @@ inline constexpr uint32_t kVecRun = 16;
 inline constexpr uint32_t kContexts = 2;
 inline constexpr uint64_t kOverlapLatencyWords = 10;
 inline constexpr uint64_t kReductionLatencyWords = 16;
-inline constexpr uint32_t kRowScalarKinds = 6;
 inline constexpr uint32_t kScalarArithmeticCycles = 11;
 inline constexpr uint32_t kScalarImmediateCycles = 2;
 inline constexpr uint32_t kScalarStartCycles = 2;
@@ -27,13 +26,18 @@ struct ScalarProgram {
   uint32_t immediate = 0;
 };
 
-inline constexpr std::array<ScalarProgram, kRowScalarKinds> kScalarPrograms = {
-    {{.arithmetic = 0, .immediate = 0},
-     {.arithmetic = 8, .immediate = 1},
-     {.arithmetic = 29, .immediate = 2},
-     {.arithmetic = 0, .immediate = 1},
-     {.arithmetic = 19, .immediate = 2},
-     {.arithmetic = 0, .immediate = 1}}};
+constexpr ScalarProgram RowScalarProgram(Reduction red, ScalarFn fn, bool rn,
+                                         bool eps) {
+  const bool iterative = fn == ScalarFn::kReciprocal || fn == ScalarFn::kRsqrt;
+  const uint32_t arithmetic = (red == Reduction::kSum ? 7U : 0U) +
+                              (rn ? 1U : 0U) + (eps ? 1U : 0U) +
+                              (fn == ScalarFn::kReciprocal ? 12U : 0U) +
+                              (fn == ScalarFn::kRsqrt ? 20U : 0U);
+  const bool loads_max = red == Reduction::kMax && (rn || eps || iterative);
+  return {.arithmetic = arithmetic,
+          .immediate = 1U + (iterative ? 1U : 0U) + (loads_max ? 1U : 0U)};
+}
+
 inline constexpr ScalarProgram kCountReciprocalProgram = {.arithmetic = 12,
                                                           .immediate = 2};
 
@@ -50,7 +54,7 @@ struct VecActivity {
   uint32_t overlaps = 0;
   uint64_t overlap_stall_words = 0;
   uint64_t context_stall_words = 0;
-  std::array<uint32_t, kRowScalarKinds> scalars{};
+  uint32_t scalars = 0;
   uint32_t rn = 0;
   uint32_t salu = 0;
   uint32_t smem = 0;

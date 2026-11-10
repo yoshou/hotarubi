@@ -208,14 +208,14 @@ class Keypoint {
          .rd = 11,
          .rimm = 14,
          .b = vp::B::kImm,
-         .c1 = vp::C1::kX2});
+         .post_x2 = true});
       Ld(14, kConstProjection + (4 * r) + 2);
       P({.rx = z,
          .rx2 = 11,
          .rd = 11,
          .rimm = 14,
          .b = vp::B::kImm,
-         .c1 = vp::C1::kX2});
+         .post_x2 = true});
       Ld(14, kConstProjection + (4 * r) + 3);
       P({.rx = 11, .rd = 11, .rimm = 14, .c0 = vp::C0::kImm});
     }
@@ -231,7 +231,7 @@ class Keypoint {
        .rimm = 14,
        .rimm2 = 14,
        .cmp = vp::Cmp::kGe,
-       .cmp_src = vp::CmpSrc::kImm2,
+       .cmp_left = vp::CmpLeft::kX,
        .sel = vp::Sel::kImm});
     Ld(14, kConstMagic);
     P({.rx = 11,
@@ -272,7 +272,7 @@ class Keypoint {
        .rd = rd,
        .rimm2 = bound,
        .cmp = cmp,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kZero});
   }
 
@@ -587,15 +587,16 @@ vp::Assembler DetKeypointInit(uint32_t tq) {
        .rpb = 29,
        .pa = vp::Pbuf::kRowVec,
        .c0 = vp::C0::kPbuf});
+  a.LoadImmediate(15, vp::kLog2e);
   for (const auto& [name, col] :
        {std::pair{"SX", 3U}, {"SY", 4U}, {"SZ", 5U}}) {
     k.Pl(11, name);
     k.P({.rx = 1,
          .rd = 11,
-         .b = vp::B::kLog2e,
+         .rimm = 15,
+         .b = vp::B::kImm,
          .nl = vp::Nl::kExp2,
-         .px = vp::Perm::kBcast,
-         .pcol = col});
+         .px = vp::Bcast(col)});
   }
   a.Ret();
   return a;
@@ -628,7 +629,7 @@ vp::Assembler DetKeypointPoint(uint32_t tq, uint32_t learn) {
     a.Alu(vp::Salu::kSeq, 30, 29, 0, q);
     a.Branch(vp::Cond::kZ, 30, std::format("nq{}", q));
     for (const auto& [rx, rd] : {std::pair{2U, 21U}, {24U, 22U}, {25U, 23U}}) {
-      k.P({.rx = rx, .rd = rd, .px = vp::Perm::kBcast, .pcol = q});
+      k.P({.rx = rx, .rd = rd, .px = vp::Bcast(q)});
     }
     a.Branch(vp::Cond::kAlways, 0, "learn_c");
     a.Label(std::format("nq{}", q));
@@ -653,7 +654,7 @@ vp::Assembler DetKeypointPoint(uint32_t tq, uint32_t learn) {
          .rimm2 = 16,
          .c0 = vp::C0::kImm,
          .cmp = vp::Cmp::kLt,
-         .cmp_src = vp::CmpSrc::kX2Imm2,
+         .cmp_left = vp::CmpLeft::kX2,
          .ialu = vp::Ialu::kXor,
          .c0_pred = true});
     k.P({.rx = 12, .rx2 = 21, .rd = 13, .b = vp::B::kX2});
@@ -668,28 +669,22 @@ vp::Assembler DetKeypointPoint(uint32_t tq, uint32_t learn) {
   k.Pl(24, "KZ");
   k.Pl(25, "OZ");
   const auto bx = [&](uint32_t rx2, uint32_t rd, uint32_t col) {
-    k.P({.rx = 1,
-         .rx2 = rx2,
-         .rd = rd,
-         .b = vp::B::kX2,
-         .px = vp::Perm::kBcast,
-         .pcol = col});
+    k.P({.rx = 1, .rx2 = rx2, .rd = rd, .b = vp::B::kX2, .px = vp::Bcast(col)});
   };
   const auto bc0 = [&](uint32_t rx2, uint32_t rd, uint32_t col) {
     k.P({.rx = 1,
          .rx2 = rx2,
          .rd = rd,
          .c0 = vp::C0::kX2,
-         .px = vp::Perm::kBcast,
-         .pcol = col});
+         .px = vp::Bcast(col)});
   };
   bx(11, 13, 7);
   bx(12, 21, 6);
-  k.P({.rx = 13, .rx2 = 21, .rd = 13, .c1 = vp::C1::kX2, .neg_c1 = true});
+  k.P({.rx = 13, .rx2 = 21, .rd = 13, .post = vp::Post::kSub, .post_x2 = true});
   bc0(13, 22, 0);
   bx(11, 13, 6);
   bx(12, 21, 7);
-  k.P({.rx = 13, .rx2 = 21, .rd = 13, .c1 = vp::C1::kX2});
+  k.P({.rx = 13, .rx2 = 21, .rd = 13, .post_x2 = true});
   bc0(13, 23, 1);
   bc0(25, 24, 2);
   k.Project(22, 23, 24, {"U", "V", "T3"});
@@ -717,7 +712,7 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
   k.P({.rx = 11,
        .rd = 3,
        .cmp = vp::Cmp::kLt,
-       .cmp_src = vp::CmpSrc::kLane,
+       .cmp_left = vp::CmpLeft::kPosition,
        .cmp_int = true,
        .sel = vp::Sel::kNull,
        .dst_s1 = true});
@@ -732,8 +727,8 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
   k.Floors(26);
   k.Pl(26, "LH");
   k.Pl(27, "LW");
-  k.P({.rx = 11, .rx2 = 23, .rd = 26, .c1 = vp::C1::kX2, .neg_c1 = true});
-  k.P({.rx = 12, .rx2 = 24, .rd = 27, .c1 = vp::C1::kX2, .neg_c1 = true});
+  k.P({.rx = 11, .rx2 = 23, .rd = 26, .post = vp::Post::kSub, .post_x2 = true});
+  k.P({.rx = 12, .rx2 = 24, .rd = 27, .post = vp::Post::kSub, .post_x2 = true});
   a.Alu(vp::Salu::kAdd, 29, 6, 0, 1);
   k.P({.rx = 23,
        .rd = 23,
@@ -760,7 +755,7 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
          .rd = rd,
          .rimm2 = bound,
          .cmp = vp::Cmp::kEq,
-         .cmp_src = vp::CmpSrc::kX2Imm2,
+         .cmp_left = vp::CmpLeft::kX2,
          .sel = vp::Sel::kZero});
   };
   select(26, 13, 11, 16);
@@ -802,7 +797,7 @@ vp::Assembler DetKeypointLevel(uint32_t tq) {
        .rd = 11,
        .rimm2 = 16,
        .cmp = vp::Cmp::kEq,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kNull});
   select(30, 13, 30, 16);
   a.Alu(vp::Salu::kAdd, 29, 6, 0, 2);
@@ -857,20 +852,18 @@ vp::Assembler MapKeypointInit(uint32_t tq) {
           k.P({.rx = 13,
                .rd = 12,
                .rimm2 = 15,
-               .px = vp::Perm::kBcast,
-               .pcol = col % 8,
+               .px = vp::Bcast(col % 8),
                .cmp = vp::Cmp::kEq,
-               .cmp_src = vp::CmpSrc::kLane,
+               .cmp_left = vp::CmpLeft::kColumn,
                .sel = vp::Sel::kZero});
         } else {
           k.P({.rx = 13,
                .rx2 = 12,
                .rd = 12,
                .rimm2 = 15,
-               .px = vp::Perm::kBcast,
-               .pcol = col % 8,
+               .px = vp::Bcast(col % 8),
                .cmp = vp::Cmp::kEq,
-               .cmp_src = vp::CmpSrc::kLane,
+               .cmp_left = vp::CmpLeft::kColumn,
                .sel = vp::Sel::kX2});
         }
       }
@@ -951,14 +944,14 @@ void MapKeypointCorner(vp::Assembler& a, Keypoint& k, uint32_t n) {
        .rd = 13,
        .rimm2 = 16,
        .cmp = vp::Cmp::kEq,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kNull});
   k.P({.rx = 21,
        .rx2 = 29,
        .rd = 21,
        .rimm2 = 16,
        .cmp = vp::Cmp::kEq,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kZero});
 }
 
@@ -994,7 +987,7 @@ vp::Assembler MapKeypointLevel(uint32_t tq) {
             .rn8 = 5,
             .wr = vp::Write::kFbuf,
             .cmp = vp::Cmp::kLt,
-            .cmp_src = vp::CmpSrc::kLane,
+            .cmp_left = vp::CmpLeft::kPosition,
             .cmp_int = true,
             .sel = sel});
   }
@@ -1009,8 +1002,8 @@ vp::Assembler MapKeypointLevel(uint32_t tq) {
   k.Floors(30);
   k.Pl(13, "LH");
   k.Pl(31, "LW");
-  k.P({.rx = 11, .rx2 = 23, .rd = 13, .c1 = vp::C1::kX2, .neg_c1 = true});
-  k.P({.rx = 12, .rx2 = 24, .rd = 31, .c1 = vp::C1::kX2, .neg_c1 = true});
+  k.P({.rx = 11, .rx2 = 23, .rd = 13, .post = vp::Post::kSub, .post_x2 = true});
+  k.P({.rx = 12, .rx2 = 24, .rd = 31, .post = vp::Post::kSub, .post_x2 = true});
   k.Pl(11, "LH1");
   k.Pl(12, "LW1");
   k.P({.rx = 13, .rd = 11, .rimm = 30, .c0 = vp::C0::kImm, .b = vp::B::kImm});
@@ -1024,7 +1017,7 @@ vp::Assembler MapKeypointLevel(uint32_t tq) {
   a.SkipMaskedRows(false);
   k.Pl(11, "A0");
   a.LoadImmediate(12, 1);
-  a.Transpose8(11, 3, 4, 5, 12, 12, 4, vp::TransposePack::kZip4);
+  a.Transpose8(11, 3, 4, 5, 12, 12, 4, 1);
   a.Ret();
   return a;
 }
@@ -1091,7 +1084,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
           .rimm2 = 5,
           .mask_en = true,
           .red = vp::Reduce::kMax,
-          .sc = vp::RowScalar::kMax});
+          .sc = vp::kMax});
   a.Alu(vp::Salu::kAnd, 18, 14, 0, 7);
   a.Emit({.rx = 13,
           .rd = 17,
@@ -1102,7 +1095,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
           .b = vp::B::kRs1,
           .wr = vp::Write::kFbuf,
           .cmp = vp::Cmp::kEq,
-          .cmp_src = vp::CmpSrc::kLane,
+          .cmp_left = vp::CmpLeft::kColumn,
           .sel = vp::Sel::kZero});
   a.Alu(vp::Salu::kSeq, 19, 18, 0, 0);
   a.Branch(vp::Cond::kZ, 19, "rm_acc");
@@ -1112,7 +1105,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
           .rnw = 11,
           .rn8 = 11,
           .wr = vp::Write::kFbuf,
-          .px = vp::Perm::kT4});
+          .px = vp::kTokensToLanes});
   a.Branch(vp::Cond::kAlways, 0, "rm_next");
   a.Label("rm_acc");
   a.Emit({.rx = 17,
@@ -1123,7 +1116,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
           .rn8 = 11,
           .c0 = vp::C0::kX2,
           .wr = vp::Write::kFbuf,
-          .px = vp::Perm::kT4,
+          .px = vp::kTokensToLanes,
           .ialu = vp::Ialu::kOr});
   a.Label("rm_next");
   a.Alu(vp::Salu::kAdd, 15, 15, 12);
@@ -1151,14 +1144,18 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
         .rimm2 = 22,
         .c0 = vp::C0::kImm,
         .cmp = vp::Cmp::kLt,
-        .cmp_src = vp::CmpSrc::kX2Imm2,
+        .cmp_left = vp::CmpLeft::kX2,
         .ialu = vp::Ialu::kXor,
         .c0_pred = true});
     pp({.rx = 20, .rd = 16, .rimm = 21, .c0 = vp::C0::kImm});
     a.Alu(vp::Salu::kAdd, 21, 3, 0, 3 * nw);
     ld(14, kIkDecay);
     pp({.rx = 21, .rd = 20, .rimm = 14, .b = vp::B::kImm});
-    pp({.rx = 16, .rx2 = 20, .rd = 16, .c1 = vp::C1::kMax});
+    pp({.rx = 16,
+        .rx2 = 20,
+        .rd = 16,
+        .post = vp::Post::kMax,
+        .post_x2 = true});
   }
   ld(14, kIkFna);
   ld(15, kIkNinf);
@@ -1168,7 +1165,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
       .rimm = 15,
       .rimm2 = 14,
       .cmp = vp::Cmp::kLt,
-      .cmp_src = vp::CmpSrc::kX2Imm2,
+      .cmp_left = vp::CmpLeft::kX2,
       .sel = vp::Sel::kImm});
   w(18, entx);
   w(19, enta);
@@ -1208,7 +1205,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
       .rimm2 = 29,
       .c0 = vp::C0::kImm,
       .cmp = vp::Cmp::kLt,
-      .cmp_src = vp::CmpSrc::kX2Imm2,
+      .cmp_left = vp::CmpLeft::kX2,
       .c0_pred = true});
   pp({.rx = 17,
       .rx2 = 16,
@@ -1216,7 +1213,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
       .rimm = 25,
       .rimm2 = 29,
       .cmp = vp::Cmp::kEq,
-      .cmp_src = vp::CmpSrc::kX2Imm2,
+      .cmp_left = vp::CmpLeft::kX2,
       .sel = vp::Sel::kImm});
   pp({.rx = 23,
       .rx2 = 20,
@@ -1225,7 +1222,7 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
       .rimm2 = 30,
       .c0 = vp::C0::kImm,
       .cmp = vp::Cmp::kGt,
-      .cmp_src = vp::CmpSrc::kX2Imm2,
+      .cmp_left = vp::CmpLeft::kX2,
       .c0_pred = true});
   a.Alu(vp::Salu::kAdd, 26, 26, 0, 1);
   a.Alu(vp::Salu::kSub, 31, 26, 0, na);
@@ -1262,9 +1259,9 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
         .rimm2 = 30,
         .c0 = vp::C0::kImm,
         .red = vp::Reduce::kMax,
-        .sc = vp::RowScalar::kMax,
+        .sc = vp::kMax,
         .cmp = vp::Cmp::kEq,
-        .cmp_src = vp::CmpSrc::kX2Imm2,
+        .cmp_left = vp::CmpLeft::kX2,
         .sel = vp::Sel::kZero,
         .ialu = vp::Ialu::kOr});
     a.Memory(vp::Smem::kRsmov, {.rd = 28, .col = 0});
@@ -1293,24 +1290,26 @@ vp::Assembler InstanceBankKernel(uint32_t nap, uint32_t na, uint32_t ntemp,
 vp::Assembler LongSoftmaxKernel() {
   vp::Assembler a;
   a.LoadImmediate(11, 1);
+  a.LoadImmediate(12, vp::kLog2e);
   a.Label("loop");
   a.Emit({.rx = 1,
           .rq = 11,
           .rnw = 8,
           .rn8 = 11,
           .red = vp::Reduce::kMax,
-          .sc = vp::RowScalar::kNegMax});
+          .sc = vp::kNegMax});
   a.Emit({.rx = 1,
           .rd = 2,
           .rq = 11,
           .rnw = 8,
           .rn8 = 11,
+          .rimm = 12,
           .c0 = vp::C0::kRs0,
-          .b = vp::B::kLog2e,
+          .b = vp::B::kImm,
           .nl = vp::Nl::kExp2,
           .red = vp::Reduce::kSum,
           .wr = vp::Write::kFbuf,
-          .sc = vp::RowScalar::kRecipSum});
+          .sc = vp::kRecipSum});
   a.Emit({.rx = 2,
           .rd = 3,
           .rq = 11,
@@ -1350,7 +1349,7 @@ vp::Assembler EgoMeanKernel() {
             .c0 = vp::C0::kX2,
             .wr = vp::Write::kFbuf});
   }
-  for (const vp::Perm perm : {vp::Perm::kTswap1, vp::Perm::kTswap2}) {
+  for (const uint32_t perm : {vp::TokenXor(1), vp::TokenXor(2)}) {
     a.Emit({.rx = 3,
             .rx2 = 3,
             .rd = 3,
@@ -1416,7 +1415,7 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
           .rimm2 = 5,
           .mask_en = true,
           .red = vp::Reduce::kMax,
-          .sc = vp::RowScalar::kMax});
+          .sc = vp::kMax});
   a.Emit({.rx = 18,
           .rd = 22,
           .rq = 11,
@@ -1449,10 +1448,9 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
     p({.rx = 21,
        .rx2 = 13,
        .rd = 15,
-       .c1 = vp::C1::kX2,
-       .neg_c1 = true,
-       .px = vp::Perm::kBcast,
-       .pcol = c % 8});
+       .post = vp::Post::kSub,
+       .post_x2 = true,
+       .px = vp::Bcast(c % 8)});
     a.LoadImmediate(24, FloatBits(c));
     p({.rx = 14,
        .rx2 = 15,
@@ -1460,7 +1458,7 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
        .rimm = 24,
        .rimm2 = 23,
        .cmp = vp::Cmp::kNe,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kImm});
   }
   ld(24, kIkTbX);
@@ -1487,7 +1485,7 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
           .rimm2 = 23,
           .wr = vp::Write::kFbuf,
           .cmp = vp::Cmp::kEq,
-          .cmp_src = vp::CmpSrc::kLane,
+          .cmp_left = vp::CmpLeft::kColumn,
           .sel = vp::Sel::kZero});
   a.Alu(vp::Salu::kSeq, 24, 23, 0, 0);
   a.Branch(vp::Cond::kZ, 24, "tp_acc");
@@ -1497,7 +1495,7 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
           .rnw = 11,
           .rn8 = 11,
           .wr = vp::Write::kFbuf,
-          .px = vp::Perm::kT4});
+          .px = vp::kTokensToLanes});
   a.Branch(vp::Cond::kAlways, 0, "tp_next");
   a.Label("tp_acc");
   a.Emit({.rx = 17,
@@ -1508,7 +1506,7 @@ vp::Assembler MotionClsIdx(uint32_t nap, uint32_t ncls) {
           .rn8 = 11,
           .c0 = vp::C0::kX2,
           .wr = vp::Write::kFbuf,
-          .px = vp::Perm::kT4,
+          .px = vp::kTokensToLanes,
           .ialu = vp::Ialu::kOr});
   a.Label("tp_next");
   a.Alu(vp::Salu::kAdd, 21, 21, 12);
@@ -1554,8 +1552,8 @@ vp::Assembler MotionRot() {
   a.LoadImmediate(22, 0x5F3759DFU);
   a.LoadImmediate(23, Decimal(-1, 2));
   a.LoadImmediate(24, Decimal(3, 2));
-  p({.rx = 1, .rd = kT1, .b = vp::B::kPre, .px = vp::Perm::kBcast, .pcol = 7});
-  p({.rx = 1, .rd = kT2, .b = vp::B::kPre, .px = vp::Perm::kBcast, .pcol = 6});
+  p({.rx = 1, .rd = kT1, .b = vp::B::kPre, .px = vp::Bcast(7)});
+  p({.rx = 1, .rd = kT2, .b = vp::B::kPre, .px = vp::Bcast(6)});
   p({.rx = kT1, .rx2 = kT2, .rd = kA, .c0 = vp::C0::kX2});
   p({.rx = kA,
      .rd = kT2,
@@ -1563,7 +1561,7 @@ vp::Assembler MotionRot() {
      .rimm2 = 0,
      .c0 = vp::C0::kZero,
      .cmp = vp::Cmp::kGt,
-     .cmp_src = vp::CmpSrc::kImm2,
+     .cmp_left = vp::CmpLeft::kX,
      .sel = vp::Sel::kImm,
      .ialu = vp::Ialu::kAnd});
   p({.rx = kA,
@@ -1571,7 +1569,7 @@ vp::Assembler MotionRot() {
      .rimm = 21,
      .rimm2 = 0,
      .cmp = vp::Cmp::kGt,
-     .cmp_src = vp::CmpSrc::kImm2,
+     .cmp_left = vp::CmpLeft::kX,
      .sel = vp::Sel::kImm});
   p({.rx = kA, .rd = kY, .ialu = vp::Ialu::kShr1});
   p({.rx = kY,
@@ -1586,25 +1584,19 @@ vp::Assembler MotionRot() {
     p({.rx = kT1, .rd = kT1, .rimm = 24, .c0 = vp::C0::kImm});
     p({.rx = kY, .rx2 = kT1, .rd = kY, .b = vp::B::kX2});
   }
-  p({.rx = 1,
-     .rx2 = kY,
-     .rd = kC,
-     .b = vp::B::kX2,
-     .px = vp::Perm::kBcast,
-     .pcol = 7});
-  p({.rx = 1,
-     .rx2 = kY,
-     .rd = kS,
-     .b = vp::B::kX2,
-     .px = vp::Perm::kBcast,
-     .pcol = 6});
+  p({.rx = 1, .rx2 = kY, .rd = kC, .b = vp::B::kX2, .px = vp::Bcast(7)});
+  p({.rx = 1, .rx2 = kY, .rd = kS, .b = vp::B::kX2, .px = vp::Bcast(6)});
   p({.rx = kC, .rx2 = kT2, .rd = kC, .c0 = vp::C0::kX2});
   p({.rx = kC, .rx2 = 2, .rd = kT1, .b = vp::B::kX2});
   p({.rx = kS, .rx2 = kTabY, .rd = kT2, .b = vp::B::kX2});
-  p({.rx = kT1, .rx2 = kT2, .rd = kRx, .c1 = vp::C1::kX2, .neg_c1 = true});
+  p({.rx = kT1,
+     .rx2 = kT2,
+     .rd = kRx,
+     .post = vp::Post::kSub,
+     .post_x2 = true});
   p({.rx = kS, .rx2 = 2, .rd = kT1, .b = vp::B::kX2});
   p({.rx = kC, .rx2 = kTabY, .rd = kT2, .b = vp::B::kX2});
-  p({.rx = kT1, .rx2 = kT2, .rd = kRy, .c1 = vp::C1::kX2});
+  p({.rx = kT1, .rx2 = kT2, .rd = kRy, .post_x2 = true});
   a.Ret();
   return a;
 }
@@ -1628,8 +1620,7 @@ vp::Assembler MotionBcast(uint32_t modes) {
                 .rnw = 11,
                 .rn8 = 12,
                 .wr = vp::Write::kFbuf,
-                .px = vp::Perm::kBcast,
-                .pcol = m});
+                .px = vp::Bcast(m)});
       }
     }
     a.Ret();
@@ -1705,8 +1696,7 @@ vp::Assembler AnchorProjectKernel(bool box, uint32_t words) {
                 .pa = vp::Pbuf::kRowVec,
                 .b = vp::B::kPbuf,
                 .wr = vp::Write::kFbuf,
-                .px = vp::Perm::kBcast,
-                .pcol = 0});
+                .px = vp::Bcast(0)});
       } else {
         a.Emit({.rx = src,
                 .rx2 = dst,
@@ -1717,10 +1707,9 @@ vp::Assembler AnchorProjectKernel(bool box, uint32_t words) {
                 .rpb = 14,
                 .pa = vp::Pbuf::kRowVec,
                 .b = vp::B::kPbuf,
-                .c1 = vp::C1::kX2,
+                .post_x2 = true,
                 .wr = vp::Write::kFbuf,
-                .px = vp::Perm::kBcast,
-                .pcol = k});
+                .px = vp::Bcast(k)});
       }
     }
     if (bias) {
@@ -1752,12 +1741,11 @@ vp::Assembler AnchorProjectKernel(bool box, uint32_t words) {
               .rimm = 8,
               .rimm2 = 15,
               .b = vp::B::kImm,
-              .c1 = vp::C1::kX2,
+              .post_x2 = true,
               .wr = vp::Write::kFbuf,
-              .px = vp::Perm::kBcast,
-              .pcol = k,
+              .px = vp::Bcast(k),
               .cmp = vp::Cmp::kEq,
-              .cmp_src = vp::CmpSrc::kLane,
+              .cmp_left = vp::CmpLeft::kColumn,
               .sel = vp::Sel::kX2});
     }
     lin(16, 3, 0, true);
@@ -1911,8 +1899,10 @@ void Reciprocal(vp::Assembler& a, const std::array<uint32_t, 4>& planes,
 }
 
 Pass LaneCmp(vp::Cmp cmp, vp::Sel sel) {
-  return {
-      .cmp = cmp, .cmp_src = vp::CmpSrc::kLane, .cmp_int = true, .sel = sel};
+  return {.cmp = cmp,
+          .cmp_left = vp::CmpLeft::kPosition,
+          .cmp_int = true,
+          .sel = sel};
 }
 
 void FrameStartTime(vp::Assembler& a) {
@@ -1988,11 +1978,11 @@ vp::Assembler FrameStartKernel(uint32_t nkp, uint32_t ns) {
   FrameStartTime(a);
   FrameStart f(a);
   f.P({.rx = kW0, .rd = kW1, .imm = FloatBits(65536)},
-      {.b = vp::B::kImm, .px = vp::Perm::kBcast, .pcol = 1});
+      {.b = vp::B::kImm, .px = vp::Bcast(1)});
   f.P({.rx = kW0, .rd = kW1, .rx2 = kW1},
-      {.c1 = vp::C1::kX2, .px = vp::Perm::kBcast, .pcol = 2});
+      {.post_x2 = true, .px = vp::Bcast(2)});
   f.P({.rx = kW0, .rd = kW1, .rx2 = kW1, .imm = FloatBits(int64_t{1} << 32)},
-      {.b = vp::B::kImm, .c1 = vp::C1::kX2, .px = vp::Perm::kBcast, .pcol = 0});
+      {.b = vp::B::kImm, .post_x2 = true, .px = vp::Bcast(0)});
   f.P({.rx = kW1, .rd = kDtr, .imm = Decimal(1, 1000000)}, {.b = vp::B::kImm});
   const uint32_t r_d = f.At(kDtr);
   const uint32_t r_u = f.At(kDu);
@@ -2044,26 +2034,24 @@ vp::Assembler FrameStartKernel(uint32_t nkp, uint32_t ns) {
     Pass pass{.rpb = pb,
               .pa = vp::Pbuf::kRowVec,
               .b = vp::B::kPbuf,
-              .px = vp::Perm::kBcast,
-              .pcol = k};
+              .px = vp::Bcast(k)};
     if (k == 0) {
       f.P({.rx = kFsPtg, .rd = kTc}, pass);
     } else {
-      pass.c1 = vp::C1::kX2;
+      pass.post_x2 = true;
       f.P({.rx = kFsPtg, .rd = kTc, .rx2 = kTc}, pass);
     }
   }
-  f.P({.rx = kTc, .rd = kC1}, {.px = vp::Perm::kTswap1});
-  f.P({.rx = kTc, .rd = kC2}, {.px = vp::Perm::kTswap2});
-  f.P({.rx = kC2, .rd = kC3}, {.px = vp::Perm::kTswap1});
+  f.P({.rx = kTc, .rd = kC1}, {.px = vp::TokenXor(1)});
+  f.P({.rx = kTc, .rd = kC2}, {.px = vp::TokenXor(2)});
+  f.P({.rx = kC2, .rd = kC3}, {.px = vp::TokenXor(1)});
   const auto below = [&](uint32_t src, uint32_t dst, uint32_t lt) {
     f.P({.rx = src, .rd = dst, .rx2 = dst, .imm2 = lt},
         LaneCmp(vp::Cmp::kLt, vp::Sel::kX2));
   };
   const auto lane = [&](uint32_t src, uint32_t dst, uint32_t to, uint32_t col) {
     Pass pass = LaneCmp(vp::Cmp::kEq, vp::Sel::kX2);
-    pass.px = vp::Perm::kBcast;
-    pass.pcol = col;
+    pass.px = vp::Bcast(col);
     f.P({.rx = src, .rd = dst, .rx2 = dst, .imm2 = to}, pass);
   };
   for (const auto& [word, src] : {std::pair{0U, kTc},
@@ -2132,7 +2120,7 @@ vp::Assembler MaskKernel(bool fill) {
             .rimm = 8,
             .wr = vp::Write::kFbuf,
             .cmp = vp::Cmp::kLt,
-            .cmp_src = vp::CmpSrc::kLane,
+            .cmp_left = vp::CmpLeft::kPosition,
             .cmp_int = true,
             .sel = vp::Sel::kImm});
   } else {
@@ -2183,7 +2171,7 @@ class Queue {
        .rimm = rimm,
        .rimm2 = 28,
        .cmp = cmp,
-       .cmp_src = vp::CmpSrc::kLane,
+       .cmp_left = vp::CmpLeft::kPosition,
        .cmp_int = true,
        .sel = sel,
        .dst_s1 = dst_s1});
@@ -2205,10 +2193,10 @@ vp::Assembler IqueueState(uint32_t ncls) {
                                  {27U, kQkLthr}}) {
     a.Memory(vp::Smem::kSld, {.rd = reg, .ra = 8, .col = col});
   }
-  q.P({.rx = 14, .rd = 20, .px = vp::Perm::kBcast, .pcol = 2});
-  q.P({.rx = 1, .rd = 15, .px = vp::Perm::kBcast, .pcol = 1});
-  q.P({.rx = 1, .rd = 16, .px = vp::Perm::kBcast, .pcol = 0});
-  q.P({.rx = 1, .rd = 17, .px = vp::Perm::kBcast, .pcol = 2});
+  q.P({.rx = 14, .rd = 20, .px = vp::Bcast(2)});
+  q.P({.rx = 1, .rd = 15, .px = vp::Bcast(1)});
+  q.P({.rx = 1, .rd = 16, .px = vp::Bcast(0)});
+  q.P({.rx = 1, .rd = 17, .px = vp::Bcast(2)});
   q.P({.rx = 16, .rx2 = 15, .rd = 16, .b = vp::B::kX2});
   q.P({.rx = 16, .rd = 16, .rimm = 23, .c0 = vp::C0::kImm});
   q.P({.rx = 16,
@@ -2216,14 +2204,14 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rimm = 26,
        .rimm2 = 26,
        .cmp = vp::Cmp::kLe,
-       .cmp_src = vp::CmpSrc::kImm2,
+       .cmp_left = vp::CmpLeft::kX,
        .sel = vp::Sel::kImm});
   q.P({.rx = 16,
        .rx2 = 20,
        .rd = 16,
        .rimm2 = 24,
        .cmp = vp::Cmp::kLe,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kZero});
   a.LoadImmediate(28, (ncls + 7) / 8);
   a.LoadImmediate(29, 0);
@@ -2237,7 +2225,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
           .rimm2 = 5,
           .mask_en = true,
           .red = vp::Reduce::kMax,
-          .sc = vp::RowScalar::kMax});
+          .sc = vp::kMax});
   a.Emit({.rx = 31,
           .rd = 31,
           .rq = 11,
@@ -2246,7 +2234,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
           .rimm2 = 0,
           .wr = vp::Write::kFbuf,
           .cmp = vp::Cmp::kLt,
-          .cmp_src = vp::CmpSrc::kLane,
+          .cmp_left = vp::CmpLeft::kColumn,
           .sel = vp::Sel::kRs1});
   a.Alu(vp::Salu::kAdd, 30, 30, 12);
   a.Alu(vp::Salu::kAdd, 31, 31, 12);
@@ -2259,7 +2247,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rimm2 = 27,
        .c0 = vp::C0::kZero,
        .cmp = vp::Cmp::kLe,
-       .cmp_src = vp::CmpSrc::kImm2,
+       .cmp_left = vp::CmpLeft::kX,
        .sel = vp::Sel::kImm,
        .ialu = vp::Ialu::kAnd});
   q.P({.rx = 18,
@@ -2267,7 +2255,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rd = 18,
        .rimm2 = 24,
        .cmp = vp::Cmp::kLt,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kZero});
   q.P({.rx = 18,
        .rx2 = 20,
@@ -2275,13 +2263,13 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rimm = 23,
        .rimm2 = 24,
        .cmp = vp::Cmp::kNe,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kImm});
   q.P({.rx = 16,
        .rd = 1,
        .rimm2 = 0,
        .cmp = vp::Cmp::kEq,
-       .cmp_src = vp::CmpSrc::kLane,
+       .cmp_left = vp::CmpLeft::kColumn,
        .sel = vp::Sel::kZero});
   a.LoadImmediate(28, 1);
   q.P({.rx = 18,
@@ -2289,7 +2277,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rd = 1,
        .rimm2 = 28,
        .cmp = vp::Cmp::kEq,
-       .cmp_src = vp::CmpSrc::kLane,
+       .cmp_left = vp::CmpLeft::kColumn,
        .sel = vp::Sel::kX2});
   a.LoadImmediate(28, 2);
   q.P({.rx = 20,
@@ -2297,7 +2285,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rd = 1,
        .rimm2 = 28,
        .cmp = vp::Cmp::kEq,
-       .cmp_src = vp::CmpSrc::kLane,
+       .cmp_left = vp::CmpLeft::kColumn,
        .sel = vp::Sel::kX2});
   q.P({.rx = 16,
        .rd = 21,
@@ -2310,7 +2298,7 @@ vp::Assembler IqueueState(uint32_t ncls) {
        .rimm2 = 26,
        .c0 = vp::C0::kZero,
        .cmp = vp::Cmp::kGe,
-       .cmp_src = vp::CmpSrc::kImm2,
+       .cmp_left = vp::CmpLeft::kX,
        .sel = vp::Sel::kImm,
        .ialu = vp::Ialu::kAnd});
   a.LoadImmediate(28, 4);
@@ -2360,7 +2348,7 @@ vp::Assembler IqueueList() {
          .rimm2 = 28,
          .c0 = vp::C0::kImm,
          .cmp = vp::Cmp::kEq,
-         .cmp_src = vp::CmpSrc::kLane,
+         .cmp_left = vp::CmpLeft::kColumn,
          .sel = k == 0 ? vp::Sel::kZero : vp::Sel::kX2,
          .ialu = vp::Ialu::kAdd});
   }
@@ -2369,7 +2357,7 @@ vp::Assembler IqueueList() {
        .rd = 19,
        .rimm2 = 0,
        .cmp = vp::Cmp::kGt,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kNull});
   a.Memory(vp::Smem::kSld, {.rd = 23, .ra = 8, .col = kQlTbC});
   a.Memory(vp::Smem::kSld, {.rd = 24, .ra = 8, .col = kQlBaseC});
@@ -2386,7 +2374,7 @@ vp::Assembler IqueueList() {
        .rd = 21,
        .rimm2 = 25,
        .cmp = vp::Cmp::kLe,
-       .cmp_src = vp::CmpSrc::kX2Imm2,
+       .cmp_left = vp::CmpLeft::kX2,
        .sel = vp::Sel::kNull});
   for (const uint32_t lane : {3U, 7U}) {
     a.LoadImmediate(28, lane);
@@ -2395,7 +2383,7 @@ vp::Assembler IqueueList() {
          .rd = 19,
          .rimm2 = 28,
          .cmp = vp::Cmp::kEq,
-         .cmp_src = vp::CmpSrc::kLane,
+         .cmp_left = vp::CmpLeft::kColumn,
          .sel = vp::Sel::kX2});
   }
   a.Alu(vp::Salu::kShr, 29, 4, 0, 1);
@@ -2411,7 +2399,7 @@ vp::Assembler IqueueList() {
           .rimm2 = 28,
           .wr = vp::Write::kFbuf,
           .cmp = vp::Cmp::kLt,
-          .cmp_src = vp::CmpSrc::kLane,
+          .cmp_left = vp::CmpLeft::kColumn,
           .sel = vp::Sel::kX2,
           .dst_s1 = true});
   a.Emit({.rx = 3,
@@ -2420,7 +2408,7 @@ vp::Assembler IqueueList() {
           .rnw = 11,
           .rn8 = 11,
           .wr = vp::Write::kFbuf,
-          .px = vp::Perm::kT4b});
+          .px = vp::kTokenPairsToLanes});
   a.Ret();
   return a;
 }
@@ -2453,7 +2441,7 @@ vp::Assembler IqueueStlist(uint32_t na) {
      .rd = 3,
      .rimm2 = 23,
      .cmp = vp::Cmp::kLt,
-     .cmp_src = vp::CmpSrc::kX2Imm2,
+     .cmp_left = vp::CmpLeft::kX2,
      .sel = vp::Sel::kNull});
   a.Alu(vp::Salu::kAdd, 14, 3, 0, na / 32);
   a.LoadImmediate(15, na % 32);
@@ -2466,7 +2454,7 @@ vp::Assembler IqueueStlist(uint32_t na) {
           .rimm2 = 15,
           .wr = vp::Write::kFbuf,
           .cmp = vp::Cmp::kNe,
-          .cmp_src = vp::CmpSrc::kLane,
+          .cmp_left = vp::CmpLeft::kPosition,
           .cmp_int = true,
           .sel = vp::Sel::kImm});
   a.Ret();
@@ -2487,7 +2475,7 @@ vp::Assembler IqueueEgo() {
           .rimm2 = 15,
           .wr = vp::Write::kFbuf,
           .cmp = vp::Cmp::kNe,
-          .cmp_src = vp::CmpSrc::kLane,
+          .cmp_left = vp::CmpLeft::kPosition,
           .cmp_int = true,
           .sel = vp::Sel::kImm});
   a.Ret();

@@ -4,7 +4,7 @@ module vec_scalar
   input  logic        clk_i,
   input  logic        rst_ni,
   input  logic        start_i,
-  input  sc_e         prog_i,
+  input  sc_t         prog_i,
   input  logic        recip_count_i,
   input  logic [13:0] nelem_i,
   input  logic [31:0] eps_i,
@@ -69,7 +69,7 @@ module vec_scalar
     return {1'b0, 8'(8'd127 + 8'(p)), sh[22:0]};
   endfunction
 
-  logic [31:0] t0 [4], t1 [4], t2 [4], t3 [4], av [4], yv [4];
+  logic [31:0] t0 [4], t1 [4], t2 [4], t3 [4], yv [4];
 
   typedef enum logic [1:0] {
     PhIdle,
@@ -82,11 +82,27 @@ module vec_scalar
   logic [5:0] step;
   logic [2:0] wait_cnt;
   logic [1:0] tok;
-  sc_e        cur;
+  sf_e        cur_fn;
+  logic       cur_rs0, cur_max;
   logic       cur_rn;
   logic [2:0] ns;
   logic [5:0] nstart;
   logic [2:0] nlen;
+  logic [5:0] b_load, b_scale, b_bias, b_seed, b_write;
+  logic [5:0] n_load, n_scale, n_bias, n_seed, n_newton, n_write;
+  logic       n_iterative;
+
+  always_comb begin
+    n_iterative = recip_count_i || (prog_i.fn == SfReciprocal) || (prog_i.fn == SfRsqrt);
+    n_load      = (!recip_count_i && !prog_i.max) ? 6'd7 : 6'd0;
+    n_scale     = n_load + 6'(!recip_count_i && prog_i.max &&
+                              (prog_i.rn || prog_i.eps || n_iterative));
+    n_bias      = n_scale + 6'(!recip_count_i && prog_i.rn);
+    n_seed      = n_bias + 6'(!recip_count_i && prog_i.eps);
+    n_newton    = n_seed + 6'(n_iterative);
+    n_write     = n_newton + ((recip_count_i || prog_i.fn == SfReciprocal) ? 6'd12 :
+                              (prog_i.fn == SfRsqrt) ? 6'd20 : 6'd0);
+  end
 
   typedef enum logic [2:0] {
     DstT0,
@@ -104,12 +120,13 @@ module vec_scalar
   logic [31:0] oa, ob, imm [4];
   logic        last;
 
-  function automatic logic tree_step(input logic [5:0] s);
-    return (s <= 6'd6);
-  endfunction
-
   assign acc_rd_addr_o[0] = {tok, step[1:0], 1'b0};
   assign acc_rd_addr_o[1] = {tok, step[1:0], 1'b1};
+
+  logic iterative, recip;
+
+  assign recip     = cur_rn || (cur_fn == SfReciprocal);
+  assign iterative = recip || (cur_fn == SfRsqrt);
 
   always_comb begin
     opk  = 2'd0;
@@ -120,76 +137,11 @@ module vec_scalar
     for (int r = 0; r < 4; r++) begin
       imm[r] = 32'd0;
     end
-    if (cur_rn) begin
-      if (step == 6'd0) begin
-        opk = 2'd3;
-        dst = DstY;
-        for (int r = 0; r < 4; r++) begin
-          imm[r] = magic_recip(float_n(nelem_i));
-        end
-      end else if (step <= 6'd12) begin
-        case (ns)
-          3'd0: begin
-            opk = 2'd2;
-            dst = DstT1;
-            oa  = av[tok];
-            ob  = yv[tok];
-          end
-          3'd1: begin
-            opk = 2'd1;
-            dst = DstT1;
-            oa  = FpTwo;
-            ob  = fneg(t1[tok]);
-          end
-          default: begin
-            opk = 2'd2;
-            dst = DstY;
-            oa  = yv[tok];
-            ob  = t1[tok];
-          end
-        endcase
-      end else begin
-        opk = 2'd3;
-        dst = DstRn;
-        for (int r = 0; r < 4; r++) begin
-          imm[r] = yv[r];
-        end
-        last = 1'b1;
-      end
-    end else if (cur == ScNegmax) begin
-      opk = 2'd3;
-      dst = DstC0s;
-      for (int r = 0; r < 4; r++) begin
-        imm[r] = fneg(acc_max_i[r]);
-      end
-      last = 1'b1;
-    end else if (cur == ScMax) begin
-      opk = 2'd3;
-      dst = DstBs;
-      for (int r = 0; r < 4; r++) begin
-        imm[r] = acc_max_i[r];
-      end
-      last = 1'b1;
-    end else if (tree_step(step)) begin
+    if (step < b_load) begin
       opk = 2'd1;
       case (step)
-        6'd0: begin
-          dst = DstT0;
-          oa  = acc_rd_data_i[0];
-          ob  = acc_rd_data_i[1];
-        end
-        6'd1: begin
-          dst = DstT1;
-          oa  = acc_rd_data_i[0];
-          ob  = acc_rd_data_i[1];
-        end
-        6'd2: begin
-          dst = DstT2;
-          oa  = acc_rd_data_i[0];
-          ob  = acc_rd_data_i[1];
-        end
-        6'd3: begin
-          dst = DstT3;
+        6'd0, 6'd1, 6'd2, 6'd3: begin
+          dst = dst_e'(step[1:0]);
           oa  = acc_rd_data_i[0];
           ob  = acc_rd_data_i[1];
         end
@@ -209,120 +161,83 @@ module vec_scalar
           ob  = t1[tok];
         end
       endcase
-    end else begin
-      case (cur)
-        ScMean: begin
-          if (step == 6'd7) begin
-            opk = 2'd2;
-            dst = DstT0;
-            oa  = t0[tok];
-            ob  = rn_o;
-          end else begin
-            opk = 2'd3;
-            dst = DstC0s;
-            for (int r = 0; r < 4; r++) begin
-              imm[r] = fneg(t0[r]);
-            end
-            last = 1'b1;
+    end else if (step < b_scale) begin
+      opk = 2'd3;
+      dst = DstT0;
+      for (int r = 0; r < 4; r++) begin
+        imm[r] = acc_max_i[r];
+      end
+    end else if (step < b_bias) begin
+      opk = 2'd2;
+      dst = DstT0;
+      oa  = t0[tok];
+      ob  = rn_o;
+    end else if (step < b_seed) begin
+      opk = 2'd1;
+      dst = DstT0;
+      oa  = t0[tok];
+      ob  = eps_i;
+    end else if (step < nstart) begin
+      opk = 2'd3;
+      dst = DstY;
+      for (int r = 0; r < 4; r++) begin
+        imm[r] = recip ? magic_recip(t0[r]) : magic_rsqrt(t0[r][31:1]);
+      end
+    end else if (step < b_write) begin
+      opk = 2'd2;
+      dst = DstT1;
+      if (recip) begin
+        case (ns)
+          3'd0: begin
+            oa = t0[tok];
+            ob = yv[tok];
           end
-        end
-        ScRstd: begin
-          if (step == 6'd7) begin
-            opk = 2'd2;
-            dst = DstT0;
-            oa  = t0[tok];
-            ob  = rn_o;
-          end else if (step == 6'd8) begin
+          3'd1: begin
             opk = 2'd1;
-            dst = DstT0;
-            oa  = t0[tok];
-            ob  = eps_i;
-          end else if (step == 6'd9) begin
-            opk = 2'd3;
-            dst = DstY;
-            for (int r = 0; r < 4; r++) begin
-              imm[r] = magic_rsqrt(t0[r][31:1]);
-            end
-          end else if (step <= 6'd29) begin
-            case (ns)
-              3'd0: begin
-                opk = 2'd2;
-                dst = DstT1;
-                oa  = t0[tok];
-                ob  = yv[tok];
-              end
-              3'd1: begin
-                opk = 2'd2;
-                dst = DstT1;
-                oa  = t1[tok];
-                ob  = yv[tok];
-              end
-              3'd2: begin
-                opk = 2'd2;
-                dst = DstT1;
-                oa  = t1[tok];
-                ob  = FpHalf;
-              end
-              3'd3: begin
-                opk = 2'd1;
-                dst = DstT1;
-                oa  = FpOnePointFive;
-                ob  = fneg(t1[tok]);
-              end
-              default: begin
-                opk = 2'd2;
-                dst = DstY;
-                oa  = yv[tok];
-                ob  = t1[tok];
-              end
-            endcase
-          end else begin
-            opk = 2'd3;
-            dst = DstBs;
-            for (int r = 0; r < 4; r++) begin
-              imm[r] = yv[r];
-            end
-            last = 1'b1;
+            oa  = FpTwo;
+            ob  = fneg(t1[tok]);
           end
-        end
-        default: begin
-          if (step == 6'd7) begin
-            opk = 2'd3;
+          default: begin
             dst = DstY;
-            for (int r = 0; r < 4; r++) begin
-              imm[r] = magic_recip(t0[r]);
-            end
-          end else if (step <= 6'd19) begin
-            case (ns)
-              3'd0: begin
-                opk = 2'd2;
-                dst = DstT1;
-                oa  = t0[tok];
-                ob  = yv[tok];
-              end
-              3'd1: begin
-                opk = 2'd1;
-                dst = DstT1;
-                oa  = FpTwo;
-                ob  = fneg(t1[tok]);
-              end
-              default: begin
-                opk = 2'd2;
-                dst = DstY;
-                oa  = yv[tok];
-                ob  = t1[tok];
-              end
-            endcase
-          end else begin
-            opk = 2'd3;
-            dst = DstBs;
-            for (int r = 0; r < 4; r++) begin
-              imm[r] = yv[r];
-            end
-            last = 1'b1;
+            oa  = yv[tok];
+            ob  = t1[tok];
           end
-        end
-      endcase
+        endcase
+      end else begin
+        case (ns)
+          3'd0: begin
+            oa = t0[tok];
+            ob = yv[tok];
+          end
+          3'd1: begin
+            oa = t1[tok];
+            ob = yv[tok];
+          end
+          3'd2: begin
+            oa = t1[tok];
+            ob = FpHalf;
+          end
+          3'd3: begin
+            opk = 2'd1;
+            oa  = FpOnePointFive;
+            ob  = fneg(t1[tok]);
+          end
+          default: begin
+            dst = DstY;
+            oa  = yv[tok];
+            ob  = t1[tok];
+          end
+        endcase
+      end
+    end else begin
+      opk  = 2'd3;
+      dst  = cur_rn ? DstRn : cur_rs0 ? DstC0s : DstBs;
+      last = 1'b1;
+      for (int r = 0; r < 4; r++) begin
+        logic [31:0] v;
+        v = iterative ? yv[r] : (cur_max && step == 6'd0) ? acc_max_i[r] : t0[r];
+        imm[r] = (cur_fn == SfNegate) ? fneg(v) : v;
+      end
     end
   end
 
@@ -368,11 +283,18 @@ module vec_scalar
             ph     <= PhIssue;
             step   <= 6'd0;
             tok    <= 2'd0;
-            cur    <= prog_i;
-            cur_rn <= recip_count_i;
-            ns     <= 3'd0;
-            nstart <= recip_count_i ? 6'd1 : (prog_i == ScRstd) ? 6'd10 : 6'd8;
-            nlen   <= (!recip_count_i && prog_i == ScRstd) ? 3'd5 : 3'd3;
+            cur_fn  <= prog_i.fn;
+            cur_rs0 <= prog_i.rs0;
+            cur_max <= prog_i.max;
+            cur_rn  <= recip_count_i;
+            ns      <= 3'd0;
+            b_load  <= n_load;
+            b_scale <= n_scale;
+            b_bias  <= n_bias;
+            b_seed  <= n_seed;
+            nstart  <= n_newton;
+            b_write <= n_write;
+            nlen    <= (!recip_count_i && prog_i.fn == SfRsqrt) ? 3'd5 : 3'd3;
           end
         end
         PhIssue: begin
@@ -415,7 +337,7 @@ module vec_scalar
   always_ff @(posedge clk_i) begin
     if (ph == PhIdle && start_i && recip_count_i) begin
       for (int r = 0; r < 4; r++) begin
-        av[r] <= float_n(nelem_i);
+        t0[r] <= float_n(nelem_i);
       end
     end
     if (ph == PhWrite) begin

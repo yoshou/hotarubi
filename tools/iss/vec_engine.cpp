@@ -108,7 +108,7 @@ WordResult ComputeWord(const Pass& pass, const WordOperands& in,
     for (uint32_t l = 0; l < kLanes; ++l) {
       const uint32_t y =
           LaneOutput(pass,
-                     {.x = in.x.at(PermutedIndex(pass.px, pass.pcol, t, l)),
+                     {.x = in.x.at(PermutedIndex(pass.px, t, l)),
                       .x2 = in.x2.at((t * kLanes) + l),
                       .pbuf = in.pbuf.at((pbuf_slice * kLanes) + l),
                       .t = t,
@@ -223,7 +223,7 @@ void VecEngine::RunTranspose(const Word128& instruction, Memories& memories) {
       Register(instruction.Field(94, 5)) & kFbufMask;
   const uint32_t dst_word_stride =
       Register(instruction.Field(89, 5)) & kFbufMask;
-  const bool zip4 = instruction.Field(88, 1) != 0;
+  const uint32_t rotation = instruction.Field(87, 2) % 3;
   ++activity_.transposes;
   activity_.transpose_tiles += tiles;
   for (uint32_t q = 0; q < tiles; ++q) {
@@ -239,7 +239,7 @@ void VecEngine::RunTranspose(const Word128& instruction, Memories& memories) {
       for (uint32_t t = 0; t < 4; ++t) {
         for (uint32_t column = 0; column < 8; ++column) {
           const uint32_t source_row =
-              zip4 ? (column / 2) + (4 * (column % 2)) : column;
+              ((column >> rotation) | (column << (3 - rotation))) & 7U;
           output.at((t * 8) + column) = tile.at(source_row).at((t * 8) + row);
         }
       }
@@ -307,14 +307,14 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
           "a PASS ends inside a block of 4 quantized words");
   if (pass.red != Reduction::kNone) {
     const uint64_t complete = slot_ + kReductionLatencyWords;
-    if (pass.sc != RowScalar::kNone) {
-      ++activity_.scalars.at(static_cast<size_t>(pass.sc));
+    if (pass.sf != ScalarFn::kNone) {
+      ++activity_.scalars;
       const uint64_t start = std::max(complete, scalar_free_slot_);
-      const uint32_t cycles =
-          ScalarProgramCycles(kScalarPrograms.at(static_cast<size_t>(pass.sc)));
+      const uint32_t cycles = ScalarProgramCycles(
+          RowScalarProgram(pass.red, pass.sf, pass.srn, pass.seps));
       scalar_free_slot_ = start + ((cycles + 3) / 4);
       ready_slot_.at(pass.ctx) = scalar_free_slot_;
-      ApplyRowScalar(pass.sc, state.reductions, state.imm, rn_,
+      ApplyRowScalar(pass, state.reductions, state.imm, rn_,
                      rows_.at(pass.ctx));
     } else {
       ready_slot_.at(pass.ctx) = complete;
@@ -390,11 +390,11 @@ void VecEngine::AwaitContext(uint32_t ctx) {
 
 bool VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
   const Pass& pass = state.pass;
-  const FbufWord x =
-      Operand(state, (state.src + WordOf(pass.wx, w)) & kFbufMask, memories);
+  const FbufWord x = Operand(
+      state, (state.src + WordOf(pass, pass.mx, w)) & kFbufMask, memories);
   const FbufWord x2 =
       pass.x2_en
-          ? Operand(state, (state.src2 + WordOf(pass.wx2, w)) & kFbufMask,
+          ? Operand(state, (state.src2 + WordOf(pass, pass.mx2, w)) & kFbufMask,
                     memories)
           : x;
   const uint32_t pbuf_address =
@@ -423,7 +423,7 @@ bool VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
     }
   }
   state.entry = (state.entry + 1) & 7U;
-  Store(state, WordOf(pass.wd, w), result.out, memories);
+  Store(state, WordOf(pass, pass.md, w), result.out, memories);
   ++slot_;
   return std::ranges::any_of(result.out, [](uint32_t v) { return v != 0; });
 }

@@ -231,7 +231,7 @@ module vec_lane
     end else begin
       pa = (c1_sel_i == C1Signfix && xneg) ? {~prod_c1[31], prod_c1[30:0]} : prod_c1;
       case (c1_sel_i)
-        C1Zero:    pb = 32'd0;
+        C1Zero:    pb = {neg_c1_i, 31'd0};
         C1Signfix: pb = xneg ? c1_ext_i : 32'd0;
         default:   pb = neg_c1_i ? {~c1_ext_i[31], c1_ext_i[30:0]} : c1_ext_i;
       endcase

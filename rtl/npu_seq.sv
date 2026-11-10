@@ -47,9 +47,7 @@ module npu_seq #(
   input  logic         m_axi_bvalid_i,
   output logic         m_axi_bready_o,
   input  logic         dma_axi_err_i,
-  output logic         eng_rst_no,
   output logic         gemm_cmd_valid_o,
-  input  logic         gemm_cmd_ready_i,
   input  logic         gemm_busy_i,
   output logic [19:0]  gemm_a_base_o,
   output logic [9:0]   gemm_a_stride_o,
@@ -62,7 +60,6 @@ module npu_seq #(
   output logic [1:0]   gemm_wmode_o,
   output logic         gemm_acc_o,
   output logic         vec_cmd_valid_o,
-  input  logic         vec_cmd_ready_i,
   input  logic         vec_busy_i,
   output logic [4:0]   vec_op_o,
   output logic         vec_q_o,
@@ -75,7 +72,6 @@ module npu_seq #(
   output logic [10:0]  vec_aux_o,
   output logic [31:0]  vec_imm_o,
   output logic         dma_cmd_valid_o,
-  input  logic         dma_cmd_ready_i,
   input  logic         dma_busy_i,
   output logic         dma_st_o,
   output logic [31:0]  dma_ddr_addr_o,
@@ -221,22 +217,9 @@ module npu_seq #(
     end
   end
 
-  logic [2:0] soft_cnt;
-  logic       srst;
+  logic srst;
 
-  assign srst = (soft_cnt != 3'd0);
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      soft_cnt <= '0;
-    end else if (soft_req) begin
-      soft_cnt <= 3'd7;
-    end else if (srst) begin
-      soft_cnt <= soft_cnt - 1'b1;
-    end
-  end
-
-  assign eng_rst_no = rst_ni;
+  assign srst = soft_req;
 
   logic                       pend_start, fetch_arv;
   logic [31:0]                fetch_pc, fetch_left;
@@ -256,7 +239,7 @@ module npu_seq #(
   assign m_axi_rready_o  = 1'b1;
   assign start_now       = pend_start && (inflight == 8'd0) && !fetch_arv;
   assign ib_clear        = start_now || srst;
-  assign ib_push         = m_axi_rvalid_i && !ib_clear;
+  assign ib_push         = m_axi_rvalid_i && running && !ib_clear;
 
   sfifo #(
     .Width      (128),
@@ -291,26 +274,19 @@ module npu_seq #(
                   8'(m_axi_rvalid_i);
       if (srst) begin
         pend_start <= 1'b0;
-        fetch_left <= '0;
-        if (m_axi_arready_i) begin
-          fetch_arv <= 1'b0;
-        end
-      end else begin
-        if (start_req) begin
-          pend_start <= 1'b1;
-        end
-        if (start_now) begin
-          pend_start <= 1'b0;
-          fetch_pc   <= instr_base;
-          fetch_left <= instr_count;
-        end
-        if (fetch_arv && m_axi_arready_i) begin
-          fetch_arv  <= 1'b0;
-          fetch_pc   <= fetch_pc + 32'({ar_beats, 4'b0});
-          fetch_left <= fetch_left - 32'(ar_beats);
-        end else if (!fetch_arv && running && fetch_left != 32'd0 && fetch_credit) begin
-          fetch_arv <= 1'b1;
-        end
+      end else if (start_now) begin
+        pend_start <= 1'b0;
+        fetch_pc   <= instr_base;
+        fetch_left <= instr_count;
+      end else if (start_req) begin
+        pend_start <= 1'b1;
+      end
+      if (fetch_arv && m_axi_arready_i) begin
+        fetch_arv  <= 1'b0;
+        fetch_pc   <= fetch_pc + 32'({ar_beats, 4'b0});
+        fetch_left <= fetch_left - 32'(ar_beats);
+      end else if (!fetch_arv && running && !srst && fetch_left != 32'd0 && fetch_credit) begin
+        fetch_arv <= 1'b1;
       end
     end
   end
@@ -329,9 +305,9 @@ module npu_seq #(
 
   always_comb begin
     case (opc)
-      OpDmaLd, OpDmaSt: eng_ok = dma_cmd_ready_i && !out_dma;
-      OpGemm:           eng_ok = gemm_cmd_ready_i && !out_gemm;
-      OpVec:            eng_ok = vec_cmd_ready_i && !out_vec;
+      OpDmaLd, OpDmaSt: eng_ok = !dma_busy_i && !out_dma;
+      OpGemm:           eng_ok = !gemm_busy_i && !out_gemm;
+      OpVec:            eng_ok = !vec_busy_i && !out_vec;
       OpWaitHost:       eng_ok = host_ok;
       default:          eng_ok = 1'b1;
     endcase
@@ -442,8 +418,9 @@ module npu_seq #(
   logic [31:0]  iss_idx [3];
   logic [15:0]  iss_tag [3];
   logic         slot_v  [4];
-  logic [127:0] slot_d  [4];
+  logic [31:0]  slot_c  [3];
   logic [127:0] slot_s  [3];
+  logic [127:0] ctrl_d;
   logic [23:0]  st_a    [3];
   logic [23:0]  st_b    [3];
   logic [23:0]  st_c    [3];
@@ -509,6 +486,12 @@ module npu_seq #(
     end
   end
 
+  function automatic logic [127:0] done_record(input logic [15:0] tag, input logic [1:0] src,
+                                               input logic [31:0] done, input logic [31:0] iss,
+                                               input logic [31:0] idx);
+    return {12'd0, tag, 2'b00, src, done, iss, idx};
+  endfunction
+
   function automatic logic [127:0] stat_record(input logic [1:0] src, input logic [31:0] idx,
                                                input logic [23:0] a, input logic [23:0] b,
                                                input logic [23:0] c, input logic [7:0] d);
@@ -530,9 +513,9 @@ module npu_seq #(
 
   logic done_gemm, done_vec, done_dma, done_ctrl;
 
-  assign done_gemm = out_gemm && !d_gemm && !gemm_busy_i && !gemm_cmd_valid_o;
-  assign done_vec  = out_vec && !d_vec && !vec_busy_i && !vec_cmd_valid_o;
-  assign done_dma  = out_dma && !d_dma && !dma_busy_i && !dma_cmd_valid_o;
+  assign done_gemm = out_gemm && !d_gemm && !gemm_busy_i;
+  assign done_vec  = out_vec && !d_vec && !vec_busy_i;
+  assign done_dma  = out_dma && !d_dma && !dma_busy_i;
   assign done_ctrl = issue && (src_sel == 2'(SrcCtrl));
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -560,56 +543,56 @@ module npu_seq #(
       end
       if (tr_en && done_gemm) begin
         slot_v[SrcGemm] <= 1'b1;
-        slot_d[SrcGemm] <= {12'd0, iss_tag[SrcGemm], 4'(SrcGemm), cyc, iss_cyc[SrcGemm],
-                            iss_idx[SrcGemm]};
+        slot_c[SrcGemm] <= cyc;
         slot_s[SrcGemm] <= stat_record(2'(SrcGemm), iss_idx[SrcGemm], st_a[SrcGemm],
                                        st_b[SrcGemm], st_c[SrcGemm], st_d[SrcGemm]);
       end
       if (tr_en && done_vec) begin
         slot_v[SrcVec] <= 1'b1;
-        slot_d[SrcVec] <= {12'd0, iss_tag[SrcVec], 4'(SrcVec), cyc, iss_cyc[SrcVec],
-                           iss_idx[SrcVec]};
+        slot_c[SrcVec] <= cyc;
         slot_s[SrcVec] <= stat_record(2'(SrcVec), iss_idx[SrcVec], st_a[SrcVec], st_b[SrcVec],
                                       st_c[SrcVec], st_d[SrcVec]);
       end
       if (tr_en && done_dma) begin
         slot_v[SrcDma] <= 1'b1;
-        slot_d[SrcDma] <= {12'd0, iss_tag[SrcDma], 4'(SrcDma), cyc, iss_cyc[SrcDma],
-                           iss_idx[SrcDma]};
+        slot_c[SrcDma] <= cyc;
         slot_s[SrcDma] <= stat_record(2'(SrcDma), iss_idx[SrcDma], st_a[SrcDma], st_b[SrcDma],
                                       st_c[SrcDma], st_d[SrcDma]);
       end
       if (tr_en && done_ctrl) begin
         slot_v[SrcCtrl] <= 1'b1;
-        slot_d[SrcCtrl] <= {12'd0, cur_tag, 4'(SrcCtrl), cyc, cyc, n_issued};
+        ctrl_d          <= done_record(cur_tag, 2'(SrcCtrl), cyc, cyc, n_issued);
       end
       tr_push <= 1'b0;
       if (tr_pend_v) begin
         tr_pend_v <= 1'b0;
         tr_push   <= 1'b1;
         tr_data   <= tr_pend_d;
-      end else if (slot_v[SrcDma] && !(tr_en && done_dma)) begin
+      end else if (slot_v[SrcDma]) begin
         slot_v[SrcDma] <= 1'b0;
         tr_push        <= 1'b1;
-        tr_data        <= slot_d[SrcDma];
+        tr_data        <= done_record(iss_tag[SrcDma], 2'(SrcDma), slot_c[SrcDma],
+                                      iss_cyc[SrcDma], iss_idx[SrcDma]);
         tr_pend_v      <= tr_stats;
         tr_pend_d      <= slot_s[SrcDma];
-      end else if (slot_v[SrcGemm] && !(tr_en && done_gemm)) begin
+      end else if (slot_v[SrcGemm]) begin
         slot_v[SrcGemm] <= 1'b0;
         tr_push         <= 1'b1;
-        tr_data         <= slot_d[SrcGemm];
+        tr_data         <= done_record(iss_tag[SrcGemm], 2'(SrcGemm), slot_c[SrcGemm],
+                                       iss_cyc[SrcGemm], iss_idx[SrcGemm]);
         tr_pend_v       <= tr_stats;
         tr_pend_d       <= slot_s[SrcGemm];
-      end else if (slot_v[SrcVec] && !(tr_en && done_vec)) begin
+      end else if (slot_v[SrcVec]) begin
         slot_v[SrcVec] <= 1'b0;
         tr_push        <= 1'b1;
-        tr_data        <= slot_d[SrcVec];
+        tr_data        <= done_record(iss_tag[SrcVec], 2'(SrcVec), slot_c[SrcVec],
+                                      iss_cyc[SrcVec], iss_idx[SrcVec]);
         tr_pend_v      <= tr_stats;
         tr_pend_d      <= slot_s[SrcVec];
-      end else if (slot_v[SrcCtrl] && !(tr_en && done_ctrl)) begin
+      end else if (slot_v[SrcCtrl]) begin
         slot_v[SrcCtrl] <= 1'b0;
         tr_push         <= 1'b1;
-        tr_data         <= slot_d[SrcCtrl];
+        tr_data         <= ctrl_d;
       end
       if (srst) begin
         for (int i = 0; i < 4; i++) begin

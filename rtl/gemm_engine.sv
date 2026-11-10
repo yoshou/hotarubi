@@ -8,7 +8,6 @@ module gemm_engine #(
   input  logic                 clk_i,
   input  logic                 rst_ni,
   input  logic                 cmd_valid_i,
-  output logic                 cmd_ready_o,
   input  logic [AddrWidth-1:0] cmd_a_base_i,
   input  logic [9:0]           cmd_a_stride_i,
   input  logic [9:0]           cmd_kb_i,
@@ -50,7 +49,6 @@ module gemm_engine #(
   logic [AddrWidth-1:0] a_i, a_qg, w_g, c_i, c_qg;
 
   assign issue_v     = running & !issue_done;
-  assign cmd_ready_o = !running;
   assign busy_o      = running;
   assign stat_fed_o  = issue_v;
 
@@ -215,7 +213,6 @@ module gemm_engine #(
   end
 
   logic                 o_valid   [Mp][Nt];
-  logic [2:0]           o_sel     [Mp][Nt];
   logic [AddrWidth-1:0] o_tag     [Mp][Nt];
   logic [31:0]          o_acc0    [Mp][Nt], o_acc1 [Mp][Nt];
   logic                 ireq      [Mp][Nt];
@@ -248,7 +245,6 @@ module gemm_engine #(
         .init0_i    (init_word[(2*p)*8 + c]),
         .init1_i    (init_word[(2*p+1)*8 + c]),
         .out_valid_o(o_valid[p][c]),
-        .out_sel_o  (o_sel[p][c]),
         .out_tag_o  (o_tag[p][c]),
         .out_acc0_o (o_acc0[p][c]),
         .out_acc1_o (o_acc1[p][c])
@@ -289,17 +285,8 @@ module gemm_engine #(
     end
   end
 
-  logic unused_sel, unused_gemm;
+  logic unused_gemm;
 
-  always_comb begin
-    unused_sel = 1'b0;
-    for (int p = 0; p < Mp; p++) begin
-      for (int c = 0; c < Nt; c++) begin
-        unused_sel ^= ^o_sel[p][c];
-      end
-    end
-  end
-
-  assign unused_gemm = ^{unused_sel, wbuf_rdata_i[1151:1088], m_rows[4:0]};
+  assign unused_gemm = ^{wbuf_rdata_i[1151:1088], m_rows[4:0]};
 
 endmodule

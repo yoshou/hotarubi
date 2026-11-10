@@ -19,8 +19,7 @@ void Timeline::Start() {
   busy_.fill(0);
 }
 
-Span Timeline::Issue(Source source, uint32_t wait, uint64_t cost,
-                     uint64_t earliest_start) {
+Span Timeline::Issue(Source source, uint32_t wait, uint64_t cost) {
   uint64_t issue = issued_ == 0 ? start_cycles_ : last_issue_ + 1;
   for (int e = 0; e < kEngines; ++e) {
     if ((wait & kWaitBits.at(e)) != 0) {
@@ -33,7 +32,6 @@ Span Timeline::Issue(Source source, uint32_t wait, uint64_t cost,
   }
   Span span{.issue = issue, .start = issue, .completion = issue};
   if (engine < kEngines) {
-    span.start = std::max(issue, earliest_start);
     span.completion = span.start + std::max<uint64_t>(cost, 1);
     free_.at(engine) = span.completion;
     busy_.at(engine) += span.completion - issue;

@@ -68,8 +68,7 @@ class Machine {
  private:
   void Start();
   void Issue(uint32_t opcode, const Word128& instruction);
-  [[nodiscard]] Cost Execute(uint32_t opcode, const Word128& instruction,
-                             uint64_t& earliest_start);
+  [[nodiscard]] Cost Execute(uint32_t opcode, const Word128& instruction);
   void Record(const Word128& instruction, const Span& span,
               const Statistics& statistics);
   void CheckHazards(Source source, uint32_t wait, const AccessLog& log);

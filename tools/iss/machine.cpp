@@ -64,8 +64,6 @@ constexpr uint32_t kStatusError = 0x4;
 constexpr uint32_t kStatusWaitingHost = 0x8;
 constexpr uint32_t kStatusIbufEmpty = 0x80;
 constexpr uint32_t kInstructionBytes = 16;
-constexpr uint32_t kMemTbuf = 4;
-constexpr uint32_t kMemCbuf = 5;
 
 uint32_t Low32(uint64_t value) { return static_cast<uint32_t>(value); }
 
@@ -292,16 +290,15 @@ void Machine::Start() {
 }
 
 void Machine::Issue(uint32_t opcode, const Word128& instruction) {
-  uint64_t earliest_start = 0;
   const Source source = SourceOf(opcode);
-  const Cost cost = Execute(opcode, instruction, earliest_start);
+  const Cost cost = Execute(opcode, instruction);
   CheckHazards(source, instruction.Field(116, 4), memories_.log);
   if (observer_) {
     observer_(issued_ - 1, memories_.log);
   }
   memories_.log.Clear();
-  const Span span = timeline_.Issue(source, instruction.Field(116, 4),
-                                    cost.cycles, earliest_start);
+  const Span span =
+      timeline_.Issue(source, instruction.Field(116, 4), cost.cycles);
   Statistics statistics = cost.statistics;
   if (source == Source::kDma) {
     statistics.c = Low32(span.start - span.issue);
@@ -331,16 +328,8 @@ void Machine::CheckHazards(Source source, uint32_t wait, const AccessLog& log) {
     if (e == engine) {
       continue;
     }
-    const bool tables_ordered = e == static_cast<size_t>(Source::kVec) &&
-                                engine == static_cast<size_t>(Source::kDma);
     for (const IssuedAccess& issued : history) {
-      AccessLog earlier = issued.log;
-      AccessLog later = log;
-      if (tables_ordered) {
-        earlier.reads.ClearTables();
-        later.writes.ClearTables();
-      }
-      if (const auto conflict = FindConflict(earlier, later)) {
+      if (const auto conflict = FindConflict(issued.log, log)) {
         hazards_.push_back(
             {.earlier = issued.index, .later = index, .conflict = *conflict});
       }
@@ -350,17 +339,12 @@ void Machine::CheckHazards(Source source, uint32_t wait, const AccessLog& log) {
   history_.at(engine).push_back({.index = index, .log = log});
 }
 
-Cost Machine::Execute(uint32_t opcode, const Word128& instruction,
-                      uint64_t& earliest_start) {
+Cost Machine::Execute(uint32_t opcode, const Word128& instruction) {
   switch (opcode) {
     case kOpDmaLoad:
     case kOpDmaStore: {
       const DmaCommand command = DecodeDma(instruction);
       dma_.Execute(command, ddr_, memories_);
-      if (!command.store &&
-          (command.mem == kMemTbuf || command.mem == kMemCbuf)) {
-        earliest_start = timeline_.EngineFree(Source::kVec);
-      }
       return model_.Dma(dma_.Activity());
     }
     case kOpGemm: {

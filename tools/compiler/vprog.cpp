@@ -35,7 +35,7 @@ uint32_t U(bool value) { return value ? 1 : 0; }
 
 bool Arithmetic(const Pass& pass) {
   return pass.c0 != C0::kZero || pass.b != B::kOne || pass.nl != Nl::kNone ||
-         pass.c1 != C1::kZero || pass.ialu != Ialu::kNone || pass.neg_c1 ||
+         pass.post != Post::kAdd || pass.post_x2 || pass.ialu != Ialu::kNone ||
          pass.red != Reduce::kNone || pass.pa != Pbuf::kNone;
 }
 
@@ -54,31 +54,36 @@ Instruction EncodePass(const Pass& pass) {
   Field(instruction, 88, 5, pass.rimm);
   Field(instruction, 83, 5, pass.rimm2);
   Field(instruction, 78, 1, U(pass.x2_en));
-  Field(instruction, 77, 2, U(pass.wx));
-  Field(instruction, 75, 2, U(pass.wx2));
-  Field(instruction, 73, 2, U(pass.wd));
-  Field(instruction, 71, 2, U(pass.pa));
-  Field(instruction, 68, 3, U(pass.c0));
-  Field(instruction, 65, 3, U(pass.b));
-  Field(instruction, 62, 2, U(pass.nl));
-  Field(instruction, 60, 2, U(pass.c1));
-  Field(instruction, 58, 1, U(pass.neg_c1));
-  Field(instruction, 57, 1, U(pass.mask_en));
-  Field(instruction, 56, 2, U(pass.red));
-  Field(instruction, 54, 2, U(pass.wr));
-  Field(instruction, 52, 3, U(pass.sc));
-  Field(instruction, 49, 3, U(pass.px));
-  Field(instruction, 43, 3, pass.pcol);
-  Field(instruction, 40, 3, U(pass.cmp));
-  Field(instruction, 37, 2, U(pass.cmp_src));
-  Field(instruction, 35, 1, U(pass.cmp_int));
-  Field(instruction, 34, 3, U(pass.sel));
-  Field(instruction, 31, 3, U(pass.ialu));
-  Field(instruction, 28, 1, U(pass.dst_s1));
-  Field(instruction, 27, 1, U(pass.c0_pred));
-  Field(instruction, 25, 1, U(pass.x_s1));
-  Field(instruction, 24, 2, pass.ctx);
-  Field(instruction, 22, 2, U(pass.rm));
+  Field(instruction, 77, 2, pass.map.group);
+  Field(instruction, 75, 2, pass.map.stride);
+  Field(instruction, 73, 2, U(pass.map.x));
+  Field(instruction, 71, 2, U(pass.map.x2));
+  Field(instruction, 69, 2, U(pass.map.dst));
+  Field(instruction, 67, 2, U(pass.pa));
+  Field(instruction, 65, 3, U(pass.c0));
+  Field(instruction, 62, 3, U(pass.b));
+  Field(instruction, 59, 2, U(pass.nl));
+  Field(instruction, 57, 2, U(pass.post));
+  Field(instruction, 55, 1, U(pass.post_x2));
+  Field(instruction, 54, 1, U(pass.mask_en));
+  Field(instruction, 53, 2, U(pass.red));
+  Field(instruction, 51, 2, U(pass.wr));
+  Field(instruction, 49, 3, U(pass.sc.fn));
+  Field(instruction, 46, 1, U(pass.sc.rs0));
+  Field(instruction, 45, 1, U(pass.sc.rn));
+  Field(instruction, 44, 1, U(pass.sc.eps));
+  Field(instruction, 43, 20, pass.px);
+  Field(instruction, 23, 3, U(pass.cmp));
+  Field(instruction, 20, 2, U(pass.cmp_left));
+  Field(instruction, 18, 1, U(pass.cmp_right_x2));
+  Field(instruction, 17, 1, U(pass.cmp_int));
+  Field(instruction, 16, 3, U(pass.sel));
+  Field(instruction, 13, 3, U(pass.ialu));
+  Field(instruction, 10, 1, U(pass.c0_pred));
+  Field(instruction, 9, 1, U(pass.x_s1));
+  Field(instruction, 8, 1, U(pass.dst_s1));
+  Field(instruction, 7, 2, pass.ctx);
+  Field(instruction, 5, 2, U(pass.rm));
   return instruction;
 }
 
@@ -141,6 +146,14 @@ void Assembler::Label(std::string_view name) {
 }
 
 Assembler& Assembler::Emit(const Pass& pass) {
+  const WordMap& map = pass.map;
+  const bool upper =
+      map.x == Map::kUpper || map.x2 == Map::kUpper || map.dst == Map::kUpper;
+  const bool grouped = upper || map.x == Map::kGroup || map.x2 == Map::kGroup ||
+                       map.dst == Map::kGroup;
+  Require(!grouped || map.stride >= map.group + (upper ? 1 : 0),
+          std::format("word map stride {} too small for group {}", map.stride,
+                      map.group));
   Pass emitted = pass;
   if (skip_masked_rows_ && emitted.rm == RowMask::kNone) {
     emitted.rm = RowMask::kSkip;
@@ -194,7 +207,7 @@ Assembler& Assembler::Transpose8(uint32_t src, uint32_t dst, uint32_t tiles,
                                  uint32_t src_tile_stride,
                                  uint32_t src_word_stride,
                                  uint32_t dst_tile_stride,
-                                 uint32_t dst_word_stride, TransposePack pack) {
+                                 uint32_t dst_word_stride, uint32_t rotation) {
   Instruction word;
   word.Set(124, 4, 7)
       .Set(119, 5, src)
@@ -204,7 +217,7 @@ Assembler& Assembler::Transpose8(uint32_t src, uint32_t dst, uint32_t tiles,
       .Set(99, 5, dst_tile_stride)
       .Set(94, 5, src_tile_stride)
       .Set(89, 5, dst_word_stride)
-      .Set(88, 1, static_cast<uint32_t>(pack));
+      .Set(87, 2, rotation);
   items_.emplace_back(word);
   ++size_;
   return *this;
@@ -222,7 +235,7 @@ Assembler& Assembler::StoreScalar(uint32_t rw, uint32_t rlane, uint32_t rcol,
                .rimm2 = rcol,
                .wr = Write::kFbuf,
                .cmp = Cmp::kNe,
-               .cmp_src = CmpSrc::kX2Imm2,
+               .cmp_left = CmpLeft::kX2,
                .cmp_int = true,
                .sel = Sel::kImm});
 }
@@ -307,7 +320,7 @@ Assembler& Assembler::FloorFloat(uint32_t rx, uint32_t rd, uint32_t rq,
                .c0 = C0::kImm,
                .wr = Write::kFbuf,
                .cmp = Cmp::kGt,
-               .cmp_src = CmpSrc::kX2,
+               .cmp_right_x2 = true,
                .c0_pred = true});
 }
 

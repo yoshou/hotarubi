@@ -18,8 +18,18 @@ inline constexpr uint32_t kCbufWords = 1024;
 inline constexpr uint32_t kRomWords = 256;
 inline constexpr uint32_t kNull = 0xFFFFFFFFU;
 
-enum class TransposePack : uint8_t { kNone = 0, kZip4 = 1 };
-enum class WordMap : uint8_t { kNorm = 0, kX1 = 1, kX2 = 2, kS4 = 3 };
+enum class Map : uint8_t { kNone = 0, kGroup = 1, kUpper = 2 };
+
+struct WordMap {
+  uint32_t group = 0;
+  uint32_t stride = 0;
+  Map x = Map::kNone;
+  Map x2 = Map::kNone;
+  Map dst = Map::kNone;
+};
+
+inline constexpr uint32_t kLog2e = 0x3FB8AA3B;
+
 enum class Pbuf : uint8_t { kNone = 0, kRowVec = 1, kTile = 2 };
 enum class C0 : uint8_t { kZero = 0, kX2 = 1, kPbuf = 2, kRs0 = 3, kImm = 4 };
 enum class B : uint8_t {
@@ -28,29 +38,72 @@ enum class B : uint8_t {
   kPbuf = 2,
   kRs1 = 3,
   kImm = 4,
-  kPre = 5,
-  kLog2e = 6
+  kPre = 5
 };
 enum class Nl : uint8_t { kNone = 0, kAct = 1, kExp2 = 2, kTab01 = 3 };
-enum class C1 : uint8_t { kZero = 0, kX2 = 1, kMax = 2, kSignfix = 3 };
+enum class Post : uint8_t { kAdd = 0, kSub = 1, kMax = 2, kSignfix = 3 };
 enum class Reduce : uint8_t { kNone = 0, kSum = 1, kMax = 2 };
 enum class Write : uint8_t { kNone = 0, kFbuf = 1, kAbuf = 2, kFinal = 3 };
-enum class RowScalar : uint8_t {
+enum class ScalarFn : uint8_t {
   kNone = 0,
-  kMean = 1,
-  kRstd = 2,
-  kNegMax = 3,
-  kRecipSum = 4,
-  kMax = 5
+  kIdentity = 1,
+  kNegate = 2,
+  kReciprocal = 3,
+  kRsqrt = 4
 };
-enum class Perm : uint8_t {
-  kNone = 0,
-  kBcast = 1,
-  kTswap1 = 2,
-  kTswap2 = 3,
-  kT4 = 4,
-  kT4b = 5
+
+struct RowScalar {
+  ScalarFn fn = ScalarFn::kNone;
+  bool rs0 = false;
+  bool rn = false;
+  bool eps = false;
 };
+
+inline constexpr RowScalar kMean{
+    .fn = ScalarFn::kNegate, .rs0 = true, .rn = true, .eps = false};
+inline constexpr RowScalar kRstd{
+    .fn = ScalarFn::kRsqrt, .rs0 = false, .rn = true, .eps = true};
+inline constexpr RowScalar kNegMax{
+    .fn = ScalarFn::kNegate, .rs0 = true, .rn = false, .eps = false};
+inline constexpr RowScalar kRecipSum{
+    .fn = ScalarFn::kReciprocal, .rs0 = false, .rn = false, .eps = false};
+inline constexpr RowScalar kMax{
+    .fn = ScalarFn::kIdentity, .rs0 = false, .rn = false, .eps = false};
+
+inline constexpr uint32_t kPermSame = 0;
+inline constexpr uint32_t kPermZero = 6;
+inline constexpr uint32_t kPermOne = 7;
+inline constexpr uint32_t kPermInvert = 8;
+
+constexpr uint32_t PermBit(uint32_t bit, uint32_t selector) {
+  return selector << (4 * bit);
+}
+
+constexpr uint32_t PermPosition(uint32_t position_bit) {
+  return 5 - position_bit;
+}
+
+constexpr uint32_t Bcast(uint32_t column) {
+  uint32_t code = 0;
+  for (uint32_t k = 0; k < 3; ++k) {
+    code |= PermBit(k, ((column >> k) & 1U) != 0 ? kPermOne : kPermZero);
+  }
+  return code;
+}
+
+constexpr uint32_t TokenXor(uint32_t mask) {
+  return ((mask & 1U) != 0 ? PermBit(3, kPermSame | kPermInvert) : 0) |
+         ((mask & 2U) != 0 ? PermBit(4, kPermSame | kPermInvert) : 0);
+}
+
+inline constexpr uint32_t kTokensToLanes =
+    PermBit(4, PermPosition(1)) | PermBit(3, PermPosition(0)) |
+    PermBit(2, PermPosition(4)) | PermBit(1, PermPosition(3)) |
+    PermBit(0, PermPosition(2));
+inline constexpr uint32_t kTokenPairsToLanes = PermBit(4, PermPosition(3)) |
+                                               PermBit(3, PermPosition(2)) |
+                                               PermBit(2, PermPosition(4));
+
 enum class Cmp : uint8_t {
   kNone = 0,
   kLt = 1,
@@ -60,7 +113,7 @@ enum class Cmp : uint8_t {
   kGt = 5,
   kGe = 6
 };
-enum class CmpSrc : uint8_t { kImm2 = 0, kX2 = 1, kLane = 2, kX2Imm2 = 3 };
+enum class CmpLeft : uint8_t { kX = 0, kX2 = 1, kColumn = 2, kPosition = 3 };
 enum class Sel : uint8_t {
   kNone = 0,
   kZero = 1,
@@ -109,23 +162,21 @@ struct Pass {
   uint32_t rimm = 0;
   uint32_t rimm2 = 0;
   bool x2_en = false;
-  WordMap wx = WordMap::kNorm;
-  WordMap wx2 = WordMap::kNorm;
-  WordMap wd = WordMap::kNorm;
+  WordMap map{};
   Pbuf pa = Pbuf::kNone;
   C0 c0 = C0::kZero;
   B b = B::kOne;
   Nl nl = Nl::kNone;
-  C1 c1 = C1::kZero;
-  bool neg_c1 = false;
+  Post post = Post::kAdd;
+  bool post_x2 = false;
   bool mask_en = false;
   Reduce red = Reduce::kNone;
   Write wr = Write::kNone;
-  RowScalar sc = RowScalar::kNone;
-  Perm px = Perm::kNone;
-  uint32_t pcol = 0;
+  RowScalar sc{};
+  uint32_t px = 0;
   Cmp cmp = Cmp::kNone;
-  CmpSrc cmp_src = CmpSrc::kImm2;
+  CmpLeft cmp_left = CmpLeft::kX;
+  bool cmp_right_x2 = false;
   bool cmp_int = false;
   Sel sel = Sel::kNone;
   Ialu ialu = Ialu::kNone;
@@ -173,7 +224,7 @@ class Assembler {
   Assembler& Transpose8(uint32_t src, uint32_t dst, uint32_t tiles,
                         uint32_t src_tile_stride, uint32_t src_word_stride,
                         uint32_t dst_tile_stride, uint32_t dst_word_stride,
-                        TransposePack pack = TransposePack::kNone);
+                        uint32_t rotation = 0);
 
   Assembler& StoreScalar(uint32_t rw, uint32_t rlane, uint32_t rcol,
                          uint32_t rval, uint32_t r_one);

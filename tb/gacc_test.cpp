@@ -66,8 +66,9 @@ GaccList MakeList(std::mt19937& rng, Ddr& ddr, uint32_t list_address,
     }
     WriteFbuf(ddr, w_address + (i * kFbufWordBytes), word);
   }
-  ddr.Write32(list_address, w_address / 16);
-  ddr.Write32(list_address + 4, list.w_stride | (list.quad_row_words << 16));
+  ddr.Write32(list_address,
+              (w_address + (quad * list.quad_row_words * kFbufWordBytes)) / 16);
+  ddr.Write32(list_address + 4, list.w_stride);
   ddr.Write32(list_address + 8, 0);
   ddr.Write32(list_address + 12, 0);
   for (uint32_t e = 0; e < slots * 16; ++e) {
@@ -143,13 +144,12 @@ std::vector<FbufWord> ToWords(const Accumulators& acc, uint32_t row_words) {
 }
 
 Instruction Gacc(uint32_t list_address, uint32_t slots, uint32_t row_words,
-                 uint32_t dst, uint32_t quad, uint32_t flags) {
+                 uint32_t dst, uint32_t flags) {
   return DmaLoad({.ddr_addr = list_address,
                   .mem = Mem::kFbuf,
                   .onchip = dst,
                   .rows = slots,
                   .row_words = row_words,
-                  .ddr_stride = quad,
                   .mode = DmaMode::kGacc,
                   .flags = flags});
 }
@@ -201,15 +201,14 @@ TEST(GaccTest, SingleListFromZero) {
   }
   ReferenceGacc(ddr, list, kRowWords, kQuad, acc);
   Preload(rng, ddr, 4 * kRowWords);
-  RunAndCompare(
-      bench,
-      {DmaLoad({.ddr_addr = kInitArea,
-                .mem = Mem::kFbuf,
-                .onchip = kDst,
-                .rows = 1,
-                .row_words = 4 * kRowWords}),
-       Gacc(kListArea, kSlots, kRowWords, kDst, kQuad, kGaccFlagFlush)},
-      kDst, ToWords(acc, kRowWords));
+  RunAndCompare(bench,
+                {DmaLoad({.ddr_addr = kInitArea,
+                          .mem = Mem::kFbuf,
+                          .onchip = kDst,
+                          .rows = 1,
+                          .row_words = 4 * kRowWords}),
+                 Gacc(kListArea, kSlots, kRowWords, kDst, kGaccFlagFlush)},
+                kDst, ToWords(acc, kRowWords));
 }
 
 TEST(GaccTest, ChainedListsAccumulate) {
@@ -230,12 +229,11 @@ TEST(GaccTest, ChainedListsAccumulate) {
   }
   ReferenceGacc(ddr, first, kRowWords, kQuad, acc);
   ReferenceGacc(ddr, second, kRowWords, kQuad, acc);
-  RunAndCompare(
-      bench,
-      {Gacc(first.list_address, first.slots, kRowWords, kDst, kQuad, 0),
-       Gacc(second.list_address, second.slots, kRowWords, kDst, kQuad,
-            kGaccFlagAcc | kGaccFlagFlush)},
-      kDst, ToWords(acc, kRowWords));
+  RunAndCompare(bench,
+                {Gacc(first.list_address, first.slots, kRowWords, kDst, 0),
+                 Gacc(second.list_address, second.slots, kRowWords, kDst,
+                      kGaccFlagAcc | kGaccFlagFlush)},
+                kDst, ToWords(acc, kRowWords));
 }
 
 TEST(GaccTest, WithoutFlushLeavesFbufUnchanged) {
@@ -254,7 +252,7 @@ TEST(GaccTest, WithoutFlushLeavesFbufUnchanged) {
                           .onchip = kDst,
                           .rows = 1,
                           .row_words = 4 * kRowWords}),
-                 Gacc(kListArea, list.slots, kRowWords, kDst, 0, 0)},
+                 Gacc(kListArea, list.slots, kRowWords, kDst, 0)},
                 kDst, init);
 }
 
@@ -273,10 +271,9 @@ TEST(GaccTest, MaximumBlocksPerToken) {
     token.assign(size_t{32} * kRowWords, kFp32Zero);
   }
   ReferenceGacc(ddr, list, kRowWords, kQuad, acc);
-  RunAndCompare(
-      bench,
-      {Gacc(kListArea, list.slots, kRowWords, kDst, kQuad, kGaccFlagFlush)},
-      kDst, ToWords(acc, kRowWords));
+  RunAndCompare(bench,
+                {Gacc(kListArea, list.slots, kRowWords, kDst, kGaccFlagFlush)},
+                kDst, ToWords(acc, kRowWords));
 }
 
 TEST(GaccTest, PartialLastSlotGroup) {
@@ -295,10 +292,9 @@ TEST(GaccTest, PartialLastSlotGroup) {
     token.assign(size_t{32} * kRowWords, kFp32Zero);
   }
   ReferenceGacc(ddr, list, kRowWords, kQuad, acc);
-  RunAndCompare(
-      bench,
-      {Gacc(kListArea, list.slots, kRowWords, kDst, kQuad, kGaccFlagFlush)},
-      kDst, ToWords(acc, kRowWords));
+  RunAndCompare(bench,
+                {Gacc(kListArea, list.slots, kRowWords, kDst, kGaccFlagFlush)},
+                kDst, ToWords(acc, kRowWords));
 }
 
 void RunFromZero(uint32_t seed, uint32_t row_words, uint32_t slots,
@@ -316,9 +312,9 @@ void RunFromZero(uint32_t seed, uint32_t row_words, uint32_t slots,
     token.assign(size_t{32} * row_words, kFp32Zero);
   }
   ReferenceGacc(ddr, list, row_words, kQuad, acc);
-  RunAndCompare(
-      bench, {Gacc(kListArea, slots, row_words, kDst, kQuad, kGaccFlagFlush)},
-      kDst, ToWords(acc, row_words));
+  RunAndCompare(bench,
+                {Gacc(kListArea, slots, row_words, kDst, kGaccFlagFlush)}, kDst,
+                ToWords(acc, row_words));
 }
 
 TEST(GaccTest, ManySlotGroupsWithMostEntriesNull) {

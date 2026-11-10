@@ -213,7 +213,7 @@ Case DependentChain() {
                     .rn8 = 5,
                     .red = 1,
                     .wr = 1,
-                    .sc = 5};
+                    .sf = 1};
   PassFields scaled{
       .rx = 13, .rd = 14, .rq = 4, .rnw = 5, .rn8 = 5, .b = 3, .wr = 1};
   return {.name = "run chain",

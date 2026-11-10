@@ -140,8 +140,7 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
   activity.overlaps = 1;
   activity.overlap_stall_words = 5;
   activity.context_stall_words = 7;
-  activity.scalars.at(1) = 1;
-  activity.scalars.at(4) = 1;
+  activity.scalars = 2;
   activity.rn = 1;
   activity.salu = 4;
   activity.smem = 2;
@@ -156,10 +155,17 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
 }
 
 TEST(CostModelTest, ScalarProgramsMatchTheRtl) {
-  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(1)), 92U);
-  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(2)), 325U);
-  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(3)), 4U);
-  EXPECT_EQ(ScalarProgramCycles(kScalarPrograms.at(4)), 215U);
+  const auto cycles = [](Reduction red, ScalarFn fn, bool rn, bool eps) {
+    return ScalarProgramCycles(RowScalarProgram(red, fn, rn, eps));
+  };
+  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kNegate, true, false), 92U);
+  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kRsqrt, true, true), 325U);
+  EXPECT_EQ(cycles(Reduction::kMax, ScalarFn::kNegate, false, false), 4U);
+  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kReciprocal, false, false), 215U);
+  EXPECT_EQ(cycles(Reduction::kMax, ScalarFn::kIdentity, false, false), 4U);
+  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kIdentity, false, false), 81U);
+  EXPECT_EQ(cycles(Reduction::kMax, ScalarFn::kReciprocal, true, false),
+            (13U * 11) + (3U * 2) + 2);
   EXPECT_EQ(ScalarProgramCycles(kCountReciprocalProgram), 138U);
 }
 
@@ -203,7 +209,7 @@ TEST(EstimateTest, IndexedAndRowFormatTransfersIncludeTheList) {
                                            .ddr_stride = 0,
                                            .mode = 0,
                                            .flags = 3,
-                                           .tok = 0});
+                                           .tok = 1});
   EXPECT_EQ(indexed.read_beats, 3U + (9U * 8));
   const DmaActivity rows = EstimateDma({.store = false,
                                         .ddr_addr = 0,
@@ -312,8 +318,7 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
   EXPECT_EQ(softmax.drains_quantized, 4U);
   EXPECT_EQ(softmax.drains, 4U);
   EXPECT_EQ(softmax.overlaps, 20U);
-  EXPECT_EQ(softmax.scalars.at(3), 8U);
-  EXPECT_EQ(softmax.scalars.at(4), 8U);
+  EXPECT_EQ(softmax.scalars, 16U);
   const VecActivity layernorm = FixedOperationActivity({.op = 6,
                                                         .quantize = true,
                                                         .src = 0,
@@ -328,8 +333,7 @@ TEST(EstimateTest, FixedOperationActivityExecutesTheRomProgram) {
   EXPECT_EQ(layernorm.drains, 4U);
   EXPECT_EQ(layernorm.overlaps, 36U);
   EXPECT_EQ(layernorm.overlap_stall_words, 0U);
-  EXPECT_EQ(layernorm.scalars.at(1), 8U);
-  EXPECT_EQ(layernorm.scalars.at(2), 8U);
+  EXPECT_EQ(layernorm.scalars, 16U);
   EXPECT_EQ(layernorm.rn, 1U);
   const VecActivity run = FixedOperationActivity({.op = 16,
                                                   .quantize = false,
@@ -382,18 +386,6 @@ TEST(TimelineTest, IssuesInOrderAndHonoursWaitBits) {
   EXPECT_EQ(timeline.Busy(Source::kVec), 20U);
   EXPECT_EQ(timeline.Starve(), 10U);
   EXPECT_EQ(timeline.Stall(), 133U - 10 - 5);
-}
-
-TEST(TimelineTest, EarliestStartDelaysTheDataPhaseButNotTheIssue) {
-  Timeline timeline;
-  timeline.Start();
-  const Span gemm = timeline.Issue(Source::kGemm, 0, 1000);
-  const Span store =
-      timeline.Issue(Source::kDma, 0, 30, timeline.EngineFree(Source::kGemm));
-  EXPECT_EQ(store.issue, gemm.issue + 1);
-  EXPECT_EQ(store.start, gemm.completion);
-  EXPECT_EQ(store.completion, gemm.completion + 30);
-  EXPECT_EQ(timeline.Busy(Source::kDma), store.completion - store.issue);
 }
 
 }  // namespace

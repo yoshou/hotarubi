@@ -74,9 +74,8 @@ module npu_top
   output logic         m1_axi_bready_o
 );
 
-  logic        eng_rst_n;
-  logic        gemm_cmd_valid, gemm_cmd_ready, gemm_busy, vec_cmd_valid, vec_cmd_ready, vec_busy;
-  logic        dma_cmd_valid, dma_cmd_ready, dma_busy;
+  logic        gemm_cmd_valid, gemm_busy, vec_cmd_valid, vec_busy;
+  logic        dma_cmd_valid, dma_busy;
   logic [19:0] gemm_a_base, gemm_w_base, gemm_c_base;
   logic [9:0]  gemm_a_stride, gemm_kb, gemm_m, gemm_w_stride;
   logic [7:0]  gemm_n8;
@@ -273,9 +272,7 @@ module npu_top
     .m_axi_bvalid_i  (q_axi_bvalid),
     .m_axi_bready_o  (q_axi_bready),
     .dma_axi_err_i   (dma_axi_err),
-    .eng_rst_no      (eng_rst_n),
     .gemm_cmd_valid_o(gemm_cmd_valid),
-    .gemm_cmd_ready_i(gemm_cmd_ready),
     .gemm_busy_i     (gemm_busy),
     .gemm_a_base_o   (gemm_a_base),
     .gemm_a_stride_o (gemm_a_stride),
@@ -288,7 +285,6 @@ module npu_top
     .gemm_wmode_o    (gemm_wmode),
     .gemm_acc_o      (gemm_acc),
     .vec_cmd_valid_o (vec_cmd_valid),
-    .vec_cmd_ready_i (vec_cmd_ready),
     .vec_busy_i      (vec_busy),
     .vec_op_o        (vec_op),
     .vec_q_o         (vec_q),
@@ -301,7 +297,6 @@ module npu_top
     .vec_aux_o       (vec_aux),
     .vec_imm_o       (vec_imm),
     .dma_cmd_valid_o (dma_cmd_valid),
-    .dma_cmd_ready_i (dma_cmd_ready),
     .dma_busy_i      (dma_busy),
     .dma_st_o        (dma_st),
     .dma_ddr_addr_o  (dma_ddr_addr),
@@ -339,9 +334,8 @@ module npu_top
     .FbLat    (3)
   ) u_gemm (
     .clk_i,
-    .rst_ni        (eng_rst_n),
+    .rst_ni        (rst_ni),
     .cmd_valid_i   (gemm_cmd_valid),
-    .cmd_ready_o   (gemm_cmd_ready),
     .cmd_a_base_i  (gemm_a_base),
     .cmd_a_stride_i(gemm_a_stride),
     .cmd_kb_i      (gemm_kb),
@@ -381,9 +375,8 @@ module npu_top
 
   vec_engine u_vec (
     .clk_i,
-    .rst_ni         (eng_rst_n),
+    .rst_ni         (rst_ni),
     .cmd_valid_i    (vec_cmd_valid),
-    .cmd_ready_o    (vec_cmd_ready),
     .cmd_op_i       (vec_op),
     .cmd_q_i        (vec_q),
     .cmd_src_i      (vec_src),
@@ -429,9 +422,8 @@ module npu_top
 
   dma_engine u_dma (
     .clk_i,
-    .rst_ni          (eng_rst_n),
+    .rst_ni          (rst_ni),
     .cmd_valid_i     (dma_cmd_valid),
-    .cmd_ready_o     (dma_cmd_ready),
     .cmd_st_i        (dma_st),
     .cmd_ddr_addr_i  (dma_ddr_addr),
     .cmd_mem_i       (dma_mem),
@@ -484,12 +476,6 @@ module npu_top
     .stat_null_o     (dma_stat_null)
   );
 
-  logic vec_busy_r;
-
-  always_ff @(posedge clk_i) begin
-    vec_busy_r <= vec_busy;
-  end
-
   logic d_wr_abuf, d_wr_wbuf, d_wr_fbuf, d_wr_pbuf, d_wr_tbuf, d_wr_cbuf, d_rd_abuf, d_rd_fbuf;
 
   assign d_wr_abuf = d_wr_req && (d_wr_mem == 3'd0);
@@ -509,12 +495,11 @@ module npu_top
     case (d_wr_mem)
       3'd0:       d_wr_grant = d_wr_req && !v_ab_wr_req;
       3'd2:       d_wr_grant = d_wr_req && !g_fbuf_we && !v_fb_wr_req;
-      3'd4, 3'd5: d_wr_grant = d_wr_req && !vec_busy_r;
       default:    d_wr_grant = d_wr_req;
     endcase
   end
 
-  assign d_rd_grant = d_rd_req && ((d_rd_mem == 3'd0) ? (!v_ab_wr_req && !d_wr_abuf) :
+  assign d_rd_grant = d_rd_req && ((d_rd_mem == 3'd0) ? !v_ab_wr_req :
                                    (d_rd_mem == 3'd2) ? (!g_fbuf_rd_req && !v_fb_rd_req) : 1'b1);
   assign d_rd_data  = (d_rd_mem == 3'd0) ? abuf_qb2 : {32'd0, fbuf_q2};
 
@@ -623,7 +608,7 @@ module npu_top
   logic [63:0] tb_wd_r;
 
   always_ff @(posedge clk_i) begin
-    tb_we_r <= d_wr_tbuf && !vec_busy_r;
+    tb_we_r <= d_wr_tbuf;
     tb_wa_r <= d_wr_addr[9:0];
     tb_wd_r <= d_wr_data[63:0];
   end
@@ -661,7 +646,7 @@ module npu_top
   logic [127:0] cb_wd_r;
 
   always_ff @(posedge clk_i) begin
-    cb_we_r <= d_wr_cbuf && !vec_busy_r;
+    cb_we_r <= d_wr_cbuf;
     cb_wa_r <= d_wr_addr[9:0];
     cb_wd_r <= d_wr_data[127:0];
   end

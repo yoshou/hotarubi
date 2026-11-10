@@ -154,7 +154,7 @@ VecEngineRun VecEngineBench::Run(const iss::VecCommand& command,
   model.cmd_imm_i = command.imm;
   model.clk_i = 0;
   model.eval();
-  Require(model.cmd_ready_o != 0, "the VEC engine is not idle");
+  Require(model.busy_o == 0, "the VEC engine is not idle");
   Tick(memories);
   model.cmd_valid_i = 0;
   VecEngineRun run;

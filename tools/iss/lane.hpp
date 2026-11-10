@@ -10,7 +10,7 @@
 
 namespace hotarubi::iss {
 
-enum class WordMap : uint8_t { kNorm = 0, kX1 = 1, kX2 = 2, kS4 = 3 };
+enum class MapMode : uint8_t { kNone = 0, kGroup = 1, kUpper = 2 };
 enum class PbufAccess : uint8_t { kNone = 0, kRowVec = 1, kTile = 2 };
 enum class C0Source : uint8_t {
   kZero = 0,
@@ -26,10 +26,9 @@ enum class BSource : uint8_t {
   kRs1 = 3,
   kImm = 4,
   kPre = 5,
-  kLog2e = 6,
 };
 enum class Nonlinear : uint8_t { kNone = 0, kAct = 1, kExp2 = 2, kTab01 = 3 };
-enum class C1Source : uint8_t { kZero = 0, kX2 = 1, kMax = 2, kSignfix = 3 };
+enum class PostOp : uint8_t { kAdd = 0, kSub = 1, kMax = 2, kSignfix = 3 };
 enum class Reduction : uint8_t { kNone = 0, kSum = 1, kMax = 2 };
 enum class WriteTarget : uint8_t {
   kNone = 0,
@@ -37,21 +36,12 @@ enum class WriteTarget : uint8_t {
   kAbuf = 2,
   kFinal = 3
 };
-enum class RowScalar : uint8_t {
+enum class ScalarFn : uint8_t {
   kNone = 0,
-  kMean = 1,
-  kRstd = 2,
-  kNegMax = 3,
-  kRecipSum = 4,
-  kMax = 5,
-};
-enum class Permutation : uint8_t {
-  kNone = 0,
-  kBcast = 1,
-  kTswap1 = 2,
-  kTswap2 = 3,
-  kT4 = 4,
-  kT4b = 5,
+  kIdentity = 1,
+  kNegate = 2,
+  kReciprocal = 3,
+  kRsqrt = 4,
 };
 enum class Compare : uint8_t {
   kNone = 0,
@@ -62,11 +52,11 @@ enum class Compare : uint8_t {
   kGt = 5,
   kGe = 6,
 };
-enum class CompareSource : uint8_t {
-  kImm2 = 0,
+enum class CompareLeft : uint8_t {
+  kX = 0,
   kX2 = 1,
-  kLane = 2,
-  kX2Imm2 = 3
+  kColumn = 2,
+  kPosition = 3
 };
 enum class Select : uint8_t {
   kNone = 0,
@@ -104,23 +94,28 @@ struct Pass {
   uint32_t rimm = 0;
   uint32_t rimm2 = 0;
   bool x2_en = false;
-  WordMap wx = WordMap::kNorm;
-  WordMap wx2 = WordMap::kNorm;
-  WordMap wd = WordMap::kNorm;
+  uint32_t mg = 0;
+  uint32_t ms = 0;
+  MapMode mx = MapMode::kNone;
+  MapMode mx2 = MapMode::kNone;
+  MapMode md = MapMode::kNone;
   PbufAccess pa = PbufAccess::kNone;
   C0Source c0 = C0Source::kZero;
   BSource b = BSource::kOne;
   Nonlinear nl = Nonlinear::kNone;
-  C1Source c1 = C1Source::kZero;
-  bool neg_c1 = false;
+  PostOp po = PostOp::kAdd;
+  bool pv = false;
   bool mask_en = false;
   Reduction red = Reduction::kNone;
   WriteTarget wr = WriteTarget::kNone;
-  RowScalar sc = RowScalar::kNone;
-  Permutation px = Permutation::kNone;
-  uint32_t pcol = 0;
+  ScalarFn sf = ScalarFn::kNone;
+  bool st = false;
+  bool srn = false;
+  bool seps = false;
+  uint32_t px = 0;
   Compare cmp = Compare::kNone;
-  CompareSource cmp_src = CompareSource::kImm2;
+  CompareLeft cl = CompareLeft::kX;
+  bool cr = false;
   bool cmp_int = false;
   Select sel = Select::kNone;
   IntegerOp ialu = IntegerOp::kNone;
@@ -133,8 +128,8 @@ struct Pass {
 
 Pass DecodePass(const Word128& instruction);
 
-uint32_t WordOf(WordMap map, uint32_t w);
-uint32_t PermutedIndex(Permutation px, uint32_t pcol, uint32_t t, uint32_t l);
+uint32_t WordOf(const Pass& pass, MapMode mode, uint32_t w);
+uint32_t PermutedIndex(uint32_t px, uint32_t t, uint32_t l);
 
 struct RowState {
   std::array<uint32_t, kTokens> rs0{};
@@ -155,7 +150,7 @@ uint32_t LaneOutput(const Pass& pass, const LaneInputs& in,
                     const RowState& rows, std::span<const uint64_t> tbuf);
 
 bool Predicate(const Pass& pass, const LaneInputs& in);
-uint32_t PostAdd(uint32_t prod, uint32_t c1, C1Source source, bool negate);
+uint32_t PostAdd(uint32_t prod, uint32_t c1, PostOp op);
 uint32_t Interpolate(uint64_t entry, uint32_t fraction);
 uint32_t Activation(uint32_t prod, std::span<const uint64_t> tbuf);
 uint32_t Exp2(uint32_t prod, std::span<const uint64_t> tbuf);

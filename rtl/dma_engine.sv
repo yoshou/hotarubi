@@ -2,7 +2,6 @@ module dma_engine (
   input  logic          clk_i,
   input  logic          rst_ni,
   input  logic          cmd_valid_i,
-  output logic          cmd_ready_o,
   input  logic          cmd_st_i,
   input  logic [31:0]   cmd_ddr_addr_i,
   input  logic [2:0]    cmd_mem_i,
@@ -93,9 +92,7 @@ module dma_engine (
   (* use_dsp = "yes" *) logic [23:0] rows_w;
   logic [23:0] oc_words;
   logic [19:0] n_half, kbt, kbt2, kbt3, kbt4;
-  logic [13:0] list_beats;
 
-  assign cmd_ready_o = (st == SIdle);
   assign busy_o      = (st != SIdle);
 
   logic [1:0] ga_null;
@@ -152,7 +149,7 @@ module dma_engine (
             c_abuf   <= (cmd_mem_i == 3'd0);
             c_gacc   <= !cmd_st_i && (cmd_mode_i == ModeGacc);
             c_gflags <= cmd_flags_i;
-            c_tok    <= (cmd_tok_i == 7'd0) ? 6'd1 : (cmd_tok_i > 7'd32) ? 6'd32 : cmd_tok_i[5:0];
+            c_tok    <= cmd_tok_i[5:0];
           end
         end
         SSetup1: begin
@@ -190,7 +187,6 @@ module dma_engine (
           kbt4       <= kbt << 2;
           row_beats  <= 16'(c_w) * 16'(ubeats);
           oc_words   <= c_row ? 24'((rows_w >> 2) * 24'(nwq)) : rows_w;
-          list_beats <= 14'((rows_w + 24'd3) >> 2);
         end
         SRun: begin
           if (c_st ? st_done : ld_done) begin
@@ -603,7 +599,7 @@ module dma_engine (
   logic [1151:0] rf_out_word;
   logic [127:0]  rf_bout;
   logic          wf_push, wf_pop, wf_empty, wf_afull;
-  logic [1174:0] wf_din, wf_dout;
+  logic [1171:0] wf_din, wf_dout;
   logic          pend_hi, pend_lo;
 
   assign cons_ok = (c_mode == ModeT32) ? t32_in_ready :
@@ -782,6 +778,8 @@ module dma_engine (
     .cfg_unpack_i(c_st),
     .cfg_abuf_i  (c_abuf),
     .cfg_tok_i   (c_tok),
+    .cfg_words_i (nwq),
+    .cfg_beats_i (ubeats),
     .in_valid_i  (src_v && run && !c_st && c_row),
     .in_ready_o  (rf_in_ready),
     .in_data_i   (src_d),
@@ -832,7 +830,6 @@ module dma_engine (
     .start_i    (ga_start),
     .cfg_slots_i(c_rows),
     .cfg_kb_i   (c_w[3:0]),
-    .cfg_q_i    (c_stride[15:0]),
     .cfg_acc_i  (c_gflags[0]),
     .cfg_flush_i(c_gflags[1]),
     .cfg_dst_i  (c_oc[12:0]),
@@ -873,31 +870,31 @@ module dma_engine (
     wf_din  = '0;
     if (c_gacc) begin
       wf_push = ga_out_valid && ga_out_ready;
-      wf_din  = {3'd2, 7'd0, ga_out_addr, 128'd0, ga_out_word};
+      wf_din  = {7'd0, ga_out_addr, 128'd0, ga_out_word};
     end else if (c_row) begin
       wf_push = rf_out_valid && rf_out_ready;
-      wf_din  = {c_mem, dst_cnt, rf_out_word};
+      wf_din  = {dst_cnt, rf_out_word};
     end else if (c_mode == ModeT32) begin
       wf_push = t_v;
-      wf_din  = {3'd1, t_addr, t_d};
+      wf_din  = {t_addr, t_d};
     end else if (c_mode == ModeSplit8) begin
       if (pend_hi) begin
         wf_push = 1'b1;
-        wf_din  = {3'd1, c_oc + idx_hi, 64'd0, s_hi};
+        wf_din  = {c_oc + idx_hi, 64'd0, s_hi};
       end else if (pend_lo) begin
         wf_push = 1'b1;
-        wf_din  = {3'd1, c_oc + n_half + idx_hi, 64'd0, s_lo};
+        wf_din  = {c_oc + n_half + idx_hi, 64'd0, s_lo};
       end
     end else begin
       wf_push = wv;
-      wf_din  = {c_mem, dst_cnt, asm_r};
+      wf_din  = {dst_cnt, asm_r};
     end
   end
 
   logic [3:0] wf_count;
 
   sfifo #(
-    .Width      (1175),
+    .Width      (1172),
     .Depth      (8),
     .AfullMargin(3)
   ) u_wf (
@@ -914,7 +911,7 @@ module dma_engine (
   );
 
   logic          wo_v;
-  logic [1174:0] wo_d;
+  logic [1171:0] wo_d;
 
   assign wf_pop = !wf_empty && (!wo_v || wr_grant_i);
 
@@ -933,7 +930,7 @@ module dma_engine (
   end
 
   assign wr_req_o  = wo_v;
-  assign wr_mem_o  = wo_d[1174:1172];
+  assign wr_mem_o  = c_mem;
   assign wr_addr_o = wo_d[1171:1152];
   assign wr_data_o = wo_d[1151:0];
 
@@ -1124,7 +1121,7 @@ module dma_engine (
 
   logic unused_dma;
 
-  assign unused_dma = ^{m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, rf_afull,
-                        rf_count, tf_count, wq_afull, wq_count, wf_count, list_beats, wb_count};
+  assign unused_dma = ^{cmd_tok_i[6], m_axi_rresp_i, m_axi_bresp_i, ib_afull, uf_count, rf_afull,
+                        rf_count, tf_count, wq_afull, wq_count, wf_count, wb_count};
 
 endmodule

@@ -86,11 +86,6 @@ void AccessSet::AddTable(Mem mem) {
   }
 }
 
-void AccessSet::ClearTables() {
-  tbuf.reset();
-  cbuf.reset();
-}
-
 void AccessLog::Clear() {
   reads = {};
   writes = {};

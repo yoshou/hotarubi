@@ -22,7 +22,7 @@ uint32_t Fp32Negate(uint32_t bits);
 uint32_t Reciprocal(uint32_t bits);
 uint32_t ReciprocalSqrt(uint32_t bits);
 uint32_t CountReciprocal(uint32_t count);
-void ApplyRowScalar(RowScalar program, const Reductions& reductions,
+void ApplyRowScalar(const Pass& pass, const Reductions& reductions,
                     uint32_t epsilon, uint32_t rn, RowState& rows);
 
 }  // namespace hotarubi::iss

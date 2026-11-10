@@ -157,10 +157,10 @@ struct RowFormat {
 };
 
 RowFormat MakeRowFormat(const DmaCommand& command, bool indexed) {
-  const uint32_t tok = command.tok == 0 ? 1 : std::min(command.tok, 32U);
+  const uint32_t tok = command.tok;
   const bool mxint8 = command.mem == 0;
-  Require(mxint8 || tok <= 8,
-          std::format("FP32 row format with tok = {} above 8", tok));
+  Require(tok >= 1 && tok <= (mxint8 ? 32U : 8U),
+          std::format("row format with tok = {}", tok));
   const uint32_t words = mxint8 ? tok : 4 * tok;
   uint32_t scale_beats = 0;
   if (mxint8) {
@@ -588,6 +588,7 @@ void DmaEngine::Execute(const DmaCommand& command, Ddr& ddr,
 void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
                        Memories& memories) {
   const uint32_t blocks = command.row_words;
+  Require(command.mem == static_cast<uint32_t>(Mem::kFbuf), "GACC writes FBUF");
   Require(blocks >= 1 && blocks <= kGatherMaxBlocks,
           std::format("GACC with {} blocks per token", blocks));
   Require(command.rows <= kGatherMaxSlots,
@@ -602,10 +603,7 @@ void DmaEngine::Gather(const DmaCommand& command, const Ddr& ddr,
   CountRead(activity_, 1 + (entries / 2));
   const uint64_t header = ddr.Read64(command.ddr_addr);
   const GatherWeights weights{
-      .base = UnitAddress(static_cast<uint32_t>(header)) +
-              (((command.ddr_stride & 0xFFFFU) *
-                static_cast<uint32_t>((header >> 48) & 0xFFFFU))
-               << 7),
+      .base = UnitAddress(static_cast<uint32_t>(header)),
       .stride = static_cast<uint32_t>((header >> 32) & 0xFFFFU) << 7,
       .blocks = blocks,
   };

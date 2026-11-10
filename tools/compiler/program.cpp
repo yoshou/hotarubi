@@ -288,16 +288,14 @@ size_t Program::Store(const Transfer& transfer, std::string_view note) {
 
 size_t Program::Gacc(const GaccArgs& args, std::string_view note) {
   Require(args.slots < kRowLimit && args.blocks >= 1 && args.blocks <= 8 &&
-              args.quad < (1U << 16) && args.list_offset % kBeatBytes == 0,
-          std::format("bad GACC: slots {} blocks {} quad {}", args.slots,
-                      args.blocks, args.quad));
+              args.list_offset % kBeatBytes == 0,
+          std::format("bad GACC: slots {} blocks {}", args.slots, args.blocks));
   const DmaFields fields{
       .ddr_addr = DmaAddress(args.list_offset),
       .mem = Mem::kFbuf,
       .onchip = args.dst,
       .rows = args.slots,
       .row_words = args.blocks,
-      .ddr_stride = args.quad,
       .mode = DmaMode::kGacc,
       .tok = 0,
       .flags = (args.acc ? kFlagAcc : 0) | (args.flush ? kFlagFlush : 0)};

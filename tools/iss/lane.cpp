@@ -129,8 +129,6 @@ uint32_t BValue(const Pass& pass, const LaneInputs& in, const RowState& rows,
       return in.imm;
     case BSource::kPre:
       return pre;
-    case BSource::kLog2e:
-      return kFp32Log2e;
     case BSource::kOne:
       break;
   }
@@ -174,14 +172,13 @@ uint32_t FloatResult(const Pass& pass, const LaneInputs& in,
     case Nonlinear::kNone:
       break;
   }
-  return PostAdd(prod, c1, pass.c1, pass.neg_c1);
+  return PostAdd(prod, c1, pass.po);
 }
 
-uint32_t SelectValue(Select sel, uint32_t c1, const LaneInputs& in,
-                     const RowState& rows) {
+uint32_t SelectValue(Select sel, const LaneInputs& in, const RowState& rows) {
   switch (sel) {
     case Select::kX2:
-      return c1;
+      return in.x2;
     case Select::kImm:
       return in.imm;
     case Select::kNull:
@@ -210,78 +207,88 @@ Pass DecodePass(const Word128& instruction) {
       .rimm = w.Field(84, 5),
       .rimm2 = w.Field(79, 5),
       .x2_en = Flag(w, 78),
-      .wx = static_cast<WordMap>(w.Field(76, 2)),
-      .wx2 = static_cast<WordMap>(w.Field(74, 2)),
-      .wd = static_cast<WordMap>(w.Field(72, 2)),
-      .pa = Decode(w.Field(70, 2), PbufAccess::kTile, PbufAccess::kNone),
-      .c0 = Decode(w.Field(66, 3), C0Source::kImm, C0Source::kZero),
-      .b = Decode(w.Field(63, 3), BSource::kLog2e, BSource::kOne),
-      .nl = static_cast<Nonlinear>(w.Field(61, 2)),
-      .c1 = static_cast<C1Source>(w.Field(59, 2)),
-      .neg_c1 = Flag(w, 58),
-      .mask_en = Flag(w, 57),
-      .red = Decode(w.Field(55, 2), Reduction::kMax, Reduction::kNone),
-      .wr = static_cast<WriteTarget>(w.Field(53, 2)),
-      .sc = Decode(w.Field(50, 3), RowScalar::kMax, RowScalar::kNone),
-      .px = Decode(w.Field(47, 3), Permutation::kT4b, Permutation::kNone),
-      .pcol = w.Field(41, 3),
-      .cmp = Decode(w.Field(38, 3), Compare::kGe, Compare::kNone),
-      .cmp_src = static_cast<CompareSource>(w.Field(36, 2)),
-      .cmp_int = Flag(w, 35),
-      .sel = Decode(w.Field(32, 3), Select::kRs1, Select::kZero),
-      .ialu = static_cast<IntegerOp>(w.Field(29, 3)),
-      .dst_s1 = Flag(w, 28),
-      .c0_pred = Flag(w, 27),
-      .x_s1 = Flag(w, 25),
-      .ctx = w.Field(23, 2),
-      .rm = Decode(w.Field(21, 2), RowMask::kSet, RowMask::kNone),
+      .mg = w.Field(76, 2),
+      .ms = w.Field(74, 2),
+      .mx = Decode(w.Field(72, 2), MapMode::kUpper, MapMode::kNone),
+      .mx2 = Decode(w.Field(70, 2), MapMode::kUpper, MapMode::kNone),
+      .md = Decode(w.Field(68, 2), MapMode::kUpper, MapMode::kNone),
+      .pa = Decode(w.Field(66, 2), PbufAccess::kTile, PbufAccess::kNone),
+      .c0 = Decode(w.Field(63, 3), C0Source::kImm, C0Source::kZero),
+      .b = Decode(w.Field(60, 3), BSource::kPre, BSource::kOne),
+      .nl = static_cast<Nonlinear>(w.Field(58, 2)),
+      .po = static_cast<PostOp>(w.Field(56, 2)),
+      .pv = Flag(w, 55),
+      .mask_en = Flag(w, 54),
+      .red = Decode(w.Field(52, 2), Reduction::kMax, Reduction::kNone),
+      .wr = static_cast<WriteTarget>(w.Field(50, 2)),
+      .sf = Decode(w.Field(47, 3), ScalarFn::kRsqrt, ScalarFn::kNone),
+      .st = Flag(w, 46),
+      .srn = Flag(w, 45),
+      .seps = Flag(w, 44),
+      .px = w.Field(24, 20),
+      .cmp = Decode(w.Field(21, 3), Compare::kGe, Compare::kNone),
+      .cl = static_cast<CompareLeft>(w.Field(19, 2)),
+      .cr = Flag(w, 18),
+      .cmp_int = Flag(w, 17),
+      .sel = Decode(w.Field(14, 3), Select::kRs1, Select::kZero),
+      .ialu = static_cast<IntegerOp>(w.Field(11, 3)),
+      .dst_s1 = Flag(w, 8),
+      .c0_pred = Flag(w, 10),
+      .x_s1 = Flag(w, 9),
+      .ctx = w.Field(6, 2),
+      .rm = Decode(w.Field(4, 2), RowMask::kSet, RowMask::kNone),
   };
 }
 
-uint32_t WordOf(WordMap map, uint32_t w) {
-  switch (map) {
-    case WordMap::kX1:
-      return (((w >> 2) & 0xFU) << 3) | (w & 3U);
-    case WordMap::kX2:
-      return (((w >> 2) & 0xFU) << 3) | 4U | (w & 3U);
-    case WordMap::kS4:
-      return (w & 0xFFU) << 2;
-    case WordMap::kNorm:
-      break;
+uint32_t WordOf(const Pass& pass, MapMode mode, uint32_t w) {
+  if (mode == MapMode::kNone) {
+    return w;
   }
-  return w;
+  const uint32_t group = 1U << pass.mg;
+  const uint32_t mapped = ((w >> pass.mg) << pass.ms) + (w & (group - 1));
+  return mode == MapMode::kUpper ? mapped + group : mapped;
 }
 
-uint32_t PermutedIndex(Permutation px, uint32_t pcol, uint32_t t, uint32_t l) {
-  switch (px) {
-    case Permutation::kBcast:
-      return (t * kLanes) + pcol;
-    case Permutation::kTswap1:
-      return ((t ^ 1U) * kLanes) + l;
-    case Permutation::kTswap2:
-      return ((t ^ 2U) * kLanes) + l;
-    case Permutation::kT4:
-      return ((l & 3U) << 3) | (t << 1) | (l >> 2);
-    case Permutation::kT4b:
-      return ((t & 1U) << 4) | ((l >> 2) << 3) | ((t >> 1) << 2) | (l & 3U);
-    case Permutation::kNone:
-      break;
+uint32_t PermutedIndex(uint32_t px, uint32_t t, uint32_t l) {
+  const uint32_t position = (t * kLanes) + l;
+  uint32_t index = 0;
+  for (uint32_t k = 0; k < 5; ++k) {
+    const uint32_t selector = (px >> (4 * k)) & 0xFU;
+    const uint32_t source = selector & 7U;
+    uint32_t bit = 0;
+    if (source == 0) {
+      bit = (position >> k) & 1U;
+    } else if (source <= 5) {
+      bit = (position >> (5 - source)) & 1U;
+    } else {
+      bit = source - 6;
+    }
+    index |= (bit ^ (selector >> 3)) << k;
   }
-  return (t * kLanes) + l;
+  return index;
 }
 
 bool Predicate(const Pass& pass, const LaneInputs& in) {
   if (pass.cmp == Compare::kNone) {
     return true;
   }
-  const bool lane = pass.cmp_src == CompareSource::kLane;
   uint32_t left = in.x;
-  if (pass.cmp_src == CompareSource::kX2Imm2) {
-    left = in.x2;
-  } else if (lane) {
-    left = pass.cmp_int ? (in.t * kLanes) + in.l : in.l;
+  switch (pass.cl) {
+    case CompareLeft::kX2:
+      left = in.x2;
+      break;
+    case CompareLeft::kColumn:
+      left = in.l;
+      break;
+    case CompareLeft::kPosition:
+      left = (in.t * kLanes) + in.l;
+      break;
+    case CompareLeft::kX:
+      break;
   }
-  const uint32_t right = pass.cmp_src == CompareSource::kX2 ? in.x2 : in.imm2;
+  const bool lane =
+      pass.cl == CompareLeft::kColumn || pass.cl == CompareLeft::kPosition;
+  const uint32_t right = pass.cr ? in.x2 : in.imm2;
   if (pass.cmp_int || lane) {
     return Holds(pass.cmp, left ^ kFp32SignBit, right ^ kFp32SignBit);
   }
@@ -291,9 +298,12 @@ bool Predicate(const Pass& pass, const LaneInputs& in) {
 uint32_t LaneOutput(const Pass& pass, const LaneInputs& in,
                     const RowState& rows, std::span<const uint64_t> tbuf) {
   const bool predicate = Predicate(pass, in);
-  const uint32_t c1 = pass.c1 == C1Source::kSignfix ? in.x : in.x2;
   if (pass.sel != Select::kNone && !predicate) {
-    return SelectValue(pass.sel, c1, in, rows);
+    return SelectValue(pass.sel, in, rows);
+  }
+  uint32_t c1 = pass.pv ? in.x2 : 0;
+  if (pass.po == PostOp::kSignfix) {
+    c1 = in.x;
   }
   const uint32_t c0 = pass.c0_pred && !predicate ? 0 : C0Value(pass, in, rows);
   if (pass.ialu != IntegerOp::kNone) {
@@ -302,21 +312,19 @@ uint32_t LaneOutput(const Pass& pass, const LaneInputs& in,
   return FloatResult(pass, in, rows, c0, c1, tbuf);
 }
 
-uint32_t PostAdd(uint32_t prod, uint32_t c1, C1Source source, bool negate) {
-  switch (source) {
-    case C1Source::kMax: {
-      const uint32_t other = negate ? 0 : c1;
-      return Fp32Add(MaxGreaterEqual(prod, other) ? prod : other, 0);
-    }
-    case C1Source::kSignfix:
+uint32_t PostAdd(uint32_t prod, uint32_t c1, PostOp op) {
+  switch (op) {
+    case PostOp::kMax:
+      return Fp32Add(MaxGreaterEqual(prod, c1) ? prod : c1, 0);
+    case PostOp::kSignfix:
       return (c1 >> 31) != 0 ? Fp32Add(prod ^ kFp32SignBit, c1)
                              : Fp32Add(prod, 0);
-    case C1Source::kX2:
-      return Fp32Add(prod, negate ? c1 ^ kFp32SignBit : c1);
-    case C1Source::kZero:
+    case PostOp::kSub:
+      return Fp32Add(prod, c1 ^ kFp32SignBit);
+    case PostOp::kAdd:
       break;
   }
-  return Fp32Add(prod, 0);
+  return Fp32Add(prod, c1);
 }
 
 uint32_t Interpolate(uint64_t entry, uint32_t fraction) {

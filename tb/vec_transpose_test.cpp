@@ -20,7 +20,7 @@ struct Transpose {
   uint32_t src_word_stride = 1;
   uint32_t dst_tile_stride = 8;
   uint32_t dst_word_stride = 1;
-  bool zip4 = false;
+  uint32_t rotation = 0;
 };
 
 struct Response {
@@ -49,8 +49,9 @@ std::vector<Word> Transposed(const std::vector<Word>& memory,
                            4095U;
       for (uint32_t matrix = 0; matrix < 4; ++matrix) {
         for (uint32_t column = 0; column < 8; ++column) {
-          const uint32_t input_row =
-              config.zip4 ? (column / 2) + (4 * (column % 2)) : column;
+          const uint32_t input_row = ((column >> config.rotation) |
+                                      (column << (3 - config.rotation))) &
+                                     7U;
           const uint32_t src = (config.src + (q * config.src_tile_stride) +
                                 (input_row * config.src_word_stride)) &
                                4095U;
@@ -90,7 +91,7 @@ void Execute(const Transpose& config, std::vector<Word>& memory,
   model.src_word_stride_i = config.src_word_stride;
   model.dst_tile_stride_i = config.dst_tile_stride;
   model.dst_word_stride_i = config.dst_word_stride;
-  model.pack_zip4_i = config.zip4 ? 1 : 0;
+  model.rotation_i = config.rotation;
   std::deque<Response> responses;
   uint32_t writes = 0;
   for (uint32_t cycle = 0; cycle < 100000; ++cycle) {
@@ -133,24 +134,24 @@ void CheckTranspose(const Transpose& config, uint32_t seed) {
 }
 
 TEST(VecTransposeTest, PreservesBitsAndStridesUnderIndependentBackpressure) {
-  for (const bool zip4 : {false, true}) {
+  for (const uint32_t rotation : {0U, 1U, 2U}) {
     for (const uint32_t tiles : {0U, 1U, 3U, 32U, 64U}) {
       CheckTranspose({.tiles = tiles,
                       .dst_tile_stride = 1,
                       .dst_word_stride = tiles,
-                      .zip4 = zip4},
+                      .rotation = rotation},
                      29 + tiles);
       CheckTranspose({.tiles = tiles,
                       .src_tile_stride = 24,
                       .src_word_stride = 2,
                       .dst_tile_stride = 24,
                       .dst_word_stride = 3,
-                      .zip4 = zip4},
+                      .rotation = rotation},
                      31 + tiles);
       CheckTranspose({.tiles = tiles,
                       .src_tile_stride = 1,
                       .src_word_stride = 0,
-                      .zip4 = zip4},
+                      .rotation = rotation},
                      37 + tiles);
     }
     CheckTranspose({.src = 4090,
@@ -159,11 +160,14 @@ TEST(VecTransposeTest, PreservesBitsAndStridesUnderIndependentBackpressure) {
                     .src_tile_stride = 16,
                     .dst_tile_stride = 24,
                     .dst_word_stride = 3,
-                    .zip4 = zip4},
+                    .rotation = rotation},
                    41);
-    CheckTranspose(
-        {.src = 0, .dst = 8, .tiles = 511, .src_tile_stride = 0, .zip4 = zip4},
-        53);
+    CheckTranspose({.src = 0,
+                    .dst = 8,
+                    .tiles = 511,
+                    .src_tile_stride = 0,
+                    .rotation = rotation},
+                   53);
   }
 }
 

@@ -66,30 +66,33 @@ uint32_t CountReciprocal(uint32_t count) {
   return Reciprocal((static_cast<uint32_t>(127 + top) << 23) | fraction);
 }
 
-void ApplyRowScalar(RowScalar program, const Reductions& reductions,
+void ApplyRowScalar(const Pass& pass, const Reductions& reductions,
                     uint32_t epsilon, uint32_t rn, RowState& rows) {
   for (uint32_t t = 0; t < kTokens; ++t) {
-    const std::array<uint32_t, kLanes>& sums = reductions.sum.at(t);
-    switch (program) {
-      case RowScalar::kMean:
-        rows.rs0.at(t) = Fp32Negate(Fp32Mul(SumTree(sums), rn));
-        break;
-      case RowScalar::kRstd:
-        rows.rs1.at(t) =
-            ReciprocalSqrt(Fp32Add(Fp32Mul(SumTree(sums), rn), epsilon));
-        break;
-      case RowScalar::kNegMax:
-        rows.rs0.at(t) = Fp32Negate(reductions.max.at(t));
-        break;
-      case RowScalar::kRecipSum:
-        rows.rs1.at(t) = Reciprocal(SumTree(sums));
-        break;
-      case RowScalar::kMax:
-        rows.rs1.at(t) = reductions.max.at(t);
-        break;
-      case RowScalar::kNone:
-        break;
+    uint32_t value = pass.red == Reduction::kSum ? SumTree(reductions.sum.at(t))
+                                                 : reductions.max.at(t);
+    if (pass.srn) {
+      value = Fp32Mul(value, rn);
     }
+    if (pass.seps) {
+      value = Fp32Add(value, epsilon);
+    }
+    switch (pass.sf) {
+      case ScalarFn::kNegate:
+        value = Fp32Negate(value);
+        break;
+      case ScalarFn::kReciprocal:
+        value = Reciprocal(value);
+        break;
+      case ScalarFn::kRsqrt:
+        value = ReciprocalSqrt(value);
+        break;
+      case ScalarFn::kIdentity:
+        break;
+      case ScalarFn::kNone:
+        return;
+    }
+    (pass.st ? rows.rs0 : rows.rs1).at(t) = value;
   }
 }
 

@@ -17,25 +17,25 @@ namespace hotarubi::iss {
 inline constexpr uint32_t kBeatsPerKilobeat = 1024;
 
 struct TimingParameters {
-  uint32_t start_cycles = 44;
+  uint32_t start_cycles = 48;
   uint32_t gemm_fixed_cycles = 51;
-  uint32_t dma_fixed_cycles = 26;
+  uint32_t dma_fixed_cycles = 27;
   uint32_t dma_read_cycles_per_kilobeat = 833;
   uint32_t dma_read_burst_cycles = 3;
-  uint32_t dma_write_cycles_per_kilobeat = 939;
-  uint32_t dma_write_burst_cycles = 1;
+  uint32_t dma_write_cycles_per_kilobeat = 980;
+  uint32_t dma_write_burst_cycles = 0;
   uint32_t dma_gather_entry_cycles = 0;
   uint32_t dma_gather_row_cycles = 18;
   uint32_t dma_gather_fetch_cycles = 23;
-  uint32_t vec_fixed_cycles = 22;
-  uint32_t vec_pass_cycles = 2;
+  uint32_t vec_fixed_cycles = 12;
+  uint32_t vec_pass_cycles = 3;
   uint32_t vec_word_cycles = 4;
   uint32_t vec_issue_tail_cycles = 2;
   uint32_t vec_drain_cycles = 41;
   uint32_t vec_drain_quantized_cycles = 22;
-  uint32_t vec_salu_cycles = 5;
+  uint32_t vec_salu_cycles = 4;
   uint32_t vec_smem_cycles = 0;
-  uint32_t vec_branch_cycles = 2;
+  uint32_t vec_branch_cycles = 6;
   uint32_t vec_transpose_cycles = 26;
   uint32_t vec_transpose_tile_cycles = 10;
 };

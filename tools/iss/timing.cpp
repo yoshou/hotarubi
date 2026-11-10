@@ -46,7 +46,7 @@ uint64_t Bursts(uint64_t beats) {
 }
 
 uint32_t RowFormatBeats(const DmaCommand& command) {
-  const uint32_t tok = command.tok == 0 ? 1 : std::min(command.tok, 32U);
+  const uint32_t tok = command.tok;
   if (command.mem == 0) {
     return (2 * tok) + (tok > 16 ? 2 : 1);
   }

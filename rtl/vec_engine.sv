@@ -5,7 +5,6 @@ module vec_engine
   input  logic          clk_i,
   input  logic          rst_ni,
   input  logic          cmd_valid_i,
-  output logic          cmd_ready_o,
   input  logic [4:0]    cmd_op_i,
   input  logic          cmd_q_i,
   input  logic [11:0]   cmd_src_i,
@@ -49,7 +48,6 @@ module vec_engine
 
   typedef enum logic [4:0] {
     StIdle,
-    StInit,
     StFetch,
     StFwait,
     StDecode,
@@ -89,15 +87,7 @@ module vec_engine
   logic [31:0]  pn_imm, pn_imm2;
   pass_t        pd;
   logic         qf;
-  logic [11:0]  c_src, c_src2, c_scr;
-  logic [12:0]  c_dst;
-  logic [8:0]   c_rows_q;
-  logic [7:0]   c_n8;
-  logic [9:0]   c_p_base;
-  logic [10:0]  c_aux;
-  logic [31:0]  c_imm;
 
-  assign cmd_ready_o   = (st == StIdle);
   assign busy_o        = (st != StIdle);
   assign stat_issue_o  = (st == StIssue) || (st == StTransposeWait);
   assign stat_drain_o  = (st == StDrain) || (st == StMdrain);
@@ -106,20 +96,54 @@ module vec_engine
   assign stat_pass_o   = (st == StSegSetup) && !pass_wait;
 
   (* ram_style = "distributed" *) logic [31:0] rf [32];
+  logic [31:0] creg [CmdRegs];
   logic        rf_we;
   logic [4:0]  rf_wa, ra_q, rb_q;
   logic [31:0] rf_wd;
 
+  function automatic logic is_creg(input logic [4:0] r);
+    return (r != 5'd0) && (r <= 5'(CmdRegs));
+  endfunction
+
   always_ff @(posedge clk_i) begin
-    if (rf_we) begin
+    if (rf_we && !is_creg(rf_wa)) begin
       rf[rf_wa] <= rf_wd;
     end
   end
 
+  logic [11:0] cmd_scratch;
+
+  assign cmd_scratch = !cmd_q_i ? cmd_dst_i[11:0] :
+                       uses_imm(cmd_op_i) ? cmd_src2_i : cmd_imm_i[11:0];
+
+  always_ff @(posedge clk_i) begin
+    if (st == StIdle && cmd_valid_i) begin
+      creg[0] <= 32'(cmd_src_i);
+      creg[1] <= 32'(cmd_src2_i);
+      creg[2] <= 32'(cmd_dst_i);
+      creg[3] <= 32'(cmd_rows_q_i);
+      creg[4] <= 32'(cmd_n8_i);
+      creg[5] <= 32'(cmd_p_base_i);
+      creg[6] <= cmd_op_i[4] ? 32'd0 : 32'(cmd_aux_i);
+      creg[7] <= cmd_imm_i;
+      creg[8] <= 32'(cmd_scratch);
+      creg[9] <= 32'(cmd_q_i);
+    end else if (rf_we && is_creg(rf_wa)) begin
+      creg[4'(rf_wa - 5'd1)] <= rf_wd;
+    end
+  end
+
+  function automatic logic [31:0] reg_read(input logic [4:0] r);
+    if (r == 5'd0) begin
+      return 32'd0;
+    end
+    return is_creg(r) ? creg[4'(r - 5'd1)] : rf[r];
+  endfunction
+
   logic [31:0] rf_a, rf_b;
 
-  assign rf_a = (ra_q == 5'd0) ? 32'd0 : rf[ra_q];
-  assign rf_b = (rb_q == 5'd0) ? 32'd0 : rf[rb_q];
+  assign rf_a = reg_read(ra_q);
+  assign rf_b = reg_read(rb_q);
 
   logic [11:0] p_x, p_x2;
   logic [12:0] p_d;
@@ -145,20 +169,22 @@ module vec_engine
   logic [2:0]  slot_j;
   logic [1:0]  gap;
 
-  function automatic logic [9:0] word_of(input rw_e sel, input logic [9:0] wn);
-    case (sel)
-      MapX1:   return {3'd0, wn[5:2], 1'b0, wn[1:0]};
-      MapX2:   return {3'd0, wn[5:2], 1'b1, wn[1:0]};
-      MapS4:   return {wn[7:0], 2'b00};
+  function automatic logic [9:0] word_of(input mm_e mode, input logic [1:0] mg,
+                                         input logic [1:0] ms, input logic [9:0] wn);
+    logic [9:0] group;
+    group = 10'd1 << mg;
+    case (mode)
+      MmGroup: return ((wn >> mg) << ms) | (wn & (group - 10'd1));
+      MmUpper: return ((wn >> mg) << ms) | (wn & (group - 10'd1)) | group;
       default: return wn;
     endcase
   endfunction
 
   logic [9:0] wa_word, wb_word, ww_word;
 
-  assign wa_word = word_of(pd.wx, w);
-  assign wb_word = word_of(pd.wx2, w);
-  assign ww_word = word_of(pd.wd, w);
+  assign wa_word = word_of(pd.mx, pd.mg, pd.ms, w);
+  assign wb_word = word_of(pd.mx2, pd.mg, pd.ms, w);
+  assign ww_word = word_of(pd.md, pd.mg, pd.ms, w);
 
   logic wf_afull, df_afull, af_afull;
   logic pend_full, pend_clear;
@@ -199,8 +225,9 @@ module vec_engine
     rd_ctrl.c0        = pd.c0;
     rd_ctrl.b         = pd.b;
     rd_ctrl.nl        = pd.nl;
-    rd_ctrl.c1        = pd.c1;
-    rd_ctrl.neg_c1    = pd.neg_c1;
+    rd_ctrl.c1        = (pd.po == PoMax) ? C1Max : (pd.po == PoSignfix) ? C1Signfix :
+                        pd.pv ? C1X2 : C1Zero;
+    rd_ctrl.neg_c1    = (pd.po == PoSub) | ((pd.po == PoMax) & !pd.pv);
     rd_ctrl.mask      = mask8;
     rd_ctrl.red       = pd.red;
     rd_ctrl.wr        = wr_eff;
@@ -216,9 +243,9 @@ module vec_engine
     endcase
     rd_ctrl.pa_slice = w[1:0];
     rd_ctrl.px       = pd.px;
-    rd_ctrl.pcol     = pd.pcol;
     rd_ctrl.cmp      = pd.cmp;
-    rd_ctrl.cmp_src  = pd.cmp_src;
+    rd_ctrl.cl       = pd.cl;
+    rd_ctrl.cr       = pd.cr;
     rd_ctrl.cmp_int  = pd.cmp_int;
     rd_ctrl.sel      = pd.sel;
     rd_ctrl.ialu     = pd.ialu;
@@ -302,7 +329,7 @@ module vec_engine
     .src_word_stride_i(p_x2),
     .dst_tile_stride_i(tr_dst_tile_stride),
     .dst_word_stride_i(tr_dst_word_stride),
-    .pack_zip4_i      (ins[88]),
+    .rotation_i       (ins[88:87]),
     .busy_o           (tr_busy),
     .rd_req_o         (tr_rd),
     .rd_grant_i       (fbuf_rd_grant_i),
@@ -315,7 +342,7 @@ module vec_engine
   );
 
   logic               sc_start, sc_recip_n, sc_running;
-  sc_e                sc_prog;
+  sc_t                sc_prog;
   logic [13:0]        sc_nelem;
   logic [CtxIdxW-1:0] sc_ctx;
   logic               sc_rs_we, sc_rs_sel;
@@ -333,7 +360,7 @@ module vec_engine
   logic [NumContexts-1:0] ctx_reducing, ctx_issued, ctx_sc_pending, ctx_idle, sc_outstanding,
                           ctx_done;
   logic [8:0]             ctx_pending [NumContexts];
-  sc_e                    ctx_prog [NumContexts];
+  sc_t                    ctx_prog [NumContexts];
   logic [31:0]            ctx_eps [NumContexts];
   logic                   pass_reads_rs, pass_last_fire, ctx_all_idle, sm_ready;
   logic                   sum_done, max_done;
@@ -352,7 +379,7 @@ module vec_engine
 
   always_comb begin
     for (int k = 0; k < NumContexts; k++) begin
-      sc_outstanding[k] = (ctx_reducing[k] & (ctx_prog[k] != ScNone)) | ctx_sc_pending[k];
+      sc_outstanding[k] = (ctx_reducing[k] & (ctx_prog[k].fn != SfNone)) | ctx_sc_pending[k];
       ctx_idle[k]       = !ctx_reducing[k] & !ctx_sc_pending[k];
       ctx_done[k]       = ctx_reducing[k] & ctx_issued[k] & (ctx_pending[k] == 9'd0);
     end
@@ -366,7 +393,7 @@ module vec_engine
         done_ctx = CtxIdxW'(k);
       end
     end
-    rq_push = done_any & (ctx_prog[done_ctx] != ScNone);
+    rq_push = done_any & (ctx_prog[done_ctx].fn != SfNone);
     case (sm_op)
       SmemRn:    sm_ready = rq_empty & !sc_busy & !sc_start & !sc_running;
       SmemRsmov: sm_ready = !sc_outstanding[sm_ctx];
@@ -387,7 +414,7 @@ module vec_engine
       sc_running     <= 1'b0;
       for (int k = 0; k < NumContexts; k++) begin
         ctx_pending[k] <= 9'd0;
-        ctx_prog[k]    <= ScNone;
+        ctx_prog[k]    <= '0;
       end
     end else begin
       for (int k = 0; k < NumContexts; k++) begin
@@ -399,7 +426,8 @@ module vec_engine
         if (red_clear & (pd_ctx == CtxIdxW'(k))) begin
           ctx_reducing[k] <= 1'b1;
           ctx_issued[k]   <= 1'b0;
-          ctx_prog[k]     <= pd.sc;
+          ctx_prog[k]     <= '{fn: pd.sf, rs0: pd.st, rn: pd.srn, eps: pd.seps,
+                                max: (pd.red == RedMax)};
           ctx_eps[k]      <= p_imm;
         end
         if (pass_last_fire & (pd.red != RedNone) & (pd_ctx == CtxIdxW'(k))) begin
@@ -407,7 +435,7 @@ module vec_engine
         end
         if (done_any & (done_ctx == CtxIdxW'(k))) begin
           ctx_reducing[k]   <= 1'b0;
-          ctx_sc_pending[k] <= (ctx_prog[k] != ScNone);
+          ctx_sc_pending[k] <= (ctx_prog[k].fn != SfNone);
         end
         if (sc_rs_we & sc_running & (sc_ctx == CtxIdxW'(k))) begin
           ctx_sc_pending[k] <= 1'b0;
@@ -559,44 +587,8 @@ module vec_engine
       case (st)
         StIdle: begin
           if (cmd_valid_i) begin
-            c_src    <= cmd_src_i;
-            c_src2   <= cmd_src2_i;
-            c_dst    <= cmd_dst_i;
-            c_rows_q <= cmd_rows_q_i;
-            c_n8     <= cmd_n8_i;
-            c_p_base <= cmd_p_base_i;
-            c_imm    <= cmd_imm_i;
-            qf       <= cmd_q_i;
-            c_scr    <= !cmd_q_i ? cmd_dst_i[11:0] :
-                        uses_imm(cmd_op_i) ? cmd_src2_i : cmd_imm_i[11:0];
-            if (cmd_op_i[4]) begin
-              pc    <= cmd_aux_i[9:0];
-              c_aux <= 11'd0;
-            end else begin
-              pc    <= RomPc[cmd_op_i[3:0]];
-              c_aux <= cmd_aux_i;
-            end
-            cnt <= 4'd1;
-            st  <= StInit;
-          end
-        end
-        StInit: begin
-          rf_we <= 1'b1;
-          rf_wa <= 5'(cnt);
-          case (cnt)
-            4'd1:    rf_wd <= 32'(c_src);
-            4'd2:    rf_wd <= 32'(c_src2);
-            4'd3:    rf_wd <= 32'(c_dst);
-            4'd4:    rf_wd <= 32'(c_rows_q);
-            4'd5:    rf_wd <= 32'(c_n8);
-            4'd6:    rf_wd <= 32'(c_p_base);
-            4'd7:    rf_wd <= 32'(c_aux);
-            4'd8:    rf_wd <= c_imm;
-            4'd9:    rf_wd <= 32'(c_scr);
-            default: rf_wd <= 32'(qf);
-          endcase
-          cnt <= cnt + 4'd1;
-          if (cnt == 4'd10) begin
+            qf <= cmd_q_i;
+            pc <= cmd_op_i[4] ? cmd_aux_i[9:0] : RomPc[cmd_op_i[3:0]];
             st <= StFetch;
           end
         end
@@ -1017,19 +1009,33 @@ module vec_engine
 
   logic [Hw-1:0] ent_x, ent_x2;
 
+  function automatic logic [4:0] source_index(input logic [19:0] px, input logic [4:0] pos);
+    logic [4:0] index;
+    for (int k = 0; k < 5; k++) begin
+      logic [3:0] sel;
+      logic       b;
+      sel = px[k*4 +: 4];
+      case (sel[2:0])
+        3'd0:    b = pos[k];
+        3'd1:    b = pos[4];
+        3'd2:    b = pos[3];
+        3'd3:    b = pos[2];
+        3'd4:    b = pos[1];
+        3'd5:    b = pos[0];
+        3'd6:    b = 1'b0;
+        default: b = 1'b1;
+      endcase
+      index[k] = b ^ sel[3];
+    end
+    return index;
+  endfunction
+
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
       logic [1:0] t;
       logic [4:0] si;
-      t = ent_c.ph;
-      case (ent_c.px)
-        PxBcast:  si = {t, ent_c.pcol};
-        PxTswap1: si = {t ^ 2'b01, 3'(l)};
-        PxTswap2: si = {t ^ 2'b10, 3'(l)};
-        PxT4:     si = {2'(l), {t, 1'(l >> 2)}};
-        PxT4b:    si = {{t[0], 1'(l >> 2)}, {t[1], 2'(l)}};
-        default:  si = {t, 3'(l)};
-      endcase
+      t  = ent_c.ph;
+      si = source_index(ent_c.px, {t, 3'(l)});
       ent_x[l*32 +: 32]  = ent_xw[si*32 +: 32];
       ent_x2[l*32 +: 32] = ent_x2w[{t, 3'(l)}*32 +: 32];
     end
@@ -1081,14 +1087,19 @@ module vec_engine
   always_comb begin
     for (int l = 0; l < Lanes; l++) begin
       logic [31:0] xl, x2l, lhs, rhs, kl, kr, c0v;
-      logic        lt, eq;
+      logic        lt, eq, ii;
       xl  = e0_x[l*32 +: 32];
       x2l = e0_x2[l*32 +: 32];
-      lhs = (e0_c.cmp_src == CmpSrcX2Imm2) ? x2l :
-            (e0_c.cmp_src == CmpSrcLane) ? (e0_c.cmp_int ? 32'({e0_c.ph, 3'(l)}) : 32'(l)) : xl;
-      rhs = (e0_c.cmp_src == CmpSrcX2) ? x2l : e0_c.imm2;
-      kl  = (e0_c.cmp_int | (e0_c.cmp_src == CmpSrcLane)) ? (lhs ^ 32'h80000000) : fkey(lhs);
-      kr  = (e0_c.cmp_int | (e0_c.cmp_src == CmpSrcLane)) ? (rhs ^ 32'h80000000) : fkey(rhs);
+      case (e0_c.cl)
+        ClX2:       lhs = x2l;
+        ClColumn:   lhs = 32'(l);
+        ClPosition: lhs = 32'({e0_c.ph, 3'(l)});
+        default:    lhs = xl;
+      endcase
+      rhs = e0_c.cr ? x2l : e0_c.imm2;
+      ii  = e0_c.cmp_int | (e0_c.cl == ClColumn) | (e0_c.cl == ClPosition);
+      kl  = ii ? (lhs ^ 32'h80000000) : fkey(lhs);
+      kr  = ii ? (rhs ^ 32'h80000000) : fkey(rhs);
       lt  = (kl < kr);
       eq  = (kl == kr);
       e0_pred[l] = (e0_c.cmp == CmpNone) ? 1'b1 : cmp_rel(e0_c.cmp, lt, eq);
@@ -1221,7 +1232,6 @@ module vec_engine
         BPbuf:   b_ext[l*32 +: 32] = d1[StageB-1][l*32 +: 32];
         BRs1:    b_ext[l*32 +: 32] = rs1_b;
         BImm:    b_ext[l*32 +: 32] = c_b.imm;
-        BLog2e:  b_ext[l*32 +: 32] = FpLog2e;
         default: b_ext[l*32 +: 32] = FpOne;
       endcase
     end
