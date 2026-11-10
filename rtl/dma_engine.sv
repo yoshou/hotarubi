@@ -1,4 +1,6 @@
-module dma_engine (
+module dma_engine
+  import isa_pkg::*;
+(
   input  logic          clk_i,
   input  logic          rst_ni,
   input  logic          cmd_valid_i,
@@ -61,12 +63,6 @@ module dma_engine (
   localparam int UfDepth = 64;
   localparam int WqDepth = 64;
 
-  localparam logic [2:0] KindRow        = 3'd1;
-  localparam logic [2:0] KindRowIndexed = 3'd2;
-  localparam logic [2:0] KindSplit8     = 3'd3;
-  localparam logic [2:0] KindT32        = 3'd4;
-  localparam logic [2:0] KindGacc       = 3'd5;
-
   localparam logic [1:0] ModeRaw    = 2'd0;
   localparam logic [1:0] ModeSplit8 = 2'd1;
   localparam logic [1:0] ModeT32    = 2'd2;
@@ -77,9 +73,9 @@ module dma_engine (
       return ModeRaw;
     end
     case (kind)
-      KindSplit8: return ModeSplit8;
-      KindT32:    return ModeT32;
-      KindGacc:   return ModeGacc;
+      DmaKindSplit8:    return ModeSplit8;
+      DmaKindT32Split8: return ModeT32;
+      DmaKindGacc:      return ModeGacc;
       default:    return ModeRaw;
     endcase
   endfunction
@@ -123,8 +119,8 @@ module dma_engine (
 
   always_comb begin
     case (c_mem)
-      3'd0, 3'd1: bpw = 4'd9;
-      3'd4, 3'd5: bpw = 4'd1;
+      MemAbuf, MemWbuf: bpw = 4'd9;
+      MemTbuf, MemCbuf: bpw = 4'd1;
       default:    bpw = 4'd8;
     endcase
   end
@@ -163,10 +159,10 @@ module dma_engine (
             c_w      <= cmd_row_words_i;
             c_stride <= {cmd_ddr_stride_i, 4'b0};
             c_mode   <= mode_of(cmd_st_i, cmd_kind_i);
-            c_idx    <= !cmd_st_i && (cmd_kind_i == KindRowIndexed);
-            c_row    <= (cmd_kind_i == KindRow) || (cmd_kind_i == KindRowIndexed);
-            c_abuf   <= (cmd_mem_i == 3'd0);
-            c_gacc   <= !cmd_st_i && (cmd_kind_i == KindGacc);
+            c_idx    <= !cmd_st_i && (cmd_kind_i == DmaKindRowIndexed);
+            c_row    <= (cmd_kind_i == DmaKindRow) || (cmd_kind_i == DmaKindRowIndexed);
+            c_abuf   <= (cmd_mem_i == MemAbuf);
+            c_gacc   <= !cmd_st_i && (cmd_kind_i == DmaKindGacc);
             c_gflags <= {cmd_flush_i, cmd_acc_i};
             c_tok    <= cmd_tok_i;
           end
@@ -320,7 +316,7 @@ module dma_engine (
   logic        gi_can, gi_step;
 
   assign gi_entry = ib_dout[gi_sub * 32 +: 32];
-  assign gi_null  = (gi_entry == 32'hFFFFFFFF);
+  assign gi_null  = (gi_entry == NullEntry);
   assign gi_can   = run && c_idx && !gi_done && !ib_empty && !uf_afull;
   assign gi_valid = gi_can && !gi_null;
   assign gi_step  = gi_can && (gi_null || gi_ready);

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "hotarubi/runtime.hpp"
 #include "input.hpp"
@@ -24,8 +25,6 @@
 
 namespace hotarubi::tb {
 namespace {
-
-constexpr uint32_t Offset(Register reg) { return static_cast<uint32_t>(reg); }
 
 constexpr uint32_t kRegStatus = Offset(Register::kStatus);
 constexpr uint32_t kRegIssued = Offset(Register::kIssued);
@@ -38,9 +37,6 @@ constexpr uint32_t kRegStarveCycles = Offset(Register::kStarveCycles);
 constexpr uint32_t kRegTraceBase = Offset(Register::kTraceBase);
 constexpr uint32_t kRegTraceCtrl = Offset(Register::kTraceCtrl);
 constexpr uint32_t kRegTraceCount = Offset(Register::kTraceCount);
-constexpr uint32_t kStatusHalted = 0x2;
-constexpr uint32_t kStatusError = 0x4;
-constexpr uint32_t kTraceIdle = 0x2;
 constexpr uint32_t kStreamAlignment = 256;
 constexpr uint32_t kInstructionBytes = 16;
 constexpr uint32_t kSlack = 4096;
@@ -180,7 +176,7 @@ std::expected<Counters, std::string> RunKernel(const KernelOptions& options) {
   }
   const auto count = static_cast<uint32_t>(selected->size());
   const uint64_t needed =
-      uint64_t{count} * kTraceRecordBytes * (options.statistics ? 2 : 1);
+      uint64_t{count} * isa::trace::kRecordBytes * (options.statistics ? 2 : 1);
   if (trace_region->second.size < needed) {
     return std::unexpected(
         std::format("the trace region holds {} bytes but the kernel needs {}",
@@ -274,7 +270,7 @@ std::expected<Counters, std::string> RunKernel(const KernelOptions& options) {
   }
   const std::span<const uint8_t> records =
       memory.subspan(trace_region->second.offset,
-                     size_t{counters.trace_count} * kTraceRecordBytes);
+                     size_t{counters.trace_count} * isa::trace::kRecordBytes);
   if (auto written = WriteBytes(
           options.out / std::format("{}.trace.bin", kKernelStream), records);
       !written) {

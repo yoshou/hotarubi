@@ -4,11 +4,12 @@
 #include <array>
 #include <cstdint>
 
+#include "hotarubi/isa.hpp"
 #include "word.hpp"
 
 namespace hotarubi::iss {
 
-inline constexpr uint32_t kRomWords = 256;
+using isa::vec::kRomWords;
 
 extern const std::array<Word128, kRomWords> kRom;
 

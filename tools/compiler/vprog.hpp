@@ -10,15 +10,37 @@
 #include <variant>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "isa.hpp"
 
 namespace hotarubi::compiler::vprog {
 
 inline constexpr uint32_t kCbufWords = 1024;
-inline constexpr uint32_t kRomWords = 256;
-inline constexpr uint32_t kNull = 0xFFFFFFFFU;
+using isa::kNullEntry;
+using isa::vec::kRomWords;
 
-enum class Map : uint8_t { kNone = 0, kGroup = 1, kUpper = 2 };
+using isa::pass::B;
+using isa::pass::C0;
+using isa::pass::Cmp;
+using isa::pass::CmpLeft;
+using isa::pass::Ialu;
+using isa::pass::kPermInvert;
+using isa::pass::kPermOne;
+using isa::pass::kPermSame;
+using isa::pass::kPermZero;
+using isa::pass::Map;
+using isa::pass::Nl;
+using isa::pass::Pbuf;
+using isa::pass::PermPosition;
+using isa::pass::Post;
+using isa::pass::Reduce;
+using isa::pass::RowMask;
+using isa::pass::ScalarFn;
+using isa::pass::Sel;
+using isa::pass::Write;
+using isa::program::Cond;
+using isa::program::Salu;
+using isa::program::Smem;
 
 struct WordMap {
   uint32_t group = 0;
@@ -29,28 +51,6 @@ struct WordMap {
 };
 
 inline constexpr uint32_t kLog2e = 0x3FB8AA3B;
-
-enum class Pbuf : uint8_t { kNone = 0, kRowVec = 1, kTile = 2 };
-enum class C0 : uint8_t { kZero = 0, kX2 = 1, kPbuf = 2, kRs0 = 3, kImm = 4 };
-enum class B : uint8_t {
-  kOne = 0,
-  kX2 = 1,
-  kPbuf = 2,
-  kRs1 = 3,
-  kImm = 4,
-  kPre = 5
-};
-enum class Nl : uint8_t { kNone = 0, kAct = 1, kExp2 = 2, kTab01 = 3 };
-enum class Post : uint8_t { kAdd = 0, kSub = 1, kMax = 2, kSignfix = 3 };
-enum class Reduce : uint8_t { kNone = 0, kSum = 1, kMax = 2 };
-enum class Write : uint8_t { kNone = 0, kFbuf = 1, kAbuf = 2, kFinal = 3 };
-enum class ScalarFn : uint8_t {
-  kNone = 0,
-  kIdentity = 1,
-  kNegate = 2,
-  kReciprocal = 3,
-  kRsqrt = 4
-};
 
 struct RowScalar {
   ScalarFn fn = ScalarFn::kNone;
@@ -70,17 +70,8 @@ inline constexpr RowScalar kRecipSum{
 inline constexpr RowScalar kMax{
     .fn = ScalarFn::kIdentity, .rs0 = false, .rn = false, .eps = false};
 
-inline constexpr uint32_t kPermSame = 0;
-inline constexpr uint32_t kPermZero = 6;
-inline constexpr uint32_t kPermOne = 7;
-inline constexpr uint32_t kPermInvert = 8;
-
 constexpr uint32_t PermBit(uint32_t bit, uint32_t selector) {
-  return selector << (4 * bit);
-}
-
-constexpr uint32_t PermPosition(uint32_t position_bit) {
-  return 5 - position_bit;
+  return selector << (isa::pass::kPermSelectorBits * bit);
 }
 
 constexpr uint32_t Bcast(uint32_t column) {
@@ -103,59 +94,6 @@ inline constexpr uint32_t kTokensToLanes =
 inline constexpr uint32_t kTokenPairsToLanes = PermBit(4, PermPosition(3)) |
                                                PermBit(3, PermPosition(2)) |
                                                PermBit(2, PermPosition(4));
-
-enum class Cmp : uint8_t {
-  kNone = 0,
-  kLt = 1,
-  kLe = 2,
-  kEq = 3,
-  kNe = 4,
-  kGt = 5,
-  kGe = 6
-};
-enum class CmpLeft : uint8_t {
-  kX = 0,
-  kX2 = 1,
-  kColumn = 2,
-  kPosition = 3,
-  kRowColumn = 4
-};
-enum class Sel : uint8_t {
-  kNone = 0,
-  kZero = 1,
-  kX2 = 2,
-  kImm = 3,
-  kNull = 4,
-  kRs1 = 5
-};
-enum class Ialu : uint8_t {
-  kNone = 0,
-  kAdd = 1,
-  kSub = 2,
-  kAnd = 3,
-  kOr = 4,
-  kXor = 5,
-  kShr1 = 6,
-  kRsub = 7
-};
-enum class RowMask : uint8_t { kNone = 0, kSkip = 1, kSet = 2 };
-enum class Salu : uint8_t {
-  kAdd = 0,
-  kSub = 1,
-  kAnd = 2,
-  kOr = 3,
-  kXor = 4,
-  kShl = 5,
-  kShr = 6,
-  kSra = 7,
-  kMul = 8,
-  kSlt = 9,
-  kSltu = 10,
-  kSeq = 11,
-  kMov = 12
-};
-enum class Smem : uint8_t { kSld = 0, kRsmov = 1, kRn = 2 };
-enum class Cond : uint8_t { kAlways = 0, kZ = 1, kNz = 2 };
 
 struct Pass {
   uint32_t rx = 0;

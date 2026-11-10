@@ -1,9 +1,11 @@
-module npu_seq #(
+module npu_seq
+  import isa_pkg::*;
+#(
   parameter int IbufDepth = 64
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
-  input  logic [7:0]   s_axil_awaddr_i,
+  input  logic [RegAddrBits-1:0] s_axil_awaddr_i,
   input  logic         s_axil_awvalid_i,
   output logic         s_axil_awready_o,
   input  logic [31:0]  s_axil_wdata_i,
@@ -13,7 +15,7 @@ module npu_seq #(
   output logic [1:0]   s_axil_bresp_o,
   output logic         s_axil_bvalid_o,
   input  logic         s_axil_bready_i,
-  input  logic [7:0]   s_axil_araddr_i,
+  input  logic [RegAddrBits-1:0] s_axil_araddr_i,
   input  logic         s_axil_arvalid_i,
   output logic         s_axil_arready_o,
   output logic [31:0]  s_axil_rdata_o,
@@ -95,30 +97,23 @@ module npu_seq #(
   input  logic [1:0]   dma_stat_null_i
 );
 
-  localparam logic [7:0] OpNop      = 8'd0;
-  localparam logic [7:0] OpDmaLd    = 8'd1;
-  localparam logic [7:0] OpDmaSt    = 8'd2;
-  localparam logic [7:0] OpGemm     = 8'd4;
-  localparam logic [7:0] OpVec      = 8'd5;
-  localparam logic [7:0] OpSignal   = 8'd6;
-  localparam logic [7:0] OpHalt     = 8'd7;
-  localparam logic [7:0] OpWaitHost = 8'd8;
-
-  localparam int Engines = 3;
-  localparam int EngDma  = 0;
-  localparam int EngGemm = 1;
-  localparam int EngVec  = 2;
-  localparam int SrcCtrl = Engines;
+  localparam int TraceSourceBits = TraceSourceMsb - TraceSourceLsb + 1;
+  localparam int OpcodeBits      = OpcodeMsb - OpcodeLsb + 1;
+  localparam int WaitBits        = WaitMsb - WaitLsb + 1;
+  localparam int StatABits       = TraceStatAMsb - TraceStatALsb + 1;
+  localparam int StatBBits       = TraceStatBMsb - TraceStatBLsb + 1;
+  localparam int StatCBits       = TraceStatCMsb - TraceStatCLsb + 1;
+  localparam int StatDBits       = TraceStatDMsb - TraceStatDLsb + 1;
 
   function automatic logic legal_op(input logic [7:0] op);
-    return op inside {OpNop, OpDmaLd, OpDmaSt, OpGemm, OpVec, OpSignal, OpHalt, OpWaitHost};
+    return op inside {OpNop, OpDmaLoad, OpDmaStore, OpGemm, OpVec, OpSignal, OpHalt, OpWaitHost};
   endfunction
 
   logic        aw_v, w_v, start_req, soft_req;
-  logic [7:0]  aw_a;
+  logic [RegAddrBits-1:0] aw_a;
   logic [31:0] w_d;
   logic [31:0] instr_base, instr_count, irq_enable, irq_status;
-  logic [3:0]  irq_set, irq_clr;
+  logic [IrqBits-1:0] irq_set, irq_clr;
   logic        running, halted, error, ibuf_empty;
   logic [7:0]  sig_id;
   logic [15:0] sig_count;
@@ -168,21 +163,21 @@ module npu_seq #(
         aw_v            <= 1'b0;
         w_v             <= 1'b0;
         s_axil_bvalid_o <= 1'b1;
-        case (aw_a[7:2])
-          6'h00: begin
-            start_req <= w_d[0];
-            soft_req  <= w_d[1];
+        case (aw_a[RegAddrBits-1:RegByteBits])
+          RegCtrl: begin
+            start_req <= w_d[CtrlStart];
+            soft_req  <= w_d[CtrlSoftReset];
           end
-          6'h02:   instr_base <= w_d;
-          6'h03:   instr_count <= w_d;
-          6'h04:   irq_clr <= w_d[3:0];
-          6'h05:   irq_enable <= w_d;
-          6'h0F:   tr_base <= w_d;
-          6'h10: begin
-            tr_en    <= w_d[0];
-            tr_stats <= w_d[2];
+          RegInstrBase:  instr_base <= w_d;
+          RegInstrCount: instr_count <= w_d;
+          RegIrqStatus:  irq_clr <= w_d[IrqBits-1:0];
+          RegIrqEnable:  irq_enable <= w_d;
+          RegTraceBase:  tr_base <= w_d;
+          RegTraceCtrl: begin
+            tr_en    <= w_d[TraceCtrlEnable];
+            tr_stats <= w_d[TraceCtrlStatistics];
           end
-          6'h12:   host_go <= w_d;
+          RegHostGo:     host_go <= w_d;
           default: begin
           end
         endcase
@@ -196,33 +191,53 @@ module npu_seq #(
   assign s_axil_arready_o = !s_axil_rvalid_o;
   assign s_axil_rresp_o   = 2'b00;
 
+  logic [31:0] status_word, signal_word, trace_ctrl_word;
+
+  always_comb begin
+    status_word                    = '0;
+    status_word[StatusRunning]     = running;
+    status_word[StatusHalted]      = halted;
+    status_word[StatusError]       = error;
+    status_word[StatusWaitingHost] = waiting_host;
+    for (int e = 0; e < Engines; e++) begin
+      status_word[StatusBusyLsb+e] = eng_busy[e];
+    end
+    status_word[StatusIbufEmpty] = ibuf_empty;
+    signal_word                                      = '0;
+    signal_word[SignalRegCountMsb:SignalRegCountLsb] = sig_count;
+    signal_word[SignalRegIdMsb:SignalRegIdLsb]       = sig_id;
+    trace_ctrl_word                      = '0;
+    trace_ctrl_word[TraceCtrlEnable]     = tr_en;
+    trace_ctrl_word[TraceCtrlIdle]       = tr_idle;
+    trace_ctrl_word[TraceCtrlStatistics] = tr_stats;
+  end
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       s_axil_rvalid_o <= 1'b0;
     end else begin
       if (s_axil_arvalid_i && s_axil_arready_o) begin
         s_axil_rvalid_o <= 1'b1;
-        case (s_axil_araddr_i[7:2])
-          6'h01: s_axil_rdata_o <= {24'd0, ibuf_empty, eng_busy[EngVec], eng_busy[EngGemm],
-                                    eng_busy[EngDma], waiting_host, error, halted, running};
-          6'h02:   s_axil_rdata_o <= instr_base;
-          6'h03:   s_axil_rdata_o <= instr_count;
-          6'h04:   s_axil_rdata_o <= irq_status;
-          6'h05:   s_axil_rdata_o <= irq_enable;
-          6'h06:   s_axil_rdata_o <= {sig_count, 8'd0, sig_id};
-          6'h07:   s_axil_rdata_o <= sig_value;
-          6'h08:   s_axil_rdata_o <= n_issued;
-          6'h09:   s_axil_rdata_o <= cyc;
-          6'h0A:   s_axil_rdata_o <= cyc_busy[EngDma];
-          6'h0B:   s_axil_rdata_o <= cyc_busy[EngGemm];
-          6'h0C:   s_axil_rdata_o <= cyc_busy[EngVec];
-          6'h0D:   s_axil_rdata_o <= cyc_stall;
-          6'h0E:   s_axil_rdata_o <= cyc_starve;
-          6'h0F:   s_axil_rdata_o <= tr_base;
-          6'h10:   s_axil_rdata_o <= {29'd0, tr_stats, tr_idle, tr_en};
-          6'h11:   s_axil_rdata_o <= tr_count;
-          6'h12:   s_axil_rdata_o <= host_go;
-          default: s_axil_rdata_o <= 32'd0;
+        case (s_axil_araddr_i[RegAddrBits-1:RegByteBits])
+          RegStatus:       s_axil_rdata_o <= status_word;
+          RegInstrBase:    s_axil_rdata_o <= instr_base;
+          RegInstrCount:   s_axil_rdata_o <= instr_count;
+          RegIrqStatus:    s_axil_rdata_o <= irq_status;
+          RegIrqEnable:    s_axil_rdata_o <= irq_enable;
+          RegSignal:       s_axil_rdata_o <= signal_word;
+          RegSignalValue:  s_axil_rdata_o <= sig_value;
+          RegIssued:       s_axil_rdata_o <= n_issued;
+          RegCycles:       s_axil_rdata_o <= cyc;
+          RegDmaCycles:    s_axil_rdata_o <= cyc_busy[EngDma];
+          RegGemmCycles:   s_axil_rdata_o <= cyc_busy[EngGemm];
+          RegVecCycles:    s_axil_rdata_o <= cyc_busy[EngVec];
+          RegStallCycles:  s_axil_rdata_o <= cyc_stall;
+          RegStarveCycles: s_axil_rdata_o <= cyc_starve;
+          RegTraceBase:    s_axil_rdata_o <= tr_base;
+          RegTraceCtrl:    s_axil_rdata_o <= trace_ctrl_word;
+          RegTraceCount:   s_axil_rdata_o <= tr_count;
+          RegHostGo:       s_axil_rdata_o <= host_go;
+          default:         s_axil_rdata_o <= 32'd0;
         endcase
       end else if (s_axil_rready_i) begin
         s_axil_rvalid_o <= 1'b0;
@@ -312,13 +327,13 @@ module npu_seq #(
 
   assign ins        = ins_r;
   assign ibuf_empty = ib_fifo_empty && !ins_v;
-  assign opc        = ins[127:120];
-  assign wt         = ins[119:116];
+  assign opc        = ins[OpcodeMsb:OpcodeLsb];
+  assign wt         = ins[WaitMsb:WaitLsb];
   assign eng_busy   = '{dma_busy_i, gemm_busy_i, vec_busy_i};
 
   always_comb begin
     eng_sel          = '0;
-    eng_sel[EngDma]  = (opc == OpDmaLd) || (opc == OpDmaSt);
+    eng_sel[EngDma]  = (opc == OpDmaLoad) || (opc == OpDmaStore);
     eng_sel[EngGemm] = (opc == OpGemm);
     eng_sel[EngVec]  = (opc == OpVec);
     wait_ok          = 1'b1;
@@ -341,7 +356,7 @@ module npu_seq #(
     if (!rst_ni) begin
       host_ok <= 1'b0;
     end else begin
-      host_ok <= !ins_load && !ib_clear && (host_go >= ins[31:0]);
+      host_ok <= !ins_load && !ib_clear && (host_go >= ins[WaitHostValueMsb:WaitHostValueLsb]);
     end
   end
 
@@ -367,39 +382,39 @@ module npu_seq #(
   assign gemm_cmd_valid_o = eng_cmd[EngGemm];
   assign vec_cmd_valid_o  = eng_cmd[EngVec];
 
-  assign gemm_a_base_o   = ins[111:92];
-  assign gemm_a_stride_o = ins[91:82];
-  assign gemm_kb_o       = ins[81:72];
-  assign gemm_m_o        = ins[71:62];
-  assign gemm_w_base_o   = ins[61:42];
-  assign gemm_w_stride_o = ins[41:32];
-  assign gemm_n8_o       = ins[31:24];
-  assign gemm_c_base_o   = ins[23:4];
-  assign gemm_wmode_o    = ins[3:2];
-  assign gemm_acc_o      = ins[1];
+  assign gemm_a_base_o   = ins[GemmABaseMsb:GemmABaseLsb];
+  assign gemm_a_stride_o = ins[GemmAStrideMsb:GemmAStrideLsb];
+  assign gemm_kb_o       = ins[GemmKbMsb:GemmKbLsb];
+  assign gemm_m_o        = ins[GemmMMsb:GemmMLsb];
+  assign gemm_w_base_o   = ins[GemmWBaseMsb:GemmWBaseLsb];
+  assign gemm_w_stride_o = ins[GemmWStrideMsb:GemmWStrideLsb];
+  assign gemm_n8_o       = ins[GemmN8Msb:GemmN8Lsb];
+  assign gemm_c_base_o   = ins[GemmCBaseMsb:GemmCBaseLsb];
+  assign gemm_wmode_o    = ins[GemmWmodeMsb:GemmWmodeLsb];
+  assign gemm_acc_o      = ins[GemmAccLsb];
 
-  assign vec_entry_o  = ins[115:108];
-  assign vec_q_o      = ins[107];
-  assign vec_src_o    = ins[106:95];
-  assign vec_src2_o   = ins[94:83];
-  assign vec_dst_o    = ins[82:70];
-  assign vec_rows_q_o = ins[69:61];
-  assign vec_n8_o     = ins[60:53];
-  assign vec_p_base_o = ins[51:43];
-  assign vec_aux_o    = ins[42:32];
-  assign vec_imm_o    = ins[31:0];
+  assign vec_entry_o  = ins[VecEntryMsb:VecEntryLsb];
+  assign vec_q_o      = ins[VecQLsb];
+  assign vec_src_o    = ins[VecSrcMsb:VecSrcLsb];
+  assign vec_src2_o   = ins[VecSrc2Msb:VecSrc2Lsb];
+  assign vec_dst_o    = ins[VecDstMsb:VecDstLsb];
+  assign vec_rows_q_o = ins[VecRowsQMsb:VecRowsQLsb];
+  assign vec_n8_o     = ins[VecN8Msb:VecN8Lsb];
+  assign vec_p_base_o = ins[VecPBaseMsb:VecPBaseLsb];
+  assign vec_aux_o    = ins[VecAuxMsb:VecAuxLsb];
+  assign vec_imm_o    = ins[VecImmMsb:VecImmLsb];
 
-  assign dma_st_o         = (opc == OpDmaSt);
-  assign dma_ddr_addr_o   = ins[115:88];
-  assign dma_mem_o        = ins[87:85];
-  assign dma_oc_addr_o    = ins[84:72];
-  assign dma_rows_o       = ins[71:60];
-  assign dma_row_words_o  = ins[59:48];
-  assign dma_ddr_stride_o = ins[47:28];
-  assign dma_kind_o       = ins[27:25];
-  assign dma_tok_o        = ins[24:19];
-  assign dma_acc_o        = ins[18];
-  assign dma_flush_o      = ins[17];
+  assign dma_st_o         = (opc == OpDmaStore);
+  assign dma_ddr_addr_o   = ins[DmaDdrAddrMsb:DmaDdrAddrLsb];
+  assign dma_mem_o        = ins[DmaMemMsb:DmaMemLsb];
+  assign dma_oc_addr_o    = ins[DmaAddrMsb:DmaAddrLsb];
+  assign dma_rows_o       = ins[DmaRowsMsb:DmaRowsLsb];
+  assign dma_row_words_o  = ins[DmaRowWordsMsb:DmaRowWordsLsb];
+  assign dma_ddr_stride_o = ins[DmaDdrStrideMsb:DmaDdrStrideLsb];
+  assign dma_kind_o       = ins[DmaKindMsb:DmaKindLsb];
+  assign dma_tok_o        = ins[DmaTokMsb:DmaTokLsb];
+  assign dma_acc_o        = ins[DmaAccLsb];
+  assign dma_flush_o      = ins[DmaFlushLsb];
 
   always_comb begin
     for (int e = 0; e < Engines; e++) begin
@@ -425,25 +440,25 @@ module npu_seq #(
 
   logic [31:0]  iss_cyc [Engines];
   logic [31:0]  iss_idx [Engines];
-  logic [11:0]  iss_tag [Engines];
+  logic [WaitBits+OpcodeBits-1:0] iss_tag [Engines];
   logic         slot_v  [Engines + 1];
   logic [31:0]  slot_c  [Engines];
-  logic [127:0] slot_s  [Engines];
-  logic [127:0] ctrl_d;
-  logic [23:0]  st_a    [Engines];
-  logic [23:0]  st_b    [Engines];
-  logic [23:0]  st_c    [Engines];
-  logic [7:0]   st_d    [Engines];
+  logic [TraceRecordBits-1:0] slot_s [Engines];
+  logic [TraceRecordBits-1:0] ctrl_d;
+  logic [StatABits-1:0] st_a [Engines];
+  logic [StatBBits-1:0] st_b [Engines];
+  logic [StatCBits-1:0] st_c [Engines];
+  logic [StatDBits-1:0] st_d [Engines];
   logic         st_in_a [Engines];
   logic         st_in_b [Engines];
   logic         st_in_c [Engines];
   logic [1:0]   st_in_d [Engines];
   logic         tr_pend_v;
-  logic [127:0] tr_pend_d;
+  logic [TraceRecordBits-1:0] tr_pend_d;
   logic [1:0]   src_sel;
   logic         tr_afull, tr_push;
-  logic [127:0] tr_data;
-  logic [11:0]  cur_tag;
+  logic [TraceRecordBits-1:0] tr_data;
+  logic [WaitBits+OpcodeBits-1:0] cur_tag;
 
   assign st_in_a = '{dma_stat_rd_beat_i, gemm_stat_fed_i, vec_stat_issue_i};
   assign st_in_b = '{dma_stat_wr_beat_i, 1'b0, vec_stat_drain_i};
@@ -466,39 +481,58 @@ module npu_seq #(
           st_c[i] <= '0;
           st_d[i] <= '0;
         end else begin
-          if (st_in_a[i] && st_a[i] != 24'hFFFFFF) begin
-            st_a[i] <= st_a[i] + 24'd1;
+          if (st_in_a[i] && st_a[i] != {StatABits{1'b1}}) begin
+            st_a[i] <= st_a[i] + StatABits'(1);
           end
-          if (st_in_b[i] && st_b[i] != 24'hFFFFFF) begin
-            st_b[i] <= st_b[i] + 24'd1;
+          if (st_in_b[i] && st_b[i] != {StatBBits{1'b1}}) begin
+            st_b[i] <= st_b[i] + StatBBits'(1);
           end
-          if (st_in_c[i] && st_c[i] != 24'hFFFFFF) begin
-            st_c[i] <= st_c[i] + 24'd1;
+          if (st_in_c[i] && st_c[i] != {StatCBits{1'b1}}) begin
+            st_c[i] <= st_c[i] + StatCBits'(1);
           end
           if (st_in_d[i] != 2'd0) begin
-            st_d[i] <= (st_d[i] > 8'hFF - 8'(st_in_d[i])) ? 8'hFF : st_d[i] + 8'(st_in_d[i]);
+            st_d[i] <= (st_d[i] > {StatDBits{1'b1}} - StatDBits'(st_in_d[i])) ?
+                       {StatDBits{1'b1}} : st_d[i] + StatDBits'(st_in_d[i]);
           end
         end
       end
     end
   end
 
-  function automatic logic [127:0] done_record(input logic [11:0] tag, input logic [1:0] src,
-                                               input logic [31:0] done, input logic [31:0] iss,
-                                               input logic [31:0] idx);
-    return {16'd0, tag, 2'b00, src, done, iss, idx};
+  function automatic logic [TraceRecordBits-1:0] done_record(
+      input logic [WaitBits+OpcodeBits-1:0] tag, input logic [1:0] src, input logic [31:0] done,
+      input logic [31:0] iss, input logic [31:0] idx);
+    logic [TraceRecordBits-1:0] r;
+    r                                        = '0;
+    r[TraceIndexMsb:TraceIndexLsb]           = idx;
+    r[TraceIssueMsb:TraceIssueLsb]           = iss;
+    r[TraceCompletionMsb:TraceCompletionLsb] = done;
+    r[TraceSourceMsb:TraceSourceLsb]         = TraceSourceBits'(src);
+    r[TraceOpcodeMsb:TraceOpcodeLsb]         = tag[OpcodeBits-1:0];
+    r[TraceWaitMsb:TraceWaitLsb]             = tag[OpcodeBits+:WaitBits];
+    r[TraceTypeMsb:TraceTypeLsb]             = TraceTypeCompletion;
+    return r;
   endfunction
 
-  function automatic logic [127:0] stat_record(input logic [1:0] src, input logic [31:0] idx,
-                                               input logic [23:0] a, input logic [23:0] b,
-                                               input logic [23:0] c, input logic [7:0] d);
-    return {d, 4'd1, 4'd0, c, b, a, 4'd0, 2'b00, src, idx};
+  function automatic logic [TraceRecordBits-1:0] stat_record(
+      input logic [1:0] src, input logic [31:0] idx, input logic [StatABits-1:0] a,
+      input logic [StatBBits-1:0] b, input logic [StatCBits-1:0] c, input logic [StatDBits-1:0] d);
+    logic [TraceRecordBits-1:0] r;
+    r                                        = '0;
+    r[TraceIndexMsb:TraceIndexLsb]           = idx;
+    r[TraceStatSourceMsb:TraceStatSourceLsb] = TraceSourceBits'(src);
+    r[TraceStatAMsb:TraceStatALsb]           = a;
+    r[TraceStatBMsb:TraceStatBLsb]           = b;
+    r[TraceStatCMsb:TraceStatCLsb]           = c;
+    r[TraceStatDMsb:TraceStatDLsb]           = d;
+    r[TraceTypeMsb:TraceTypeLsb]             = TraceTypeStatistics;
+    return r;
   endfunction
 
   assign cur_tag = {wt, opc};
 
   always_comb begin
-    src_sel = 2'(SrcCtrl);
+    src_sel = 2'(TraceSourceSequencer);
     for (int e = Engines - 1; e >= 0; e--) begin
       if (eng_sel[e]) begin
         src_sel = 2'(e);
@@ -511,11 +545,11 @@ module npu_seq #(
   logic       done_ctrl, pop_v, pop_ctrl;
   logic [1:0] pop_src;
 
-  assign done_ctrl = issue && (src_sel == 2'(SrcCtrl));
+  assign done_ctrl = issue && (src_sel == 2'(TraceSourceSequencer));
 
   always_comb begin
     pop_v   = 1'b0;
-    pop_src = 2'(SrcCtrl);
+    pop_src = 2'(TraceSourceSequencer);
     for (int i = Engines; i >= 0; i--) begin
       if (slot_v[i]) begin
         pop_v   = 1'b1;
@@ -524,7 +558,7 @@ module npu_seq #(
     end
   end
 
-  assign pop_ctrl = (pop_src == 2'(SrcCtrl));
+  assign pop_ctrl = (pop_src == 2'(TraceSourceSequencer));
 
   always_ff @(posedge clk_i) begin
     for (int e = 0; e < Engines; e++) begin
@@ -539,7 +573,7 @@ module npu_seq #(
       end
     end
     if (tr_en && done_ctrl) begin
-      ctrl_d <= done_record(cur_tag, 2'(SrcCtrl), cyc, cyc, n_issued);
+      ctrl_d <= done_record(cur_tag, 2'(TraceSourceSequencer), cyc, cyc, n_issued);
     end
   end
 
@@ -557,7 +591,7 @@ module npu_seq #(
         end
       end
       if (tr_en && done_ctrl) begin
-        slot_v[SrcCtrl] <= 1'b1;
+        slot_v[TraceSourceSequencer] <= 1'b1;
       end
       tr_push <= 1'b0;
       if (tr_pend_v) begin
@@ -611,17 +645,17 @@ module npu_seq #(
   always_comb begin
     irq_set = '0;
     if (issue && opc == OpSignal) begin
-      irq_set[0] = 1'b1;
+      irq_set[IrqSignal] = 1'b1;
     end
     if (issue && opc == OpHalt) begin
-      irq_set[1] = 1'b1;
+      irq_set[IrqHalt] = 1'b1;
     end
     if (issue && !legal_op(opc)) begin
-      irq_set[2] = 1'b1;
+      irq_set[IrqIllegal] = 1'b1;
     end
     if (dma_axi_err_i || (m_axi_rvalid_i && m_axi_rresp_i[1]) ||
         (m_axi_bvalid_i && m_axi_bresp_i[1])) begin
-      irq_set[3] = 1'b1;
+      irq_set[IrqAxiError] = 1'b1;
     end
   end
 
@@ -674,15 +708,15 @@ module npu_seq #(
         if (issue) begin
           n_issued <= n_issued + 1'b1;
           if (opc == OpSignal) begin
-            sig_id    <= ins[111:104];
-            sig_value <= ins[31:0];
+            sig_id    <= ins[SignalIdMsb:SignalIdLsb];
+            sig_value <= ins[SignalValueMsb:SignalValueLsb];
             sig_count <= sig_count + 1'b1;
           end
           if (opc == OpHalt) begin
             running <= 1'b0;
             halted  <= 1'b1;
           end
-          if (irq_set[2]) begin
+          if (irq_set[IrqIllegal]) begin
             running <= 1'b0;
             halted  <= 1'b1;
             error   <= 1'b1;
@@ -692,11 +726,12 @@ module npu_seq #(
     end
   end
 
-  assign irq_o = |(irq_status & 32'(irq_enable[3:0]));
+  assign irq_o = |(irq_status & 32'(irq_enable[IrqBits-1:0]));
 
   logic unused_seq;
 
-  assign unused_seq = ^{s_axil_wstrb_i, s_axil_araddr_i[1:0], aw_a[1:0], m_axi_rresp_i[0],
-                        m_axi_rlast_i, m_axi_bresp_i[0], ib_afull, irq_enable[31:4]};
+  assign unused_seq = ^{s_axil_wstrb_i, s_axil_araddr_i[RegByteBits-1:0], aw_a[RegByteBits-1:0],
+                        m_axi_rresp_i[0], m_axi_rlast_i, m_axi_bresp_i[0], ib_afull,
+                        irq_enable[31:IrqBits]};
 
 endmodule

@@ -121,7 +121,7 @@ std::vector<uint32_t> FaceListS1(uint64_t base, const FMap& x, size_t p,
     const bool ok = j >= 0 && std::cmp_less(j, x.Tokens()) &&
                     (j % h) + dy >= 0 && (j % h) + dy < h;
     list.push_back(ok ? Entry(base, x.Addr(p, static_cast<uint64_t>(j + dy)))
-                      : kNull);
+                      : kNullEntry);
   }
   return list;
 }
@@ -148,7 +148,7 @@ std::vector<uint32_t> FaceListStrided(uint64_t base, const FMap& x, size_t p,
                     std::cmp_less(yi, x.h) && xi >= 0 && std::cmp_less(xi, x.w);
     list.push_back(
         ok ? Entry(base, x.Addr(p, static_cast<uint64_t>((xi * x.h) + yi)))
-           : kNull);
+           : kNullEntry);
   }
   return list;
 }
@@ -573,7 +573,7 @@ std::vector<uint32_t> StemLists(uint64_t base, uint64_t image) {
   constexpr uint32_t kQuads = kStemH / 4;
   constexpr uint32_t kGroups = kStemW / 4;
   std::vector<uint32_t> out(
-      static_cast<size_t>(kGroups) * kQuads * kStemWords * 4, kNull);
+      static_cast<size_t>(kGroups) * kQuads * kStemWords * 4, kNullEntry);
   for (uint32_t gi = 0; gi < kGroups; ++gi) {
     const uint32_t xb = StemGroupColumn(gi);
     const uint32_t phase = xb % 2;
@@ -830,7 +830,7 @@ void EmitUpsampleAdd(Program& program, DdrImage& image, uint64_t base,
       list.push_back(
           o < a.Tokens()
               ? Entry(base, b.Addr(0, (uint64_t{xo / 2} * b.h) + (yo / 2)))
-              : kNull);
+              : kNullEntry);
     }
     lists.Add(std::move(list));
   }

@@ -9,7 +9,9 @@
 namespace hotarubi::iss {
 namespace {
 
-void Set(Word128& word, uint32_t lsb, uint32_t width, uint64_t value) {
+void Set(Word128& word, isa::Field field, uint64_t value) {
+  const uint32_t lsb = field.lsb;
+  const uint32_t width = field.width;
   const uint64_t mask = width == 64 ? ~uint64_t{0} : (uint64_t{1} << width) - 1;
   value &= mask;
   if (lsb >= 64) {
@@ -45,50 +47,53 @@ Source SourceOf(uint32_t opcode) {
 }
 
 Statistics Saturate(const Statistics& statistics) {
-  return {.a = Clamp(statistics.a, kStatisticsCounterBits),
-          .b = Clamp(statistics.b, kStatisticsCounterBits),
-          .c = Clamp(statistics.c, kStatisticsCounterBits),
-          .d = Clamp(statistics.d, kStatisticsSmallCounterBits)};
+  namespace t = isa::trace;
+  return {.a = Clamp(statistics.a, t::kStatisticsA.width),
+          .b = Clamp(statistics.b, t::kStatisticsB.width),
+          .c = Clamp(statistics.c, t::kStatisticsC.width),
+          .d = Clamp(statistics.d, t::kStatisticsD.width)};
 }
 
 Word128 EncodeRecord(const TraceRecord& record) {
+  namespace t = isa::trace;
   Word128 word;
-  Set(word, 0, 32, record.index);
-  Set(word, 116, 4, static_cast<uint32_t>(record.type));
+  Set(word, t::kIndex, record.index);
+  Set(word, t::kType, static_cast<uint32_t>(record.type));
   if (record.type == RecordType::kCompletion) {
-    Set(word, 32, 32, record.issue);
-    Set(word, 64, 32, record.completion);
-    Set(word, 96, 4, static_cast<uint32_t>(record.source));
-    Set(word, 100, 8, record.opcode);
-    Set(word, 108, 4, record.wait);
+    Set(word, t::kIssue, record.issue);
+    Set(word, t::kCompletion, record.completion);
+    Set(word, t::kSource, static_cast<uint32_t>(record.source));
+    Set(word, t::kOpcode, record.opcode);
+    Set(word, t::kWait, record.wait);
     return word;
   }
   const Statistics statistics = Saturate(record.statistics);
-  Set(word, 32, 4, static_cast<uint32_t>(record.source));
-  Set(word, 40, kStatisticsCounterBits, statistics.a);
-  Set(word, 64, kStatisticsCounterBits, statistics.b);
-  Set(word, 88, kStatisticsCounterBits, statistics.c);
-  Set(word, 120, kStatisticsSmallCounterBits, statistics.d);
+  Set(word, t::kStatisticsSource, static_cast<uint32_t>(record.source));
+  Set(word, t::kStatisticsA, statistics.a);
+  Set(word, t::kStatisticsB, statistics.b);
+  Set(word, t::kStatisticsC, statistics.c);
+  Set(word, t::kStatisticsD, statistics.d);
   return word;
 }
 
 TraceRecord DecodeRecord(const Word128& word) {
   TraceRecord record;
-  record.index = word.Field(0, 32);
-  record.type = static_cast<RecordType>(word.Field(116, 4));
+  namespace t = isa::trace;
+  record.index = word.Field(t::kIndex);
+  record.type = static_cast<RecordType>(word.Field(t::kType));
   if (record.type == RecordType::kCompletion) {
-    record.issue = word.Field(32, 32);
-    record.completion = word.Field(64, 32);
-    record.source = static_cast<Source>(word.Field(96, 4));
-    record.opcode = word.Field(100, 8);
-    record.wait = word.Field(108, 4);
+    record.issue = word.Field(t::kIssue);
+    record.completion = word.Field(t::kCompletion);
+    record.source = static_cast<Source>(word.Field(t::kSource));
+    record.opcode = word.Field(t::kOpcode);
+    record.wait = word.Field(t::kWait);
     return record;
   }
-  record.source = static_cast<Source>(word.Field(32, 4));
-  record.statistics = {.a = word.Field(40, kStatisticsCounterBits),
-                       .b = word.Field(64, kStatisticsCounterBits),
-                       .c = word.Field(88, kStatisticsCounterBits),
-                       .d = word.Field(120, kStatisticsSmallCounterBits)};
+  record.source = static_cast<Source>(word.Field(t::kStatisticsSource));
+  record.statistics = {.a = word.Field(t::kStatisticsA),
+                       .b = word.Field(t::kStatisticsB),
+                       .c = word.Field(t::kStatisticsC),
+                       .d = word.Field(t::kStatisticsD)};
   return record;
 }
 

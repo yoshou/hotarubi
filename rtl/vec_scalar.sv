@@ -1,4 +1,5 @@
 module vec_scalar
+  import isa_pkg::*;
   import vec_pkg::*;
 (
   input  logic        clk_i,

@@ -18,6 +18,7 @@
 
 #include "checkpoint.hpp"
 #include "hotarubi/safetensors.hpp"
+#include "isa_pkg.hpp"
 #include "output.hpp"
 #include "smolvla.hpp"
 #include "sparsedrive.hpp"
@@ -36,7 +37,8 @@ constexpr std::string_view kUsage =
     "--output DIR [--listing DIR]\n"
     "       hotarubi_compile sparsedrive --quant FILE --checkpoint FILE "
     "--base ADDRESS [--schedule-window N] --output DIR [--listing DIR]\n"
-    "       hotarubi_compile vec-rom --output FILE";
+    "       hotarubi_compile vec-rom --output FILE\n"
+    "       hotarubi_compile isa-pkg --output FILE";
 
 std::expected<Options, std::string> ParseOptions(
     std::span<const char* const> args) {
@@ -197,13 +199,14 @@ std::expected<void, std::string> RunSparseDrive(const Options& options) {
                                   *quant, *checkpoint));
 }
 
-std::expected<void, std::string> RunVecRom(const Options& options) {
+std::expected<void, std::string> WritePackage(const Options& options,
+                                              const std::string& text) {
   const auto output = Text(options, "output");
   if (!output) {
     return std::unexpected(output.error());
   }
   std::ofstream file(*output, std::ios::binary | std::ios::trunc);
-  file << vec_rom::Package(vec_rom::Build());
+  file << text;
   if (!file) {
     return std::unexpected(std::format("cannot write {}", *output));
   }
@@ -211,9 +214,9 @@ std::expected<void, std::string> RunVecRom(const Options& options) {
 }
 
 int Main(std::span<const char* const> args) {
-  if (args.size() < 2 || (std::string_view(args[1]) != "smolvla" &&
-                          std::string_view(args[1]) != "sparsedrive" &&
-                          std::string_view(args[1]) != "vec-rom")) {
+  const std::string_view command = args.size() < 2 ? "" : args[1];
+  if (command != "smolvla" && command != "sparsedrive" &&
+      command != "vec-rom" && command != "isa-pkg") {
     std::println(stderr, "{}", kUsage);
     return 2;
   }
@@ -222,14 +225,17 @@ int Main(std::span<const char* const> args) {
     std::println(stderr, "{}\n{}", options.error(), kUsage);
     return 2;
   }
-  if (std::string_view(args[1]) == "vec-rom") {
-    if (auto result = RunVecRom(*options); !result) {
+  if (command == "vec-rom" || command == "isa-pkg") {
+    const std::string text = command == "vec-rom"
+                                 ? vec_rom::Package(vec_rom::Build())
+                                 : isa_pkg::Package();
+    if (auto result = WritePackage(*options, text); !result) {
       std::println(stderr, "{}", result.error());
       return 1;
     }
     return 0;
   }
-  const bool smolvla = std::string_view(args[1]) == "smolvla";
+  const bool smolvla = command == "smolvla";
   if (auto result = smolvla ? RunSmolVla(*options) : RunSparseDrive(*options);
       !result) {
     std::println(stderr, "{}", result.error());

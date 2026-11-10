@@ -40,7 +40,6 @@ struct Timing {
 };
 
 inline constexpr std::string_view kTraceRegion = "trace";
-inline constexpr uint32_t kTraceRecordBytes = 16;
 
 struct Program {
   uint64_t base = 0;

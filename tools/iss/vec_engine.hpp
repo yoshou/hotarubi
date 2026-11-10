@@ -25,14 +25,14 @@ struct ScalarProgram {
   uint32_t immediate = 0;
 };
 
-constexpr ScalarProgram RowScalarProgram(Reduction red, ScalarFn fn, bool rn,
+constexpr ScalarProgram RowScalarProgram(Reduce red, ScalarFn fn, bool rn,
                                          bool eps) {
   const bool iterative = fn == ScalarFn::kReciprocal || fn == ScalarFn::kRsqrt;
-  const uint32_t arithmetic = (red == Reduction::kSum ? 7U : 0U) +
-                              (rn ? 1U : 0U) + (eps ? 1U : 0U) +
+  const uint32_t arithmetic = (red == Reduce::kSum ? 7U : 0U) + (rn ? 1U : 0U) +
+                              (eps ? 1U : 0U) +
                               (fn == ScalarFn::kReciprocal ? 12U : 0U) +
                               (fn == ScalarFn::kRsqrt ? 20U : 0U);
-  const bool loads_max = red == Reduction::kMax && (rn || eps || iterative);
+  const bool loads_max = red == Reduce::kMax && (rn || eps || iterative);
   return {.arithmetic = arithmetic,
           .immediate = 1U + (iterative ? 1U : 0U) + (loads_max ? 1U : 0U)};
 }
@@ -106,13 +106,13 @@ class VecEngine {
                                         uint32_t address, Memories& memories);
   void Store(PassState& state, uint32_t word, const FbufWord& out,
              Memories& memories);
-  [[nodiscard]] WriteTarget Target(WriteTarget target) const;
+  [[nodiscard]] Write Target(Write target) const;
   void RunSalu(const Word128& instruction);
   void RunTranspose(const Word128& instruction, Memories& memories);
   void RunSmem(const Word128& instruction, Memories& memories);
   [[nodiscard]] bool Taken(const Word128& instruction) const;
   void Drain();
-  void Write(uint32_t index, uint32_t value);
+  void WriteRegister(uint32_t index, uint32_t value);
   void AwaitContext(uint32_t ctx);
 
   std::array<uint32_t, kRegisters> registers_{};

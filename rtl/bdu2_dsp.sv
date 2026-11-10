@@ -1,4 +1,6 @@
-module bdu2_dsp #(
+module bdu2_dsp
+  import isa_pkg::*;
+#(
   parameter int Nacc     = 8,
   parameter int SelWidth = 3,
   parameter int TagWidth = 16,
@@ -33,7 +35,7 @@ module bdu2_dsp #(
   function automatic logic signed [4:0] decode_w(input logic [3:0] c, input logic [1:0] mode);
     logic [3:0] mag;
     case (mode)
-      2'd0: begin
+      WeightModeFp4: begin
         case (c[2:0])
           3'd0:    mag = 4'd0;
           3'd1:    mag = 4'd1;
@@ -46,16 +48,16 @@ module bdu2_dsp #(
         endcase
         decode_w = c[3] ? -$signed({1'b0, mag}) : $signed({1'b0, mag});
       end
-      2'd1:    decode_w = $signed({c[3], c});
-      default: decode_w = $signed({1'b0, c});
+      WeightModeW8Hi: decode_w = $signed({c[3], c});
+      default:        decode_w = $signed({1'b0, c});
     endcase
   endfunction
 
   function automatic logic signed [9:0] sbias(input logic [1:0] mode);
     case (mode)
-      2'd0:    sbias = -10'sd7;
-      2'd1:    sbias = -10'sd8;
-      default: sbias = -10'sd12;
+      WeightModeFp4:  sbias = -10'sd7;
+      WeightModeW8Hi: sbias = -10'sd8;
+      default:        sbias = -10'sd12;
     endcase
   endfunction
 

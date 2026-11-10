@@ -14,9 +14,9 @@ namespace hotarubi::compiler::sparsedrive {
 namespace {
 
 constexpr uint64_t kBase = 0x38700000;
-constexpr uint32_t kOpDmaLoad = 1;
-constexpr uint32_t kOpGemm = 4;
-constexpr uint32_t kOpVec = 5;
+using isa::kOpDmaLoad;
+using isa::kOpGemm;
+using isa::kOpVec;
 constexpr uint64_t kRegion = 0x10000;
 
 AttentionPlan SmallPlan() {

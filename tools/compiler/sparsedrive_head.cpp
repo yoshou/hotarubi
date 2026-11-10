@@ -168,7 +168,7 @@ HeadLayer RefineLayer(const HeadWeights& weights, const HeadConfig& c,
 
 Word NullWord() {
   Word w{};
-  w.fill(kNull);
+  w.fill(kNullEntry);
   return w;
 }
 
@@ -375,18 +375,18 @@ SparseHead::SparseHead(DdrImage& image, uint64_t base, HeadParams params,
   image.Put(pjprog, pj_bytes);
   for (uint32_t k = 0; k < 2; ++k) {
     const Rows& rows = k == 0 ? tx : tanc;
-    std::vector<uint32_t> entries(cf.nap, kNull);
+    std::vector<uint32_t> entries(cf.nap, kNullEntry);
     for (uint32_t i = 0; i < cf.ntemp; ++i) {
       entries[i] = Entry(base_, rows.Addr(i));
     }
     PutEntries(image, order[k], entries);
   }
-  PutEntries(image, keep, std::vector<uint32_t>(cf.ntp, kNull));
+  PutEntries(image, keep, std::vector<uint32_t>(cf.ntp, kNullEntry));
   const auto block = [&](uint32_t q, uint32_t camera, uint32_t slots) {
     std::vector<uint32_t> entries = {
         Entry(base_, w) + (((camera * (cf.scam / 8)) + (q * wq)) * 8), 0, 0, 0};
     for (uint32_t i = 0; i < slots * 16; ++i) {
-      entries.push_back(kNull);
+      entries.push_back(kNullEntry);
       entries.push_back(0);
     }
     return entries;
@@ -1829,7 +1829,7 @@ void SparseHead::Bank(bool update, std::string_view note) {
                     std::format("{} st order1", note));
     const auto id_key = std::pair{cur_x, cur_a};
     if (!order_id_.contains(id_key)) {
-      std::vector<uint32_t> ids(2 * static_cast<size_t>(cf.nap), kNull);
+      std::vector<uint32_t> ids(2 * static_cast<size_t>(cf.nap), kNullEntry);
       for (uint32_t i = 0; i < cf.na; ++i) {
         ids[i] = Entry(base_, xr.Addr(i));
         ids[cf.nap + i] = Entry(base_, ar.Addr(i));

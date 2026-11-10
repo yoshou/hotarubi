@@ -3,24 +3,21 @@
 
 #include <cstdint>
 
+#include "hotarubi/isa.hpp"
 #include "word.hpp"
 
 namespace hotarubi::iss {
 
-inline constexpr uint32_t kTraceRecordBytes = 16;
-inline constexpr uint32_t kStatisticsCounterBits = 24;
-inline constexpr uint32_t kStatisticsSmallCounterBits = 8;
-
 enum class Source : uint8_t {
-  kDma = 0,
-  kGemm = 1,
-  kVec = 2,
-  kSequencer = 3,
+  kDma = isa::kEngineDma,
+  kGemm = isa::kEngineGemm,
+  kVec = isa::kEngineVec,
+  kSequencer = isa::trace::kSourceSequencer,
 };
 
 enum class RecordType : uint8_t {
-  kCompletion = 0,
-  kStatistics = 1,
+  kCompletion = isa::trace::kTypeCompletion,
+  kStatistics = isa::trace::kTypeStatistics,
 };
 
 struct Statistics {

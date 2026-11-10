@@ -22,14 +22,7 @@ using isa::kOpSignal;
 using isa::kOpVec;
 using isa::kOpWaitHost;
 
-enum class Mem : uint8_t {
-  kAbuf = 0,
-  kWbuf = 1,
-  kFbuf = 2,
-  kPbuf = 3,
-  kTbuf = 4,
-  kCbuf = 5,
-};
+using isa::Mem;
 
 enum class DmaKind : uint8_t {
   kRaw = isa::dma::kKindRaw,

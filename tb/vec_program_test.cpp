@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "fp32_ref.hpp"
+#include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "npu_bench.hpp"
 #include "npu_data.hpp"
 #include "npu_isa.hpp"
@@ -22,31 +24,36 @@ constexpr uint32_t kCbufArea = Ddr::kBase + 0x300000U;
 constexpr uint32_t kTbufArea = Ddr::kBase + 0x340000U;
 constexpr uint32_t kPbufArea = Ddr::kBase + 0x380000U;
 constexpr uint32_t kOutArea = Ddr::kBase + 0x400000U;
-constexpr uint32_t kProgramStart = 256;
+template <typename E>
+constexpr uint32_t Code(E value) {
+  return static_cast<uint32_t>(value);
+}
 
-constexpr uint32_t kRegSrc = 1;
-constexpr uint32_t kRegSrc2 = 2;
-constexpr uint32_t kRegDst = 3;
-constexpr uint32_t kRegRowsQ = 4;
-constexpr uint32_t kRegN8 = 5;
-constexpr uint32_t kRegPBase = 6;
-constexpr uint32_t kRegAux = 7;
-constexpr uint32_t kRegImm = 8;
-constexpr uint32_t kRegQ = 9;
+constexpr uint32_t kProgramStart = isa::vec::kRomWords;
 
-constexpr uint32_t kSaluAdd = 0;
-constexpr uint32_t kSaluSub = 1;
-constexpr uint32_t kSaluAnd = 2;
-constexpr uint32_t kSaluOr = 3;
-constexpr uint32_t kSaluXor = 4;
-constexpr uint32_t kSaluShl = 5;
-constexpr uint32_t kSaluShr = 6;
-constexpr uint32_t kSaluSra = 7;
-constexpr uint32_t kSaluMul = 8;
-constexpr uint32_t kSaluSlt = 9;
-constexpr uint32_t kSaluSltu = 10;
-constexpr uint32_t kSaluSeq = 11;
-constexpr uint32_t kSaluMov = 12;
+constexpr uint32_t kRegSrc = isa::vec::kRegSrc;
+constexpr uint32_t kRegSrc2 = isa::vec::kRegSrc2;
+constexpr uint32_t kRegDst = isa::vec::kRegDst;
+constexpr uint32_t kRegRowsQ = isa::vec::kRegRowsQ;
+constexpr uint32_t kRegN8 = isa::vec::kRegN8;
+constexpr uint32_t kRegPBase = isa::vec::kRegPBase;
+constexpr uint32_t kRegAux = isa::vec::kRegAux;
+constexpr uint32_t kRegImm = isa::vec::kRegImm;
+constexpr uint32_t kRegQ = isa::vec::kRegQ;
+
+constexpr uint32_t kSaluAdd = Code(isa::program::Salu::kAdd);
+constexpr uint32_t kSaluSub = Code(isa::program::Salu::kSub);
+constexpr uint32_t kSaluAnd = Code(isa::program::Salu::kAnd);
+constexpr uint32_t kSaluOr = Code(isa::program::Salu::kOr);
+constexpr uint32_t kSaluXor = Code(isa::program::Salu::kXor);
+constexpr uint32_t kSaluShl = Code(isa::program::Salu::kShl);
+constexpr uint32_t kSaluShr = Code(isa::program::Salu::kShr);
+constexpr uint32_t kSaluSra = Code(isa::program::Salu::kSra);
+constexpr uint32_t kSaluMul = Code(isa::program::Salu::kMul);
+constexpr uint32_t kSaluSlt = Code(isa::program::Salu::kSlt);
+constexpr uint32_t kSaluSltu = Code(isa::program::Salu::kSltu);
+constexpr uint32_t kSaluSeq = Code(isa::program::Salu::kSeq);
+constexpr uint32_t kSaluMov = Code(isa::program::Salu::kMov);
 
 struct Pass {
   uint32_t rx = 0;
@@ -203,13 +210,13 @@ Instruction Ret() {
   return word;
 }
 
-constexpr uint32_t kSmemSld = 0;
-constexpr uint32_t kSmemRsmov = 1;
-constexpr uint32_t kSmemRn = 2;
-constexpr uint32_t kRs1 = 0;
-constexpr uint32_t kRs0 = 1;
+constexpr uint32_t kSmemSld = Code(isa::program::Smem::kSld);
+constexpr uint32_t kSmemRsmov = Code(isa::program::Smem::kRsmov);
+constexpr uint32_t kSmemRn = Code(isa::program::Smem::kRn);
+constexpr uint32_t kRs1 = isa::program::kSmemWhichRs1;
+constexpr uint32_t kRs0 = isa::program::kSmemWhichRs0;
 
-constexpr uint32_t kRegZero = 0;
+constexpr uint32_t kRegZero = isa::program::kRegZero;
 constexpr uint32_t kRegOne = 21;
 constexpr uint32_t kRegOut = 20;
 constexpr uint32_t kRegValue = 11;
@@ -500,27 +507,27 @@ TEST(VecProgramTest, BranchLoopAndScalarLoads) {
   EXPECT_EQ(out[4], Splat(data[5][27]));
 }
 
-constexpr uint32_t kCmpLt = 1;
-constexpr uint32_t kCmpLe = 2;
-constexpr uint32_t kCmpEq = 3;
-constexpr uint32_t kCmpNe = 4;
-constexpr uint32_t kCmpGt = 5;
-constexpr uint32_t kCmpGe = 6;
-constexpr uint32_t kLeftX2 = 1;
-constexpr uint32_t kLeftColumn = 2;
-constexpr uint32_t kLeftPosition = 3;
-constexpr uint32_t kLeftRowColumn = 4;
-constexpr uint32_t kSelZero = 1;
-constexpr uint32_t kSelX2 = 2;
-constexpr uint32_t kSelImm = 3;
-constexpr uint32_t kSelNull = 4;
-constexpr uint32_t kSelRs1 = 5;
-constexpr uint32_t kC0X2 = 1;
-constexpr uint32_t kC0Imm = 4;
-constexpr uint32_t kBRs1 = 3;
-constexpr uint32_t kBPre = 5;
-constexpr uint32_t kRedMax = 2;
-constexpr uint32_t kSfIdentity = 1;
+constexpr uint32_t kCmpLt = Code(isa::pass::Cmp::kLt);
+constexpr uint32_t kCmpLe = Code(isa::pass::Cmp::kLe);
+constexpr uint32_t kCmpEq = Code(isa::pass::Cmp::kEq);
+constexpr uint32_t kCmpNe = Code(isa::pass::Cmp::kNe);
+constexpr uint32_t kCmpGt = Code(isa::pass::Cmp::kGt);
+constexpr uint32_t kCmpGe = Code(isa::pass::Cmp::kGe);
+constexpr uint32_t kLeftX2 = Code(isa::pass::CmpLeft::kX2);
+constexpr uint32_t kLeftColumn = Code(isa::pass::CmpLeft::kColumn);
+constexpr uint32_t kLeftPosition = Code(isa::pass::CmpLeft::kPosition);
+constexpr uint32_t kLeftRowColumn = Code(isa::pass::CmpLeft::kRowColumn);
+constexpr uint32_t kSelZero = Code(isa::pass::Sel::kZero);
+constexpr uint32_t kSelX2 = Code(isa::pass::Sel::kX2);
+constexpr uint32_t kSelImm = Code(isa::pass::Sel::kImm);
+constexpr uint32_t kSelNull = Code(isa::pass::Sel::kNull);
+constexpr uint32_t kSelRs1 = Code(isa::pass::Sel::kRs1);
+constexpr uint32_t kC0X2 = Code(isa::pass::C0::kX2);
+constexpr uint32_t kC0Imm = Code(isa::pass::C0::kImm);
+constexpr uint32_t kBRs1 = Code(isa::pass::B::kRs1);
+constexpr uint32_t kBPre = Code(isa::pass::B::kPre);
+constexpr uint32_t kRedMax = Code(isa::pass::Reduce::kMax);
+constexpr uint32_t kSfIdentity = Code(isa::pass::ScalarFn::kIdentity);
 
 bool Relation(uint32_t cmp, bool integer, uint32_t a, uint32_t b) {
   bool less = false;
@@ -1263,11 +1270,11 @@ TEST(VecProgramTest, Transpose8ChangesRotationBetweenConsecutiveInstructions) {
   EXPECT_EQ(output, expected);
 }
 
-constexpr uint32_t kRegVecCycles = 0x30;
-constexpr uint32_t kC0Pbuf = 2;
-constexpr uint32_t kBPbuf = 2;
-constexpr uint32_t kPaRowvec = 1;
-constexpr uint32_t kPaTile = 2;
+constexpr uint32_t kRegVecCycles = Offset(Register::kVecCycles);
+constexpr uint32_t kC0Pbuf = Code(isa::pass::C0::kPbuf);
+constexpr uint32_t kBPbuf = Code(isa::pass::B::kPbuf);
+constexpr uint32_t kPaRowvec = Code(isa::pass::Pbuf::kRowVec);
+constexpr uint32_t kPaTile = Code(isa::pass::Pbuf::kTile);
 
 struct ChainProgram {
   uint32_t words = 1;

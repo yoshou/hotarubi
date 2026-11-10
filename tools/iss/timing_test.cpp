@@ -153,16 +153,16 @@ TEST(CostModelTest, VecCostFollowsTheStructuralModel) {
 }
 
 TEST(CostModelTest, ScalarProgramsMatchTheRtl) {
-  const auto cycles = [](Reduction red, ScalarFn fn, bool rn, bool eps) {
+  const auto cycles = [](Reduce red, ScalarFn fn, bool rn, bool eps) {
     return ScalarProgramCycles(RowScalarProgram(red, fn, rn, eps));
   };
-  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kNegate, true, false), 92U);
-  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kRsqrt, true, true), 325U);
-  EXPECT_EQ(cycles(Reduction::kMax, ScalarFn::kNegate, false, false), 4U);
-  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kReciprocal, false, false), 215U);
-  EXPECT_EQ(cycles(Reduction::kMax, ScalarFn::kIdentity, false, false), 4U);
-  EXPECT_EQ(cycles(Reduction::kSum, ScalarFn::kIdentity, false, false), 81U);
-  EXPECT_EQ(cycles(Reduction::kMax, ScalarFn::kReciprocal, true, false),
+  EXPECT_EQ(cycles(Reduce::kSum, ScalarFn::kNegate, true, false), 92U);
+  EXPECT_EQ(cycles(Reduce::kSum, ScalarFn::kRsqrt, true, true), 325U);
+  EXPECT_EQ(cycles(Reduce::kMax, ScalarFn::kNegate, false, false), 4U);
+  EXPECT_EQ(cycles(Reduce::kSum, ScalarFn::kReciprocal, false, false), 215U);
+  EXPECT_EQ(cycles(Reduce::kMax, ScalarFn::kIdentity, false, false), 4U);
+  EXPECT_EQ(cycles(Reduce::kSum, ScalarFn::kIdentity, false, false), 81U);
+  EXPECT_EQ(cycles(Reduce::kMax, ScalarFn::kReciprocal, true, false),
             (13U * 11) + (3U * 2) + 2);
   EXPECT_EQ(ScalarProgramCycles(kCountReciprocalProgram), 138U);
 }

@@ -8,6 +8,7 @@
 #include <optional>
 #include <vector>
 
+#include "hotarubi/isa.hpp"
 #include "word.hpp"
 
 namespace hotarubi::iss {
@@ -37,14 +38,7 @@ using AbufWord = std::array<uint8_t, kAbufWordBytes>;
 using WbufWord = std::array<uint8_t, kWbufWordBytes>;
 using FbufWord = std::array<uint32_t, kFbufElements>;
 
-enum class Mem : uint8_t {
-  kAbuf = 0,
-  kWbuf = 1,
-  kFbuf = 2,
-  kPbuf = 3,
-  kTbuf = 4,
-  kCbuf = 5,
-};
+using isa::Mem;
 
 struct AccessSet {
   std::bitset<kAbufDepth> abuf;

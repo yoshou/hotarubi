@@ -13,6 +13,7 @@
 
 #include "checkpoint.hpp"
 #include "ddr_image.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/safetensors.hpp"
 #include "hotarubi/sparsedrive_layout.hpp"
 #include "isa.hpp"
@@ -26,7 +27,7 @@ inline constexpr uint64_t kWordA = kWordAbufBytes;
 inline constexpr uint64_t kWordT = kWordTbufBytes;
 inline constexpr uint64_t kWordC = 16;
 inline constexpr uint32_t kPlane = 256;
-inline constexpr uint32_t kNull = 0xFFFFFFFFU;
+using isa::kNullEntry;
 inline constexpr uint32_t kAbufWords = kMemDepth[0];
 inline constexpr uint32_t kWbufWords = kMemDepth[1];
 inline constexpr uint32_t kFbufWords = kMemDepth[2];

@@ -1,4 +1,5 @@
 set(rtl_sources
+  ${CMAKE_CURRENT_SOURCE_DIR}/isa_pkg.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_pkg.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/vec_rom_pkg.sv
   ${CMAKE_CURRENT_SOURCE_DIR}/sfifo.sv
@@ -26,4 +27,5 @@ set(rtl_sources
 set(HOTARUBI_RTL_SOURCES ${rtl_sources} PARENT_SCOPE)
 
 add_test(NAME rtl_lint
-  COMMAND ${VERILATOR_BIN} --lint-only -Wall --top-module npu_top ${rtl_sources})
+  COMMAND ${VERILATOR_BIN} --lint-only -Wall --top-module npu_top
+          ${CMAKE_CURRENT_SOURCE_DIR}/lint.vlt ${rtl_sources})

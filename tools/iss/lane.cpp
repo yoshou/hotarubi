@@ -17,7 +17,7 @@ namespace {
 constexpr uint32_t kTableHalf = 512;
 constexpr uint64_t kMask33 = (uint64_t{1} << 33) - 1;
 constexpr uint64_t kMask34 = (uint64_t{1} << 34) - 1;
-constexpr uint32_t kNullEntry = 0xFFFFFFFF;
+using isa::kNullEntry;
 
 template <typename Enum>
 Enum Decode(uint32_t value, Enum last, Enum fallback) {
@@ -34,21 +34,21 @@ uint32_t CompareKey(uint32_t bits) {
   return (value >> 31) != 0 ? ~value : value ^ kFp32SignBit;
 }
 
-bool Holds(Compare relation, uint32_t left, uint32_t right) {
+bool Holds(Cmp relation, uint32_t left, uint32_t right) {
   switch (relation) {
-    case Compare::kLt:
+    case Cmp::kLt:
       return left < right;
-    case Compare::kLe:
+    case Cmp::kLe:
       return left <= right;
-    case Compare::kEq:
+    case Cmp::kEq:
       return left == right;
-    case Compare::kNe:
+    case Cmp::kNe:
       return left != right;
-    case Compare::kGt:
+    case Cmp::kGt:
       return left > right;
-    case Compare::kGe:
+    case Cmp::kGe:
       return left >= right;
-    case Compare::kNone:
+    case Cmp::kNone:
       break;
   }
   return true;
@@ -105,15 +105,15 @@ FixedPoint ExpFixedPoint(uint32_t prod) {
 
 uint32_t C0Value(const Pass& pass, const LaneInputs& in, const RowState& rows) {
   switch (pass.c0) {
-    case C0Source::kX2:
+    case C0::kX2:
       return in.x2;
-    case C0Source::kPbuf:
+    case C0::kPbuf:
       return in.pbuf;
-    case C0Source::kRs0:
+    case C0::kRs0:
       return rows.rs0.at(in.t);
-    case C0Source::kImm:
+    case C0::kImm:
       return in.imm;
-    case C0Source::kZero:
+    case C0::kZero:
       break;
   }
   return 0;
@@ -122,39 +122,39 @@ uint32_t C0Value(const Pass& pass, const LaneInputs& in, const RowState& rows) {
 uint32_t BValue(const Pass& pass, const LaneInputs& in, const RowState& rows,
                 uint32_t pre) {
   switch (pass.b) {
-    case BSource::kX2:
+    case B::kX2:
       return in.x2;
-    case BSource::kPbuf:
+    case B::kPbuf:
       return in.pbuf;
-    case BSource::kRs1:
+    case B::kRs1:
       return rows.rs1.at(in.t);
-    case BSource::kImm:
+    case B::kImm:
       return in.imm;
-    case BSource::kPre:
+    case B::kPre:
       return pre;
-    case BSource::kOne:
+    case B::kOne:
       break;
   }
   return kFp32One;
 }
 
-uint32_t IntegerResult(IntegerOp op, uint32_t x, uint32_t c0) {
+uint32_t IntegerResult(Ialu op, uint32_t x, uint32_t c0) {
   switch (op) {
-    case IntegerOp::kAdd:
+    case Ialu::kAdd:
       return x + c0;
-    case IntegerOp::kSub:
+    case Ialu::kSub:
       return x - c0;
-    case IntegerOp::kAnd:
+    case Ialu::kAnd:
       return x & c0;
-    case IntegerOp::kOr:
+    case Ialu::kOr:
       return x | c0;
-    case IntegerOp::kXor:
+    case Ialu::kXor:
       return x ^ c0;
-    case IntegerOp::kShr1:
+    case Ialu::kShr1:
       return x >> 1;
-    case IntegerOp::kRsub:
+    case Ialu::kRsub:
       return c0 - x;
-    case IntegerOp::kNone:
+    case Ialu::kNone:
       break;
   }
   return 0;
@@ -166,30 +166,30 @@ uint32_t FloatResult(const Pass& pass, const LaneInputs& in,
   const uint32_t pre = Fp32Add(in.x, c0);
   const uint32_t prod = Fp32Mul(pre, BValue(pass, in, rows, pre));
   switch (pass.nl) {
-    case Nonlinear::kAct:
+    case Nl::kAct:
       return Activation(prod, tbuf);
-    case Nonlinear::kExp2:
+    case Nl::kExp2:
       return Exp2(prod, tbuf);
-    case Nonlinear::kTab01:
+    case Nl::kTab01:
       return Table01(prod, tbuf);
-    case Nonlinear::kNone:
+    case Nl::kNone:
       break;
   }
   return PostAdd(prod, c1, pass.po);
 }
 
-uint32_t SelectValue(Select sel, const LaneInputs& in, const RowState& rows) {
+uint32_t SelectValue(Sel sel, const LaneInputs& in, const RowState& rows) {
   switch (sel) {
-    case Select::kX2:
+    case Sel::kX2:
       return in.x2;
-    case Select::kImm:
+    case Sel::kImm:
       return in.imm;
-    case Select::kNull:
+    case Sel::kNull:
       return kNullEntry;
-    case Select::kRs1:
+    case Sel::kRs1:
       return rows.rs1.at(in.t);
-    case Select::kNone:
-    case Select::kZero:
+    case Sel::kNone:
+    case Sel::kZero:
       break;
   }
   return 0;
@@ -213,28 +213,28 @@ Pass DecodePass(const Word128& instruction) {
       .x2_en = Flag(w, f::kX2En),
       .mg = w.Field(f::kMg),
       .ms = w.Field(f::kMs),
-      .mx = Decode(w.Field(f::kMx), MapMode::kUpper, MapMode::kNone),
-      .mx2 = Decode(w.Field(f::kMx2), MapMode::kUpper, MapMode::kNone),
-      .md = Decode(w.Field(f::kMd), MapMode::kUpper, MapMode::kNone),
-      .pa = Decode(w.Field(f::kPa), PbufAccess::kTile, PbufAccess::kNone),
-      .c0 = Decode(w.Field(f::kC0), C0Source::kImm, C0Source::kZero),
-      .b = Decode(w.Field(f::kB), BSource::kPre, BSource::kOne),
-      .nl = static_cast<Nonlinear>(w.Field(f::kNl)),
-      .po = static_cast<PostOp>(w.Field(f::kPo)),
+      .mx = Decode(w.Field(f::kMx), Map::kUpper, Map::kNone),
+      .mx2 = Decode(w.Field(f::kMx2), Map::kUpper, Map::kNone),
+      .md = Decode(w.Field(f::kMd), Map::kUpper, Map::kNone),
+      .pa = Decode(w.Field(f::kPa), Pbuf::kTile, Pbuf::kNone),
+      .c0 = Decode(w.Field(f::kC0), C0::kImm, C0::kZero),
+      .b = Decode(w.Field(f::kB), B::kPre, B::kOne),
+      .nl = static_cast<Nl>(w.Field(f::kNl)),
+      .po = static_cast<Post>(w.Field(f::kPo)),
       .pv = Flag(w, f::kPv),
-      .red = Decode(w.Field(f::kRed), Reduction::kMax, Reduction::kNone),
-      .wr = static_cast<WriteTarget>(w.Field(f::kWr)),
+      .red = Decode(w.Field(f::kRed), Reduce::kMax, Reduce::kNone),
+      .wr = static_cast<Write>(w.Field(f::kWr)),
       .sf = Decode(w.Field(f::kSf), ScalarFn::kRsqrt, ScalarFn::kNone),
       .st = Flag(w, f::kSt),
       .srn = Flag(w, f::kSrn),
       .seps = Flag(w, f::kSeps),
       .px = w.Field(f::kPx),
-      .cmp = Decode(w.Field(f::kCmp), Compare::kGe, Compare::kNone),
-      .cl = Decode(w.Field(f::kCl), CompareLeft::kRowColumn, CompareLeft::kX),
+      .cmp = Decode(w.Field(f::kCmp), Cmp::kGe, Cmp::kNone),
+      .cl = Decode(w.Field(f::kCl), CmpLeft::kRowColumn, CmpLeft::kX),
       .cr = Flag(w, f::kCr),
       .cmp_int = Flag(w, f::kCmpInt),
-      .sel = Decode(w.Field(f::kSel), Select::kRs1, Select::kNone),
-      .ialu = static_cast<IntegerOp>(w.Field(f::kIalu)),
+      .sel = Decode(w.Field(f::kSel), Sel::kRs1, Sel::kNone),
+      .ialu = static_cast<Ialu>(w.Field(f::kIalu)),
       .dst_s1 = Flag(w, f::kDstS1),
       .c0_pred = Flag(w, f::kC0Pred),
       .x_s1 = Flag(w, f::kXS1),
@@ -243,13 +243,13 @@ Pass DecodePass(const Word128& instruction) {
   };
 }
 
-uint32_t WordOf(const Pass& pass, MapMode mode, uint32_t w) {
-  if (mode == MapMode::kNone) {
+uint32_t WordOf(const Pass& pass, Map mode, uint32_t w) {
+  if (mode == Map::kNone) {
     return w;
   }
   const uint32_t group = 1U << pass.mg;
   const uint32_t mapped = ((w >> pass.mg) << pass.ms) + (w & (group - 1));
-  return mode == MapMode::kUpper ? mapped + group : mapped;
+  return mode == Map::kUpper ? mapped + group : mapped;
 }
 
 uint32_t PermutedIndex(uint32_t px, uint32_t t, uint32_t l) {
@@ -272,29 +272,29 @@ uint32_t PermutedIndex(uint32_t px, uint32_t t, uint32_t l) {
 }
 
 bool Predicate(const Pass& pass, const LaneInputs& in) {
-  if (pass.cmp == Compare::kNone) {
+  if (pass.cmp == Cmp::kNone) {
     return true;
   }
   uint32_t left = in.x;
   switch (pass.cl) {
-    case CompareLeft::kX2:
+    case CmpLeft::kX2:
       left = in.x2;
       break;
-    case CompareLeft::kColumn:
+    case CmpLeft::kColumn:
       left = in.l;
       break;
-    case CompareLeft::kPosition:
+    case CmpLeft::kPosition:
       left = (in.t * kLanes) + in.l;
       break;
-    case CompareLeft::kRowColumn:
+    case CmpLeft::kRowColumn:
       left = (in.w * kLanes) + in.l;
       break;
-    case CompareLeft::kX:
+    case CmpLeft::kX:
       break;
   }
-  const bool lane = pass.cl == CompareLeft::kColumn ||
-                    pass.cl == CompareLeft::kPosition ||
-                    pass.cl == CompareLeft::kRowColumn;
+  const bool lane = pass.cl == CmpLeft::kColumn ||
+                    pass.cl == CmpLeft::kPosition ||
+                    pass.cl == CmpLeft::kRowColumn;
   const uint32_t right = pass.cr ? in.x2 : in.imm2;
   if (pass.cmp_int || lane) {
     return Holds(pass.cmp, left ^ kFp32SignBit, right ^ kFp32SignBit);
@@ -305,30 +305,30 @@ bool Predicate(const Pass& pass, const LaneInputs& in) {
 uint32_t LaneOutput(const Pass& pass, const LaneInputs& in,
                     const RowState& rows, std::span<const uint64_t> tbuf) {
   const bool predicate = Predicate(pass, in);
-  if (pass.sel != Select::kNone && !predicate) {
+  if (pass.sel != Sel::kNone && !predicate) {
     return SelectValue(pass.sel, in, rows);
   }
   uint32_t c1 = pass.pv ? in.x2 : 0;
-  if (pass.po == PostOp::kSignfix) {
+  if (pass.po == Post::kSignfix) {
     c1 = in.x;
   }
   const uint32_t c0 = pass.c0_pred && !predicate ? 0 : C0Value(pass, in, rows);
-  if (pass.ialu != IntegerOp::kNone) {
+  if (pass.ialu != Ialu::kNone) {
     return IntegerResult(pass.ialu, in.x, c0);
   }
   return FloatResult(pass, in, rows, c0, c1, tbuf);
 }
 
-uint32_t PostAdd(uint32_t prod, uint32_t c1, PostOp op) {
+uint32_t PostAdd(uint32_t prod, uint32_t c1, Post op) {
   switch (op) {
-    case PostOp::kMax:
+    case Post::kMax:
       return Fp32Add(MaxGreaterEqual(prod, c1) ? prod : c1, 0);
-    case PostOp::kSignfix:
+    case Post::kSignfix:
       return (c1 >> 31) != 0 ? Fp32Add(prod ^ kFp32SignBit, c1)
                              : Fp32Add(prod, 0);
-    case PostOp::kSub:
+    case Post::kSub:
       return Fp32Add(prod, c1 ^ kFp32SignBit);
-    case PostOp::kAdd:
+    case Post::kAdd:
       break;
   }
   return Fp32Add(prod, c1);

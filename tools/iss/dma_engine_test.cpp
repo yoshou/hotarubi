@@ -20,7 +20,7 @@ namespace {
 
 constexpr uint64_t kBase = 0x20000000;
 constexpr size_t kDdrBytes = size_t{1} << 20;
-constexpr uint32_t kNull = 0xFFFFFFFF;
+using isa::kNullEntry;
 constexpr std::byte kUntouched{0xEE};
 
 enum MemCode : uint8_t {
@@ -224,7 +224,7 @@ class RowFormatTest : public DmaEngineTest,
                                         ((u % kRowWords) * size_));
     }
     if (c.indexed) {
-      tokens_.at(5) = kNull;
+      tokens_.at(5) = kNullEntry;
     }
   }
 
@@ -234,7 +234,7 @@ class RowFormatTest : public DmaEngineTest,
     }
     for (uint32_t u = 0; u < tokens_.size(); ++u) {
       Put(kList + (4 * u),
-          tokens_.at(u) == kNull ? kNull : Entry(tokens_.at(u)), 4);
+          tokens_.at(u) == kNullEntry ? kNullEntry : Entry(tokens_.at(u)), 4);
     }
   }
 
@@ -256,15 +256,16 @@ class RowFormatTest : public DmaEngineTest,
       for (uint32_t k = 0; k < (mxint8_ ? 32U : 8U); ++k) {
         if (mxint8_) {
           ASSERT_EQ(memories_.abuf.at(index).at((j * 32) + k),
-                    token == kNull ? 0 : Byte(token + (g * 32) + k));
+                    token == kNullEntry ? 0 : Byte(token + (g * 32) + k));
         } else {
-          ASSERT_EQ(memories_.fbuf.at(index).at((j * 8) + k),
-                    token == kNull ? 0 : Little(token + (32 * g) + (4 * k), 4));
+          ASSERT_EQ(
+              memories_.fbuf.at(index).at((j * 8) + k),
+              token == kNullEntry ? 0 : Little(token + (32 * g) + (4 * k), 4));
         }
       }
       if (mxint8_) {
         ASSERT_EQ(memories_.abuf.at(index).at(kAbufScaleOffset + j),
-                  token == kNull ? 127 : Byte(token + (32 * blocks_) + g));
+                  token == kNullEntry ? 127 : Byte(token + (32 * blocks_) + g));
       }
     }
   }
@@ -312,7 +313,7 @@ TEST_P(RowFormatTest, PacksTokensIntoQuadsAndBack) {
   command.store = true;
   Execute(command);
   for (uint32_t u = 0; u < tokens_.size(); ++u) {
-    if (tokens_.at(u) == kNull) {
+    if (tokens_.at(u) == kNullEntry) {
       continue;
     }
     for (uint32_t i = 0; i < size_; ++i) {
@@ -528,10 +529,10 @@ class GatherTest : public DmaEngineTest {
           const uint32_t index = pick(generator_);
           const uint32_t row = kFeatures + (index * kRowBytes);
           const uint32_t bw = RandomFloat(122);
-          const uint32_t entry = index < kFeatureRows ? Entry(row) : kNull;
+          const uint32_t entry = index < kFeatureRows ? Entry(row) : kNullEntry;
           Put(list.offset + 16 + (((s * 16) + (t * 4) + k) * 8),
               entry | (uint64_t{bw} << 32), 8);
-          if (entry != kNull) {
+          if (entry != kNullEntry) {
             Accumulate(list, s, t, bw, row);
           }
         }
@@ -598,7 +599,7 @@ TEST_F(GatherTest, ReadsCoefficientsOnlyForSlotGroupsWithRows) {
     for (uint32_t e = 0; e < 16; ++e) {
       const uint32_t entry =
           s / 8 == 1 ? Entry(kFeatures + ((e % kFeatureRows) * kRowBytes))
-                     : kNull;
+                     : kNullEntry;
       Put(list.offset + 16 + (((s * 16) + e) * 8), entry, 4);
     }
   }

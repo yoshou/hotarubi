@@ -241,11 +241,11 @@ std::expected<Stream, std::string> LoadStream(const LoadedProgram& loaded,
 
 std::vector<iss::TraceRecord> DecodeRecords(std::span<const std::byte> bytes) {
   std::vector<iss::TraceRecord> records;
-  records.reserve(bytes.size() / iss::kTraceRecordBytes);
-  for (size_t at = 0; at + iss::kTraceRecordBytes <= bytes.size();
-       at += iss::kTraceRecordBytes) {
+  records.reserve(bytes.size() / isa::trace::kRecordBytes);
+  for (size_t at = 0; at + isa::trace::kRecordBytes <= bytes.size();
+       at += isa::trace::kRecordBytes) {
     records.push_back(iss::DecodeRecord(
-        iss::LoadWord128(bytes.subspan(at).first<iss::kTraceRecordBytes>())));
+        iss::LoadWord128(bytes.subspan(at).first<isa::trace::kRecordBytes>())));
   }
   return records;
 }
@@ -256,7 +256,7 @@ std::expected<std::vector<iss::TraceRecord>, std::string> LoadRecords(
   if (!bytes) {
     return std::unexpected(bytes.error());
   }
-  if (bytes->size() % iss::kTraceRecordBytes != 0) {
+  if (bytes->size() % isa::trace::kRecordBytes != 0) {
     return std::unexpected(
         std::format("{} is not a whole number of records", path.string()));
   }

@@ -21,13 +21,13 @@ namespace hotarubi::compiler::sparsedrive {
 namespace {
 
 namespace vp = vprog;
+using isa::kNullEntry;
 using vp::Pass;
 
 constexpr uint32_t kMagic = 0x7EF311C7U;
 constexpr uint32_t kSignBit = 0x80000000U;
 constexpr uint32_t kI2f0 = 0x4B400000U;
 constexpr int64_t kCf = 12582912;
-constexpr uint32_t kNullEntry = 0xFFFFFFFFU;
 constexpr uint32_t kFsMaxMicroseconds = 2000000;
 constexpr uint32_t kDetGroups = 6;
 constexpr uint32_t kMapStride = 8;

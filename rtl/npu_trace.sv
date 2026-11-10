@@ -1,4 +1,6 @@
-module npu_trace #(
+module npu_trace
+  import isa_pkg::*;
+#(
   parameter int Depth = 64
 ) (
   input  logic         clk_i,
@@ -6,7 +8,7 @@ module npu_trace #(
   input  logic         clear_i,
   input  logic [31:0]  base_i,
   input  logic         ev_push_i,
-  input  logic [127:0] ev_data_i,
+  input  logic [TraceRecordBits-1:0] ev_data_i,
   output logic         ev_afull_o,
   output logic [31:0]  count_o,
   output logic         idle_o,
@@ -27,11 +29,11 @@ module npu_trace #(
 );
 
   logic                   empty, pop;
-  logic [127:0]           dout;
+  logic [TraceRecordBits-1:0] dout;
   logic [$clog2(Depth):0] fifo_count;
 
   sfifo #(
-    .Width      (128),
+    .Width      (TraceRecordBits),
     .Depth      (Depth),
     .AfullMargin(8)
   ) u_f (

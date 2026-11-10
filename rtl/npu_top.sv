@@ -1,4 +1,5 @@
 module npu_top
+  import isa_pkg::*;
   import vec_pkg::*;
   import vec_rom_pkg::*;
 (
@@ -478,27 +479,27 @@ module npu_top
 
   logic d_wr_abuf, d_wr_wbuf, d_wr_fbuf, d_wr_pbuf, d_wr_tbuf, d_wr_cbuf;
 
-  assign d_wr_abuf = d_wr_req && (d_wr_mem == 3'd0);
-  assign d_wr_wbuf = d_wr_req && (d_wr_mem == 3'd1);
-  assign d_wr_fbuf = d_wr_req && (d_wr_mem == 3'd2);
-  assign d_wr_pbuf = d_wr_req && (d_wr_mem == 3'd3);
-  assign d_wr_tbuf = d_wr_req && (d_wr_mem == 3'd4);
-  assign d_wr_cbuf = d_wr_req && (d_wr_mem == 3'd5);
+  assign d_wr_abuf = d_wr_req && (d_wr_mem == MemAbuf);
+  assign d_wr_wbuf = d_wr_req && (d_wr_mem == MemWbuf);
+  assign d_wr_fbuf = d_wr_req && (d_wr_mem == MemFbuf);
+  assign d_wr_pbuf = d_wr_req && (d_wr_mem == MemPbuf);
+  assign d_wr_tbuf = d_wr_req && (d_wr_mem == MemTbuf);
+  assign d_wr_cbuf = d_wr_req && (d_wr_mem == MemCbuf);
 
   assign v_fb_wr_grant = v_fb_wr_req && !g_fbuf_we;
   assign v_fb_rd_grant = v_fb_rd_req && !g_fbuf_rd_req;
 
   always_comb begin
     case (d_wr_mem)
-      3'd0:       d_wr_grant = d_wr_req && !v_ab_wr_req;
-      3'd2:       d_wr_grant = d_wr_req && !g_fbuf_we && !v_fb_wr_req;
+      MemAbuf:    d_wr_grant = d_wr_req && !v_ab_wr_req;
+      MemFbuf:    d_wr_grant = d_wr_req && !g_fbuf_we && !v_fb_wr_req;
       default:    d_wr_grant = d_wr_req;
     endcase
   end
 
-  assign d_rd_grant = d_rd_req && ((d_rd_mem == 3'd0) ? !v_ab_wr_req :
-                                   (d_rd_mem == 3'd2) ? (!g_fbuf_rd_req && !v_fb_rd_req) : 1'b1);
-  assign d_rd_data  = (d_rd_mem == 3'd0) ? abuf_qb2 : {32'd0, fbuf_q2};
+  assign d_rd_grant = d_rd_req && ((d_rd_mem == MemAbuf) ? !v_ab_wr_req :
+                                   (d_rd_mem == MemFbuf) ? (!g_fbuf_rd_req && !v_fb_rd_req) : 1'b1);
+  assign d_rd_data  = (d_rd_mem == MemAbuf) ? abuf_qb2 : {32'd0, fbuf_q2};
 
   (* ram_style = "ultra" *) logic [1055:0] abuf [8192];
   logic [1055:0] abuf_qa1, abuf_qa2, abuf_qb1, ab_wd;
@@ -633,7 +634,7 @@ module npu_top
 
   initial begin
     for (int i = 0; i < 1024; i++) begin
-      cbuf[i] = (i < 256) ? Rom[i] : 128'd0;
+      cbuf[i] = (i < VecRomWords) ? Rom[i] : 128'd0;
     end
   end
 

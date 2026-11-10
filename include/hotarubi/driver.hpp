@@ -13,6 +13,8 @@
 #include <string>
 #include <string_view>
 
+#include "hotarubi/isa.hpp"
+
 namespace hotarubi {
 
 enum class Register : uint8_t {
@@ -36,6 +38,40 @@ enum class Register : uint8_t {
   kTraceCount = 0x44,
   kHostGo = 0x48,
 };
+
+constexpr uint32_t Offset(Register reg) { return static_cast<uint32_t>(reg); }
+
+inline constexpr uint32_t kRegisterAddressBits = 8;
+inline constexpr uint32_t kRegisterBytes = 4;
+
+inline constexpr uint32_t kCtrlStart = 1U << 0;
+inline constexpr uint32_t kCtrlSoftReset = 1U << 1;
+
+inline constexpr uint32_t kStatusRunning = 1U << 0;
+inline constexpr uint32_t kStatusHalted = 1U << 1;
+inline constexpr uint32_t kStatusError = 1U << 2;
+inline constexpr uint32_t kStatusWaitingHost = 1U << 3;
+inline constexpr uint32_t kStatusBusyShift = 4;
+inline constexpr uint32_t kStatusIbufEmpty =
+    1U << (kStatusBusyShift + isa::kEngines);
+
+constexpr uint32_t StatusBusy(uint32_t engine) {
+  return 1U << (kStatusBusyShift + engine);
+}
+
+inline constexpr uint32_t kIrqSignal = 1U << 0;
+inline constexpr uint32_t kIrqHalt = 1U << 1;
+inline constexpr uint32_t kIrqIllegal = 1U << 2;
+inline constexpr uint32_t kIrqAxiError = 1U << 3;
+inline constexpr uint32_t kIrqAll =
+    kIrqSignal | kIrqHalt | kIrqIllegal | kIrqAxiError;
+
+inline constexpr isa::Field kSignalId{.lsb = 0, .width = 8};
+inline constexpr isa::Field kSignalCount{.lsb = 16, .width = 16};
+
+inline constexpr uint32_t kTraceEnable = 1U << 0;
+inline constexpr uint32_t kTraceIdle = 1U << 1;
+inline constexpr uint32_t kTraceStatistics = 1U << 2;
 
 struct Counters {
   uint32_t issued = 0;

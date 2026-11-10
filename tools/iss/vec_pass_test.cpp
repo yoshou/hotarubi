@@ -20,7 +20,7 @@ namespace {
 
 using encoding::PassFields;
 
-constexpr uint32_t kProgram = 256;
+constexpr uint32_t kProgram = isa::vec::kRomWords;
 constexpr uint32_t kNull = 0xFFFFFFFF;
 
 enum Register : uint8_t {
@@ -966,7 +966,7 @@ TEST_F(VecPassTest, OverlapsDependentPassesAndCountsTheStalledWords) {
   EXPECT_EQ(engine_.Activity().context_stall_words,
             kReductionLatencyWords +
                 ((ScalarProgramCycles(RowScalarProgram(
-                      Reduction::kSum, ScalarFn::kReciprocal, false, false)) +
+                      Reduce::kSum, ScalarFn::kReciprocal, false, false)) +
                   3) /
                  4));
   scaled.ctx = 1;

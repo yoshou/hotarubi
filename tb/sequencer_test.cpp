@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "hotarubi/driver.hpp"
 #include "hotarubi/isa.hpp"
 #include "npu_bench.hpp"
 #include "npu_isa.hpp"
@@ -11,35 +12,29 @@
 namespace hotarubi::tb {
 namespace {
 
-constexpr uint32_t kRegCtrl = 0x00;
-constexpr uint32_t kRegStatus = 0x04;
-constexpr uint32_t kRegInstrBase = 0x08;
-constexpr uint32_t kRegInstrCount = 0x0C;
-constexpr uint32_t kRegIrqStatus = 0x10;
-constexpr uint32_t kRegIrqEnable = 0x14;
-constexpr uint32_t kRegSignal = 0x18;
-constexpr uint32_t kRegSignalValue = 0x1C;
-constexpr uint32_t kRegIssued = 0x20;
-constexpr uint32_t kRegCycles = 0x24;
-constexpr uint32_t kRegDmaCycles = 0x28;
-constexpr uint32_t kRegGemmCycles = 0x2C;
-constexpr uint32_t kRegVecCycles = 0x30;
-constexpr uint32_t kRegTraceBase = 0x3C;
-constexpr uint32_t kRegTraceCtrl = 0x40;
-constexpr uint32_t kRegTraceCount = 0x44;
-constexpr uint32_t kRegHostGo = 0x48;
-
-constexpr uint32_t kStatusRunning = 0x01;
-constexpr uint32_t kStatusHalted = 0x02;
-constexpr uint32_t kStatusError = 0x04;
-constexpr uint32_t kStatusWaiting = 0x08;
-constexpr uint32_t kStatusIbufEmpty = 0x80;
-
-constexpr uint32_t kIrqSignal = 0x1;
-constexpr uint32_t kIrqHalt = 0x2;
-constexpr uint32_t kIrqIllegal = 0x4;
+constexpr uint32_t kRegCtrl = Offset(Register::kCtrl);
+constexpr uint32_t kRegStatus = Offset(Register::kStatus);
+constexpr uint32_t kRegInstrBase = Offset(Register::kInstrBase);
+constexpr uint32_t kRegInstrCount = Offset(Register::kInstrCount);
+constexpr uint32_t kRegIrqStatus = Offset(Register::kIrqStatus);
+constexpr uint32_t kRegIrqEnable = Offset(Register::kIrqEnable);
+constexpr uint32_t kRegSignal = Offset(Register::kSignal);
+constexpr uint32_t kRegSignalValue = Offset(Register::kSignalValue);
+constexpr uint32_t kRegIssued = Offset(Register::kIssued);
+constexpr uint32_t kRegCycles = Offset(Register::kCycles);
+constexpr uint32_t kRegDmaCycles = Offset(Register::kDmaCycles);
+constexpr uint32_t kRegGemmCycles = Offset(Register::kGemmCycles);
+constexpr uint32_t kRegVecCycles = Offset(Register::kVecCycles);
+constexpr uint32_t kRegTraceBase = Offset(Register::kTraceBase);
+constexpr uint32_t kRegTraceCtrl = Offset(Register::kTraceCtrl);
+constexpr uint32_t kRegTraceCount = Offset(Register::kTraceCount);
+constexpr uint32_t kRegHostGo = Offset(Register::kHostGo);
 
 constexpr uint32_t kTraceArea = Ddr::kBase + 0x200000U;
+
+uint32_t SignalId(uint32_t value) {
+  return (value >> kSignalId.lsb) & ((1U << kSignalId.width) - 1);
+}
 
 Instruction Illegal(uint32_t opcode) { return Header(opcode, 0); }
 
@@ -48,13 +43,13 @@ TEST(SequencerTest, RegistersReadBack) {
   EXPECT_EQ(bench.ReadReg(kRegStatus), kStatusIbufEmpty);
   bench.WriteReg(kRegInstrBase, 0x12345600U);
   bench.WriteReg(kRegInstrCount, 77);
-  bench.WriteReg(kRegIrqEnable, 0x5);
+  bench.WriteReg(kRegIrqEnable, kIrqSignal | kIrqIllegal);
   bench.WriteReg(kRegTraceBase, 0x40000010U);
-  bench.WriteReg(kRegTraceCtrl, 1);
+  bench.WriteReg(kRegTraceCtrl, kTraceEnable);
   bench.WriteReg(kRegHostGo, 0xCAFE);
   EXPECT_EQ(bench.ReadReg(kRegInstrBase), 0x12345600U);
   EXPECT_EQ(bench.ReadReg(kRegInstrCount), 77U);
-  EXPECT_EQ(bench.ReadReg(kRegIrqEnable), 0x5U);
+  EXPECT_EQ(bench.ReadReg(kRegIrqEnable), kIrqSignal | kIrqIllegal);
   EXPECT_EQ(bench.ReadReg(kRegTraceBase), 0x40000010U);
   EXPECT_EQ(bench.ReadReg(kRegTraceCtrl) & 1U, 1U);
   EXPECT_EQ(bench.ReadReg(kRegHostGo), 0xCAFEU);
@@ -100,23 +95,25 @@ TEST(SequencerTest, WaitHostHoldsUntilHostGoReachesValue) {
   bench.LoadProgram(program, NpuBench::kProgramBase);
   bench.Start(NpuBench::kProgramBase, static_cast<uint32_t>(program.size()));
   ASSERT_TRUE(bench.WaitStatus(
-      [](uint32_t status) { return (status & kStatusWaiting) != 0; }, 100000));
-  EXPECT_EQ(bench.ReadReg(kRegSignal) & 0xFFU, 1U);
+      [](uint32_t status) { return (status & kStatusWaitingHost) != 0; },
+      100000));
+  EXPECT_EQ(SignalId(bench.ReadReg(kRegSignal)), 1U);
   bench.WriteReg(kRegHostGo, 2);
   for (int i = 0; i < 2000; ++i) {
     bench.Tick();
   }
-  EXPECT_EQ(bench.ReadReg(kRegStatus) & (kStatusRunning | kStatusWaiting),
-            kStatusRunning | kStatusWaiting);
-  EXPECT_EQ(bench.ReadReg(kRegSignal) & 0xFFU, 1U);
+  EXPECT_EQ(bench.ReadReg(kRegStatus) & (kStatusRunning | kStatusWaitingHost),
+            kStatusRunning | kStatusWaitingHost);
+  EXPECT_EQ(SignalId(bench.ReadReg(kRegSignal)), 1U);
   bench.WriteReg(kRegHostGo, 3);
   ASSERT_TRUE(bench.WaitStatus(
       [](uint32_t status) { return (status & kStatusHalted) != 0; }, 100000));
-  EXPECT_EQ(bench.ReadReg(kRegSignal) & 0xFFU, 2U);
+  EXPECT_EQ(SignalId(bench.ReadReg(kRegSignal)), 2U);
 
   bench.Start(NpuBench::kProgramBase, static_cast<uint32_t>(program.size()));
   ASSERT_TRUE(bench.WaitStatus(
-      [](uint32_t status) { return (status & kStatusWaiting) != 0; }, 100000));
+      [](uint32_t status) { return (status & kStatusWaitingHost) != 0; },
+      100000));
   EXPECT_EQ(bench.ReadReg(kRegHostGo), 0U);
   bench.WriteReg(kRegHostGo, 7);
   ASSERT_TRUE(bench.WaitStatus(
@@ -139,7 +136,7 @@ TEST_P(IllegalOpcodeTest, StopsWithError) {
   for (int i = 0; i < 1000; ++i) {
     bench.Tick();
   }
-  EXPECT_EQ(bench.ReadReg(kRegSignal), (1U << 16) | 4U);
+  EXPECT_EQ(bench.ReadReg(kRegSignal), (1U << kSignalCount.lsb) | 4U);
 }
 
 INSTANTIATE_TEST_SUITE_P(Opcodes, IllegalOpcodeTest,
@@ -162,15 +159,18 @@ TEST(SequencerTest, SoftResetStopsTheStream) {
   bench.LoadProgram(first, NpuBench::kProgramBase);
   bench.Start(NpuBench::kProgramBase, static_cast<uint32_t>(first.size()));
   ASSERT_TRUE(bench.WaitStatus(
-      [](uint32_t status) { return (status & kStatusWaiting) != 0; }, 100000));
-  bench.WriteReg(kRegCtrl, 2);
+      [](uint32_t status) { return (status & kStatusWaitingHost) != 0; },
+      100000));
+  bench.WriteReg(kRegCtrl, kCtrlSoftReset);
   for (int i = 0; i < 100; ++i) {
     bench.Tick();
   }
-  EXPECT_EQ(bench.ReadReg(kRegStatus) & 0xFU, 0U);
+  EXPECT_EQ(bench.ReadReg(kRegStatus) & (kStatusRunning | kStatusHalted |
+                                         kStatusError | kStatusWaitingHost),
+            0U);
   const std::vector<Instruction> second = {Signal(7, 70), Halt()};
   ASSERT_TRUE(bench.Run(second));
-  EXPECT_EQ(bench.ReadReg(kRegSignal), (1U << 16) | 7U);
+  EXPECT_EQ(bench.ReadReg(kRegSignal), (1U << kSignalCount.lsb) | 7U);
   EXPECT_EQ(bench.ReadReg(kRegStatus), kStatusHalted | kStatusIbufEmpty);
 }
 
@@ -180,7 +180,7 @@ TEST(SequencerTest, SoftResetDuringAFetchLeavesTheIbufEmpty) {
   program.front() = WaitHost(1);
   bench.LoadProgram(program, NpuBench::kProgramBase);
   bench.Start(NpuBench::kProgramBase, static_cast<uint32_t>(program.size()));
-  bench.WriteReg(kRegCtrl, 2);
+  bench.WriteReg(kRegCtrl, kCtrlSoftReset);
   for (int i = 0; i < 1000; ++i) {
     bench.Tick();
   }
@@ -220,7 +220,7 @@ TEST(SequencerTest, StatusShowsEachEngineBusyAtItsIndex) {
           return busy != 0;
         },
         100000));
-    EXPECT_EQ(busy, 0x10U << e) << "engine " << e;
+    EXPECT_EQ(busy, StatusBusy(e)) << "engine " << e;
     ASSERT_TRUE(bench.WaitStatus(
         [](uint32_t status) { return (status & kStatusHalted) != 0; }, 100000));
   }
@@ -281,7 +281,7 @@ TraceRecord ReadRecord(const Ddr& ddr, uint32_t address) {
 TEST(SequencerTest, TraceRecordsEveryInstruction) {
   NpuBench bench(69);
   bench.WriteReg(kRegTraceBase, kTraceArea);
-  bench.WriteReg(kRegTraceCtrl, 1);
+  bench.WriteReg(kRegTraceCtrl, kTraceEnable);
   const std::vector<Instruction> program = {
       DmaLoad({.ddr_addr = Ddr::kBase + 0x100000U,
                .mem = Mem::kFbuf,

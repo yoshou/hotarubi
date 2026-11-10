@@ -145,7 +145,7 @@ void EmitFrameStart(Program& program, const FrameStartRegions& fs,
                                       {.name = "motion stlist",
                                        .offset = motion.stlist,
                                        .words = sd::kMotionQueries / 32,
-                                       .value = sd::kNull}}};
+                                       .value = sd::kNullEntry}}};
   for (const Fill& fill : fills) {
     ld(fill.offset, Mem::kFbuf, kFsScratch, fill.words,
        std::format("fs ld {}", fill.name));

@@ -174,7 +174,7 @@ std::vector<uint32_t> PaddedBias(const std::vector<uint32_t>& bias) {
 
 uint32_t Entry(uint64_t base, uint64_t offset) {
   const uint64_t entry = (base + offset) / kEntryBytes;
-  Require((base + offset) % kEntryBytes == 0 && entry < kNull,
+  Require((base + offset) % kEntryBytes == 0 && entry < kNullEntry,
           std::format("index list entry for {:#x} is not a 16-byte address",
                       base + offset));
   return static_cast<uint32_t>(entry);

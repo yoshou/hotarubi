@@ -28,7 +28,6 @@ struct Compiled {
 
 inline constexpr uint64_t kSharedBytes = uint64_t{320} << 20;
 inline constexpr std::string_view kTraceRegion = "trace";
-inline constexpr uint64_t kTraceRecordBytes = 16;
 inline constexpr uint64_t kTraceRecordsPerInstruction = 2;
 
 [[nodiscard]] uint64_t TraceRegionBytes(const std::vector<Stream>& streams);

@@ -1,4 +1,6 @@
-module dma_gacc (
+module dma_gacc
+  import isa_pkg::*;
+(
   input  logic          clk_i,
   input  logic          rst_ni,
   input  logic          clear_i,
@@ -122,9 +124,9 @@ module dma_gacc (
   assign g_fsm       = s_cur[11:3];
   assign w_here      = cur_v && (cur_g == g_fsm);
   assign ent_cur     = e_half ? ent_data_i[127:64] : ent_data_i[63:0];
-  assign ent_null    = (ent_cur[31:0] == 32'hFFFFFFFF);
+  assign ent_null    = (ent_cur[31:0] == NullEntry);
   assign dbl         = (st == GEnt) && ent_valid_i && !e_half && ent_null &&
-                       (ent_data_i[95:64] == 32'hFFFFFFFF);
+                       (ent_data_i[95:64] == NullEntry);
   assign ent_ok      = (st == GEnt) && ent_valid_i && !dbl &&
                        (ent_null || (w_here && !cm_busy && !cm_pend && !pf_afull && req_ready_i));
   assign ent_take    = ent_ok;

@@ -270,7 +270,7 @@ MotionHead::MotionHead(DdrImage& image, uint64_t base, MotionParams params,
   }
   PutEntries(image, st.off, state);
   stlist = image.Alloc(tag + ".stlist", uint64_t{kMotionQueries} * 4);
-  PutEntries(image, stlist, std::vector<uint32_t>(kMotionQueries, kNull));
+  PutEntries(image, stlist, std::vector<uint32_t>(kMotionQueries, kNullEntry));
   ego_anc0 = PlaceRows(image, tag + ".ego_anchor0", 4, 32, 0);
   PutRows(image, ego_anc0, 1, static_cast<uint32_t>(p_.ego_anchor.size()),
           p_.ego_anchor);
@@ -314,12 +314,12 @@ MotionHead::MotionHead(DdrImage& image, uint64_t base, MotionParams params,
   mp_.Add("selm", InstanceBankKernel(map.C().nap, map.C().na, 0,
                                      BankMode::kSelect, kMapSelected));
   mpprog_ = place_program(tag + ".mpprog", mp_);
-  std::vector<uint32_t> lists(size_t{2} * kSelectedPadded, kNull);
+  std::vector<uint32_t> lists(size_t{2} * kSelectedPadded, kNullEntry);
   lists[kSelected - 1] = Entry(base_, x[0].Addr(900));
   lists[kSelectedPadded + kSelected - 1] = Entry(base_, e.Addr(900));
   PutEntries(image, sel, lists);
   PutEntries(image, msel,
-             std::vector<uint32_t>(size_t{2} * kMapSelectedPadded, kNull));
+             std::vector<uint32_t>(size_t{2} * kMapSelectedPadded, kNullEntry));
   ma_.Add("clsidx", MotionClsIdx(det.C().nap, det.ncls));
   ma_.Add("rot", MotionRot());
   ma_.Add("bc", MotionBcast(kModes));
@@ -352,7 +352,7 @@ MotionHead::MotionHead(DdrImage& image, uint64_t base, MotionParams params,
         PlaceRows(image, std::format("{}.ry{}", tag, m), det.C().nap, 32, 0);
   }
   std::vector<uint32_t> glist(2 * static_cast<size_t>(kModeQueriesPadded),
-                              kNull);
+                              kNullEntry);
   for (uint32_t a = 0; a < det.C().na; ++a) {
     for (uint32_t m = 0; m < kModes; ++m) {
       glist[(a * kModes) + m] = Entry(base_, rxm_[m].Addr(a));
@@ -493,12 +493,12 @@ void MotionHead::PlaceParams() {
     pb.Place(image_, std::format("{}.pbuf.L{}", tag, l));
     pb_layers_.emplace_back(std::move(pb), std::move(keys));
   }
-  std::vector<uint32_t> rep6(kModeQueriesPadded, kNull);
+  std::vector<uint32_t> rep6(kModeQueriesPadded, kNullEntry);
   for (uint32_t j = 0; j < kModeQueries; ++j) {
     rep6[j] = Entry(base_, xe.Addr(j / kModes));
   }
   PutEntries(image_, rep6_, rep6);
-  std::vector<uint32_t> rep(kPlanQueriesPadded, kNull);
+  std::vector<uint32_t> rep(kPlanQueriesPadded, kNullEntry);
   for (uint32_t j = 0; j < kPlanQueries; ++j) {
     rep[j] = Entry(base_, xe.Addr(900));
   }

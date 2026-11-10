@@ -36,6 +36,17 @@ inline constexpr uint32_t kWaitGemm = WaitBit(kEngineGemm);
 inline constexpr uint32_t kWaitVec = WaitBit(kEngineVec);
 inline constexpr uint32_t kWaitAll = kWaitDma | kWaitGemm | kWaitVec;
 
+enum class Mem : uint8_t {
+  kAbuf = 0,
+  kWbuf = 1,
+  kFbuf = 2,
+  kPbuf = 3,
+  kTbuf = 4,
+  kCbuf = 5,
+};
+
+inline constexpr uint32_t kNullEntry = 0xFFFFFFFFU;
+
 namespace dma {
 
 inline constexpr Field kDdrAddr{.lsb = 88, .width = 28};
@@ -74,6 +85,12 @@ inline constexpr Field kCBase{.lsb = 4, .width = 20};
 inline constexpr Field kWmode{.lsb = 2, .width = 2};
 inline constexpr Field kAcc{.lsb = 1, .width = 1};
 
+enum class WeightMode : uint8_t {
+  kFp4 = 0,
+  kW8Hi = 1,
+  kW8Lo = 2,
+};
+
 }  // namespace gemm
 
 namespace vec {
@@ -89,8 +106,19 @@ inline constexpr Field kPBase{.lsb = 43, .width = 9};
 inline constexpr Field kAux{.lsb = 32, .width = 11};
 inline constexpr Field kImm{.lsb = 0, .width = 32};
 
+inline constexpr uint32_t kRegSrc = 1;
+inline constexpr uint32_t kRegSrc2 = 2;
+inline constexpr uint32_t kRegDst = 3;
+inline constexpr uint32_t kRegRowsQ = 4;
+inline constexpr uint32_t kRegN8 = 5;
+inline constexpr uint32_t kRegPBase = 6;
+inline constexpr uint32_t kRegAux = 7;
+inline constexpr uint32_t kRegImm = 8;
+inline constexpr uint32_t kRegQ = 9;
+
 inline constexpr uint32_t kEntryWords = 4;
 inline constexpr uint32_t kRomEntries = 64;
+inline constexpr uint32_t kRomWords = kRomEntries * kEntryWords;
 
 }  // namespace vec
 
@@ -119,6 +147,8 @@ inline constexpr uint32_t kKindRet = 4;
 inline constexpr uint32_t kKindNop = 5;
 inline constexpr uint32_t kKindTranspose = 7;
 
+inline constexpr uint32_t kRegZero = 0;
+
 inline constexpr Field kOp{.lsb = 119, .width = 5};
 inline constexpr Field kRd{.lsb = 114, .width = 5};
 inline constexpr Field kRa{.lsb = 109, .width = 5};
@@ -129,6 +159,37 @@ inline constexpr Field kImm{.lsb = 0, .width = 32};
 inline constexpr Field kSmemCol{.lsb = 98, .width = 5};
 inline constexpr Field kSmemWhich{.lsb = 97, .width = 1};
 inline constexpr Field kSmemCtx{.lsb = 96, .width = 1};
+
+inline constexpr uint32_t kSmemWhichRs1 = 0;
+inline constexpr uint32_t kSmemWhichRs0 = 1;
+
+enum class Salu : uint8_t {
+  kAdd = 0,
+  kSub = 1,
+  kAnd = 2,
+  kOr = 3,
+  kXor = 4,
+  kShl = 5,
+  kShr = 6,
+  kSra = 7,
+  kMul = 8,
+  kSlt = 9,
+  kSltu = 10,
+  kSeq = 11,
+  kMov = 12,
+};
+
+enum class Smem : uint8_t {
+  kSld = 0,
+  kRsmov = 1,
+  kRn = 2,
+};
+
+enum class Cond : uint8_t {
+  kAlways = 0,
+  kZ = 1,
+  kNz = 2,
+};
 
 }  // namespace program
 
@@ -174,6 +235,75 @@ inline constexpr Field kDstS1{.lsb = 8, .width = 1};
 inline constexpr Field kCtx{.lsb = 7, .width = 1};
 inline constexpr Field kRm{.lsb = 5, .width = 2};
 
+enum class Map : uint8_t { kNone = 0, kGroup = 1, kUpper = 2 };
+enum class Pbuf : uint8_t { kNone = 0, kRowVec = 1, kTile = 2 };
+enum class C0 : uint8_t { kZero = 0, kX2 = 1, kPbuf = 2, kRs0 = 3, kImm = 4 };
+enum class B : uint8_t {
+  kOne = 0,
+  kX2 = 1,
+  kPbuf = 2,
+  kRs1 = 3,
+  kImm = 4,
+  kPre = 5,
+};
+enum class Nl : uint8_t { kNone = 0, kAct = 1, kExp2 = 2, kTab01 = 3 };
+enum class Post : uint8_t { kAdd = 0, kSub = 1, kMax = 2, kSignfix = 3 };
+enum class Reduce : uint8_t { kNone = 0, kSum = 1, kMax = 2 };
+enum class Write : uint8_t { kNone = 0, kFbuf = 1, kAbuf = 2, kFinal = 3 };
+enum class ScalarFn : uint8_t {
+  kNone = 0,
+  kIdentity = 1,
+  kNegate = 2,
+  kReciprocal = 3,
+  kRsqrt = 4,
+};
+enum class Cmp : uint8_t {
+  kNone = 0,
+  kLt = 1,
+  kLe = 2,
+  kEq = 3,
+  kNe = 4,
+  kGt = 5,
+  kGe = 6,
+};
+enum class CmpLeft : uint8_t {
+  kX = 0,
+  kX2 = 1,
+  kColumn = 2,
+  kPosition = 3,
+  kRowColumn = 4,
+};
+enum class Sel : uint8_t {
+  kNone = 0,
+  kZero = 1,
+  kX2 = 2,
+  kImm = 3,
+  kNull = 4,
+  kRs1 = 5,
+};
+enum class Ialu : uint8_t {
+  kNone = 0,
+  kAdd = 1,
+  kSub = 2,
+  kAnd = 3,
+  kOr = 4,
+  kXor = 5,
+  kShr1 = 6,
+  kRsub = 7,
+};
+enum class RowMask : uint8_t { kNone = 0, kSkip = 1, kSet = 2 };
+
+inline constexpr uint32_t kPermPositionBits = 5;
+inline constexpr uint32_t kPermSelectorBits = 4;
+inline constexpr uint32_t kPermSame = 0;
+inline constexpr uint32_t kPermZero = 6;
+inline constexpr uint32_t kPermOne = 7;
+inline constexpr uint32_t kPermInvert = 8;
+
+constexpr uint32_t PermPosition(uint32_t position_bit) {
+  return kPermPositionBits - position_bit;
+}
+
 }  // namespace pass
 
 namespace transpose {
@@ -188,6 +318,32 @@ inline constexpr Field kRdw{.lsb = 89, .width = 5};
 inline constexpr Field kRor{.lsb = 87, .width = 2};
 
 }  // namespace transpose
+
+namespace trace {
+
+inline constexpr uint32_t kRecordBytes = 16;
+
+inline constexpr Field kIndex{.lsb = 0, .width = 32};
+inline constexpr Field kType{.lsb = 116, .width = 4};
+
+inline constexpr uint32_t kTypeCompletion = 0;
+inline constexpr uint32_t kTypeStatistics = 1;
+
+inline constexpr Field kIssue{.lsb = 32, .width = 32};
+inline constexpr Field kCompletion{.lsb = 64, .width = 32};
+inline constexpr Field kSource{.lsb = 96, .width = 4};
+inline constexpr Field kOpcode{.lsb = 100, .width = 8};
+inline constexpr Field kWait{.lsb = 108, .width = 4};
+
+inline constexpr Field kStatisticsSource{.lsb = 32, .width = 4};
+inline constexpr Field kStatisticsA{.lsb = 40, .width = 24};
+inline constexpr Field kStatisticsB{.lsb = 64, .width = 24};
+inline constexpr Field kStatisticsC{.lsb = 88, .width = 24};
+inline constexpr Field kStatisticsD{.lsb = 120, .width = 8};
+
+inline constexpr uint32_t kSourceSequencer = kEngines;
+
+}  // namespace trace
 
 namespace library {
 

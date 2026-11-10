@@ -22,7 +22,7 @@ namespace {
 
 using iss::encoding::PassFields;
 
-constexpr uint32_t kProgram = 256;
+constexpr uint32_t kProgram = isa::vec::kRomWords;
 
 struct Case {
   std::string name;

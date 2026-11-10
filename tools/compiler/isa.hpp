@@ -27,14 +27,7 @@ struct Instruction {
   [[nodiscard]] std::string Hex() const;
 };
 
-enum class Mem : uint8_t {
-  kAbuf = 0,
-  kWbuf = 1,
-  kFbuf = 2,
-  kPbuf = 3,
-  kTbuf = 4,
-  kCbuf = 5,
-};
+using isa::Mem;
 
 inline constexpr int kMemCount = 6;
 inline constexpr std::array<uint32_t, kMemCount> kMemDepth = {8192, 2048, 4096,
@@ -49,11 +42,7 @@ enum class DmaKind : uint8_t {
   kGacc = isa::dma::kKindGacc,
 };
 
-enum class WeightMode : uint8_t {
-  kFp4 = 0,
-  kW8Hi = 1,
-  kW8Lo = 2,
-};
+using isa::gemm::WeightMode;
 
 enum class VecOp : uint8_t {
   kAdd = isa::library::kAdd,

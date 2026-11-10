@@ -19,15 +19,15 @@ namespace {
 
 namespace vp = vprog;
 
-constexpr uint32_t kSrc = 1;
-constexpr uint32_t kSrc2 = 2;
-constexpr uint32_t kDst = 3;
-constexpr uint32_t kRowsQ = 4;
-constexpr uint32_t kN8 = 5;
-constexpr uint32_t kPBase = 6;
-constexpr uint32_t kAux = 7;
-constexpr uint32_t kImm = 8;
-constexpr uint32_t kQ = 9;
+constexpr uint32_t kSrc = isa::vec::kRegSrc;
+constexpr uint32_t kSrc2 = isa::vec::kRegSrc2;
+constexpr uint32_t kDst = isa::vec::kRegDst;
+constexpr uint32_t kRowsQ = isa::vec::kRegRowsQ;
+constexpr uint32_t kN8 = isa::vec::kRegN8;
+constexpr uint32_t kPBase = isa::vec::kRegPBase;
+constexpr uint32_t kAux = isa::vec::kRegAux;
+constexpr uint32_t kImm = isa::vec::kRegImm;
+constexpr uint32_t kQ = isa::vec::kRegQ;
 constexpr uint32_t kOne = 11;
 constexpr uint32_t kQuarterN8 = 14;
 constexpr uint32_t kBeta = 15;
@@ -395,8 +395,9 @@ Rom Build() {
 }
 
 std::string Package(const Rom& rom) {
-  std::string text =
-      "package vec_rom_pkg;\n\n  localparam logic [127:0] Rom [256] = '{\n";
+  std::string text = std::format(
+      "package vec_rom_pkg;\n\n  localparam logic [127:0] Rom [{}] = '{{\n",
+      vprog::kRomWords);
   for (uint32_t i = 0; i < vp::kRomWords; ++i) {
     text += std::format("    128'h{}{}\n", rom.words.at(i).Hex(),
                         i + 1 == vp::kRomWords ? "" : ",");

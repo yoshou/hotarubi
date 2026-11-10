@@ -69,8 +69,8 @@ uint32_t CountReciprocal(uint32_t count) {
 void ApplyRowScalar(const Pass& pass, const Reductions& reductions,
                     uint32_t epsilon, uint32_t rn, RowState& rows) {
   for (uint32_t t = 0; t < kTokens; ++t) {
-    uint32_t value = pass.red == Reduction::kSum ? SumTree(reductions.sum.at(t))
-                                                 : reductions.max.at(t);
+    uint32_t value = pass.red == Reduce::kSum ? SumTree(reductions.sum.at(t))
+                                              : reductions.max.at(t);
     if (pass.srn) {
       value = Fp32Mul(value, rn);
     }

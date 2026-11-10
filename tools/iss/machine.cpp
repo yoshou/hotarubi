@@ -30,8 +30,6 @@ using isa::kOpSignal;
 using isa::kOpVec;
 using isa::kOpWaitHost;
 
-constexpr uint32_t Offset(Register reg) { return static_cast<uint32_t>(reg); }
-
 constexpr uint32_t kRegCtrl = Offset(Register::kCtrl);
 constexpr uint32_t kRegStatus = Offset(Register::kStatus);
 constexpr uint32_t kRegInstrBase = Offset(Register::kInstrBase);
@@ -53,20 +51,6 @@ constexpr uint32_t kRegTraceCount = Offset(Register::kTraceCount);
 constexpr uint32_t kRegHostGo = Offset(Register::kHostGo);
 constexpr uint32_t kRegisterMask = 0xFC;
 
-constexpr uint32_t kCtrlStart = 0x1;
-constexpr uint32_t kCtrlSoftReset = 0x2;
-constexpr uint32_t kIrqSignal = 0x1;
-constexpr uint32_t kIrqHalt = 0x2;
-constexpr uint32_t kIrqIllegal = 0x4;
-constexpr uint32_t kIrqMask = 0xF;
-constexpr uint32_t kTraceEnable = 0x1;
-constexpr uint32_t kTraceIdle = 0x2;
-constexpr uint32_t kTraceStatistics = 0x4;
-constexpr uint32_t kStatusRunning = 0x1;
-constexpr uint32_t kStatusHalted = 0x2;
-constexpr uint32_t kStatusError = 0x4;
-constexpr uint32_t kStatusWaitingHost = 0x8;
-constexpr uint32_t kStatusIbufEmpty = 0x80;
 constexpr uint32_t kInstructionBytes = 16;
 
 uint32_t Low32(uint64_t value) { return static_cast<uint32_t>(value); }
@@ -168,7 +152,7 @@ uint32_t Machine::ReadRegister(uint32_t offset) const {
     case kRegIrqEnable:
       return irq_enable_;
     case kRegSignal:
-      return (signal_count_ << 16) | signal_id_;
+      return (signal_count_ << kSignalCount.lsb) | signal_id_;
     case kRegSignalValue:
       return signal_value_;
     case kRegIssued:
@@ -217,7 +201,7 @@ void Machine::WriteRegister(uint32_t offset, uint32_t value) {
       instr_count_ = value;
       break;
     case kRegIrqStatus:
-      irq_status_ &= ~(value & kIrqMask);
+      irq_status_ &= ~(value & kIrqAll);
       break;
     case kRegIrqEnable:
       irq_enable_ = value;
@@ -271,7 +255,7 @@ Stop Machine::Run() {
 }
 
 bool Machine::Interrupt() const {
-  return (irq_status_ & irq_enable_ & kIrqMask) != 0;
+  return (irq_status_ & irq_enable_ & kIrqAll) != 0;
 }
 
 void Machine::Start() {
@@ -363,7 +347,7 @@ Cost Machine::Execute(uint32_t opcode, const Word128& instruction) {
     case kOpSignal:
       signal_id_ = instruction.Field(isa::signal::kId);
       signal_value_ = instruction.Field(isa::signal::kValue);
-      signal_count_ = (signal_count_ + 1) & 0xFFFFU;
+      signal_count_ = (signal_count_ + 1) & ((1U << kSignalCount.width) - 1);
       irq_status_ |= kIrqSignal;
       return {};
     case kOpHalt:
@@ -396,10 +380,10 @@ void Machine::Record(const Word128& instruction, const Span& span,
                      .statistics = {}};
   const auto write = [&](const TraceRecord& r) {
     const Word128 word = EncodeRecord(r);
-    std::array<std::byte, kTraceRecordBytes> bytes{};
+    std::array<std::byte, isa::trace::kRecordBytes> bytes{};
     StoreLittle(word.low, std::span(bytes).first<8>());
     StoreLittle(word.high, std::span(bytes).last<8>());
-    ddr_.Write(trace_base_ + (trace_count_ * kTraceRecordBytes), bytes);
+    ddr_.Write(trace_base_ + (trace_count_ * isa::trace::kRecordBytes), bytes);
     ++trace_count_;
   };
   write(record);

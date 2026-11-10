@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "fp32_ref.hpp"
+#include "hotarubi/isa.hpp"
 #include "npu_bench.hpp"
 #include "npu_data.hpp"
 #include "npu_isa.hpp"
@@ -18,7 +19,7 @@ constexpr uint32_t kWArea = Ddr::kBase + 0x400000U;
 constexpr uint32_t kListArea = Ddr::kBase + 0x600000U;
 constexpr uint32_t kOutArea = Ddr::kBase + 0x800000U;
 constexpr uint32_t kInitArea = Ddr::kBase + 0x900000U;
-constexpr uint32_t kNull = 0xFFFFFFFFU;
+using isa::kNullEntry;
 
 struct GaccList {
   uint32_t list_address = 0;
@@ -76,7 +77,7 @@ GaccList MakeList(std::mt19937& rng, Ddr& ddr, uint32_t list_address,
     const bool null_entry = rng() % 9 < null_in_nine || null_slot;
     const uint32_t row =
         null_entry
-            ? kNull
+            ? kNullEntry
             : (kRowArea + ((rng() % row_pool) * TokenBytes(row_words))) / 16;
     list.rows.push_back(row);
     list.bw.push_back(RandomFp32(rng, -4, 2));
@@ -107,7 +108,7 @@ void ReferenceGacc(const Ddr& ddr, const GaccList& list, uint32_t row_words,
     for (uint32_t t = 0; t < 4; ++t) {
       for (uint32_t k = 0; k < 4; ++k) {
         const uint32_t e = (((s * 4) + t) * 4) + k;
-        if (list.rows[e] == kNull) {
+        if (list.rows[e] == kNullEntry) {
           continue;
         }
         const uint32_t row = list.rows[e] * 16;

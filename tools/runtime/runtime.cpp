@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 
 namespace hotarubi {
@@ -236,7 +237,7 @@ std::expected<TraceOptions, std::string> Runtime::TraceOptionsFor(
     return std::unexpected("the program has no trace region");
   }
   const uint64_t needed =
-      uint64_t{count} * kTraceRecordBytes * (trace.statistics ? 2 : 1);
+      uint64_t{count} * isa::trace::kRecordBytes * (trace.statistics ? 2 : 1);
   if (region->size < needed) {
     return std::unexpected(
         std::format("the trace region holds {} bytes but {} instructions "
@@ -288,7 +289,7 @@ std::expected<std::vector<std::byte>, std::string> Runtime::ReadTrace(
   if (!region) {
     return std::unexpected(region.error());
   }
-  const uint64_t bytes = uint64_t{count} * kTraceRecordBytes;
+  const uint64_t bytes = uint64_t{count} * isa::trace::kRecordBytes;
   if (bytes > region->size) {
     return std::unexpected(
         std::format("{} trace records exceed the trace region of {} bytes",

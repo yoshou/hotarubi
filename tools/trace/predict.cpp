@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "hotarubi/driver.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "hotarubi/runtime.hpp"
 #include "input.hpp"
@@ -19,8 +20,6 @@
 
 namespace hotarubi::trace {
 namespace {
-
-constexpr uint32_t Offset(Register reg) { return static_cast<uint32_t>(reg); }
 
 constexpr uint32_t kRegCtrl = Offset(Register::kCtrl);
 constexpr uint32_t kRegInstrBase = Offset(Register::kInstrBase);
@@ -53,7 +52,7 @@ std::string_view StopName(iss::Stop stop) {
   }
 }
 
-constexpr uint32_t kRomWords = 256;
+using isa::vec::kRomWords;
 constexpr size_t kReportLimit = 10;
 
 iss::AccessSet Declared(const std::vector<Range>& ranges) {
@@ -139,8 +138,8 @@ std::expected<Prediction, std::string> Predict(
   if (region == program.regions.end()) {
     return std::unexpected("the program has no trace region");
   }
-  const uint64_t needed =
-      uint64_t{loaded_stream->count} * kTraceRecordBytes * (statistics ? 2 : 1);
+  const uint64_t needed = uint64_t{loaded_stream->count} *
+                          isa::trace::kRecordBytes * (statistics ? 2 : 1);
   if (region->second.size < needed) {
     return std::unexpected(
         std::format("the trace region holds {} bytes but {} are needed",
@@ -189,7 +188,7 @@ std::expected<Prediction, std::string> Predict(
   return Prediction{
       .records = std::vector<std::byte>(
           first, first + static_cast<std::ptrdiff_t>(uint64_t{count} *
-                                                     kTraceRecordBytes)),
+                                                     isa::trace::kRecordBytes)),
       .counters = {.issued = machine.ReadRegister(kRegIssued),
                    .cycles = machine.ReadRegister(kRegCycles),
                    .gemm_cycles = machine.ReadRegister(kRegGemmCycles),

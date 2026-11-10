@@ -25,9 +25,9 @@ using isa::program::kKindSalu;
 using isa::program::kKindSmem;
 using isa::program::kKindTranspose;
 
-constexpr uint32_t kSmemLoad = 0;
-constexpr uint32_t kSmemRowMove = 1;
-constexpr uint32_t kSmemCount = 2;
+constexpr uint32_t LowBits(uint32_t value, isa::Field field) {
+  return field.width >= 32 ? value : value & ((1U << field.width) - 1);
+}
 
 constexpr uint32_t kPcMask = kCbufDepth - 1;
 constexpr uint32_t kFbufMask = kFbufDepth - 1;
@@ -35,44 +35,45 @@ constexpr uint32_t kAbufMask = kAbufDepth - 1;
 constexpr uint32_t kPbufMask = kPbufDepth - 1;
 
 uint32_t Salu(uint32_t op, uint32_t a, uint32_t b) {
-  switch (op) {
-    case 0:
+  using Op = isa::program::Salu;
+  switch (static_cast<Op>(op)) {
+    case Op::kAdd:
       return a + b;
-    case 1:
+    case Op::kSub:
       return a - b;
-    case 2:
+    case Op::kAnd:
       return a & b;
-    case 3:
+    case Op::kOr:
       return a | b;
-    case 4:
+    case Op::kXor:
       return a ^ b;
-    case 5:
+    case Op::kShl:
       return a << (b & 31U);
-    case 6:
+    case Op::kShr:
       return a >> (b & 31U);
-    case 7:
+    case Op::kSra:
       return static_cast<uint32_t>(static_cast<int32_t>(a) >> (b & 31U));
-    case 8:
+    case Op::kMul:
       return a * b;
-    case 9:
+    case Op::kSlt:
       return static_cast<int32_t>(a) < static_cast<int32_t>(b) ? 1 : 0;
-    case 10:
+    case Op::kSltu:
       return a < b ? 1 : 0;
-    case 11:
+    case Op::kSeq:
       return a == b ? 1 : 0;
     default:
       return b;
   }
 }
 
-uint32_t PbufAddress(PbufAccess access, uint32_t base, uint32_t tile_row,
+uint32_t PbufAddress(Pbuf access, uint32_t base, uint32_t tile_row,
                      uint32_t w) {
   switch (access) {
-    case PbufAccess::kRowVec:
+    case Pbuf::kRowVec:
       return (base + (w >> 2)) & kPbufMask;
-    case PbufAccess::kTile:
+    case Pbuf::kTile:
       return (base + tile_row + (w & 3U)) & kPbufMask;
-    case PbufAccess::kNone:
+    case Pbuf::kNone:
       break;
   }
   return 0;
@@ -102,7 +103,7 @@ WordResult ComputeWord(const Pass& pass, const WordOperands& in,
   const uint32_t slice = in.w & 3U;
   WordResult result;
   for (uint32_t t = 0; t < kTokens; ++t) {
-    const uint32_t pbuf_slice = pass.pa == PbufAccess::kTile ? t : slice;
+    const uint32_t pbuf_slice = pass.pa == Pbuf::kTile ? t : slice;
     for (uint32_t l = 0; l < kLanes; ++l) {
       const uint32_t y =
           LaneOutput(pass,
@@ -249,20 +250,21 @@ void VecEngine::RunTranspose(const Word128& instruction, Memories& memories) {
 }
 
 uint32_t VecEngine::Register(uint32_t index) const {
-  return index == 0 ? 0 : registers_.at(index);
+  return index == isa::program::kRegZero ? 0 : registers_.at(index);
 }
 
 void VecEngine::Initialize(const VecCommand& command) {
+  namespace v = isa::vec;
   quantize_ = command.quantize;
-  registers_.at(1) = command.src & kFbufMask;
-  registers_.at(2) = command.src2 & kFbufMask;
-  registers_.at(3) = command.dst & kAbufMask;
-  registers_.at(4) = command.rows_q & 0x1FFU;
-  registers_.at(5) = command.n8 & 0xFFU;
-  registers_.at(6) = command.p_base & kPbufMask;
-  registers_.at(7) = command.aux & 0x7FFU;
-  registers_.at(8) = command.imm;
-  registers_.at(9) = command.quantize ? 1 : 0;
+  registers_.at(v::kRegSrc) = LowBits(command.src, v::kSrc);
+  registers_.at(v::kRegSrc2) = LowBits(command.src2, v::kSrc2);
+  registers_.at(v::kRegDst) = LowBits(command.dst, v::kDst);
+  registers_.at(v::kRegRowsQ) = LowBits(command.rows_q, v::kRowsQ);
+  registers_.at(v::kRegN8) = LowBits(command.n8, v::kN8);
+  registers_.at(v::kRegPBase) = LowBits(command.p_base, v::kPBase);
+  registers_.at(v::kRegAux) = LowBits(command.aux, v::kAux);
+  registers_.at(v::kRegImm) = LowBits(command.imm, v::kImm);
+  registers_.at(v::kRegQ) = command.quantize ? 1 : 0;
 }
 
 void VecEngine::RunPass(const Word128& instruction, const Word128& next,
@@ -284,16 +286,16 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
   state.imm = Register(pass.rimm);
   state.imm2 = Register(pass.rimm2);
   ++activity_.passes;
-  const bool reads_rows = pass.c0 == C0Source::kRs0 ||
-                          pass.b == BSource::kRs1 || pass.sel == Select::kRs1;
-  if (reads_rows || pass.red != Reduction::kNone) {
+  const bool reads_rows =
+      pass.c0 == C0::kRs0 || pass.b == B::kRs1 || pass.sel == Sel::kRs1;
+  if (reads_rows || pass.red != Reduce::kNone) {
     AwaitContext(pass.ctx);
   }
   const bool overlaps = Overlaps(pass, next);
   RunQuads(state, quads, words, n8, !overlaps, memories);
   Require(state.next_quarter == 0,
           "a PASS ends inside a block of 4 quantized words");
-  if (pass.red != Reduction::kNone) {
+  if (pass.red != Reduce::kNone) {
     const uint64_t complete = slot_ + kReductionLatencyWords;
     if (pass.sf != ScalarFn::kNone) {
       ++activity_.scalars;
@@ -314,7 +316,7 @@ void VecEngine::RunPass(const Word128& instruction, const Word128& next,
     return;
   }
   ++activity_.drains;
-  if (Target(pass.wr) == WriteTarget::kAbuf) {
+  if (Target(pass.wr) == Write::kAbuf) {
     ++activity_.drains_quantized;
   }
   Drain();
@@ -361,9 +363,9 @@ void VecEngine::RunQuads(PassState& state, uint32_t quads, uint32_t words,
   slot_ += (skip_cycles + kWordCycles - 1) / kWordCycles;
 }
 
-WriteTarget VecEngine::Target(WriteTarget target) const {
-  if (target == WriteTarget::kFinal) {
-    return quantize_ ? WriteTarget::kAbuf : WriteTarget::kFbuf;
+Write VecEngine::Target(Write target) const {
+  if (target == Write::kFinal) {
+    return quantize_ ? Write::kAbuf : Write::kFbuf;
   }
   return target;
 }
@@ -387,10 +389,10 @@ bool VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
           : x;
   const uint32_t pbuf_address =
       PbufAddress(pass.pa, state.pb, state.tile_row, w) & kPbufMask;
-  if (pass.pa != PbufAccess::kNone) {
+  if (pass.pa != Pbuf::kNone) {
     memories.log.Read(Mem::kPbuf, pbuf_address);
   }
-  if (pass.nl != Nonlinear::kNone) {
+  if (pass.nl != Nl::kNone) {
     memories.log.ReadTable(Mem::kTbuf);
   }
   const WordResult result = ComputeWord(pass,
@@ -402,10 +404,10 @@ bool VecEngine::RunWord(PassState& state, uint32_t w, Memories& memories) {
                                          .imm2 = state.imm2},
                                         rows_.at(pass.ctx), memories.tbuf);
   for (uint32_t t = 0; t < kTokens; ++t) {
-    if (pass.red == Reduction::kSum) {
+    if (pass.red == Reduce::kSum) {
       uint32_t& sum = state.reductions.sum.at(t).at(state.entry);
       sum = Fp32Add(sum, SumTree(result.reduced.at(t)));
-    } else if (pass.red == Reduction::kMax) {
+    } else if (pass.red == Reduce::kMax) {
       uint32_t& max = state.reductions.max.at(t);
       max = Fp32Max(max, MaxTree(result.reduced.at(t)));
     }
@@ -434,15 +436,15 @@ const FbufWord& VecEngine::Operand(const PassState& state, uint32_t address,
 
 void VecEngine::Store(PassState& state, uint32_t word, const FbufWord& out,
                       Memories& memories) {
-  const WriteTarget target = Target(state.pass.wr);
-  if (target == WriteTarget::kFbuf) {
+  const Write target = Target(state.pass.wr);
+  if (target == Write::kFbuf) {
     const uint32_t address = (state.dst + word) & kFbufMask;
     memories.log.Write(Mem::kFbuf, address);
     memories.fbuf.at(address) = out;
     state.written.set(address);
     pending_.set(address);
     pending_slot_.at(address) = slot_;
-  } else if (target == WriteTarget::kAbuf) {
+  } else if (target == Write::kAbuf) {
     const uint32_t quarter = word & 3U;
     if (quarter != state.next_quarter) {
       Fail(std::format("quantized word {} arrives out of order", quarter));
@@ -463,7 +465,8 @@ void VecEngine::RunSalu(const Word128& instruction) {
   const uint32_t b = instruction.Field(pg::kUseImm) != 0
                          ? instruction.Field(pg::kImm)
                          : Register(instruction.Field(pg::kRb));
-  Write(instruction.Field(pg::kRd), Salu(instruction.Field(pg::kOp), a, b));
+  WriteRegister(instruction.Field(pg::kRd),
+                Salu(instruction.Field(pg::kOp), a, b));
 }
 
 void VecEngine::RunSmem(const Word128& instruction, Memories& memories) {
@@ -474,22 +477,23 @@ void VecEngine::RunSmem(const Word128& instruction, Memories& memories) {
                               ? instruction.Field(pg::kSmemCol)
                               : Register(instruction.Field(pg::kRb)) & 31U;
   const uint32_t ctx = instruction.Field(pg::kSmemCtx);
-  switch (instruction.Field(pg::kOp)) {
-    case kSmemLoad: {
+  switch (static_cast<pg::Smem>(instruction.Field(pg::kOp))) {
+    case pg::Smem::kSld: {
       const uint32_t word_address =
           (a + instruction.Field(pg::kImm)) & kFbufMask;
       memories.log.Read(Mem::kFbuf, word_address);
-      Write(rd, memories.fbuf.at(word_address).at(column));
+      WriteRegister(rd, memories.fbuf.at(word_address).at(column));
       break;
     }
-    case kSmemRowMove: {
+    case pg::Smem::kRsmov: {
       AwaitContext(ctx);
       const RowState& rows = rows_.at(ctx);
-      Write(rd, (instruction.Field(pg::kSmemWhich) != 0 ? rows.rs0 : rows.rs1)
-                    .at(column & 3U));
+      WriteRegister(
+          rd, (instruction.Field(pg::kSmemWhich) != 0 ? rows.rs0 : rows.rs1)
+                  .at(column & 3U));
       break;
     }
-    case kSmemCount:
+    case pg::Smem::kRn:
       ++activity_.rn;
       rn_ = CountReciprocal(a);
       break;
@@ -500,12 +504,13 @@ void VecEngine::RunSmem(const Word128& instruction, Memories& memories) {
 
 bool VecEngine::Taken(const Word128& instruction) const {
   const uint32_t a = Register(instruction.Field(isa::program::kRa));
-  switch (instruction.Field(isa::program::kOp)) {
-    case 0:
+  using isa::program::Cond;
+  switch (static_cast<Cond>(instruction.Field(isa::program::kOp))) {
+    case Cond::kAlways:
       return true;
-    case 1:
+    case Cond::kZ:
       return a == 0;
-    case 2:
+    case Cond::kNz:
       return a != 0;
     default:
       return false;
@@ -514,8 +519,8 @@ bool VecEngine::Taken(const Word128& instruction) const {
 
 void VecEngine::Drain() { pending_.reset(); }
 
-void VecEngine::Write(uint32_t index, uint32_t value) {
-  if (index != 0) {
+void VecEngine::WriteRegister(uint32_t index, uint32_t value) {
+  if (index != isa::program::kRegZero) {
     registers_.at(index) = value;
   }
 }

@@ -24,17 +24,7 @@
 namespace hotarubi {
 namespace {
 
-constexpr uint32_t kCtrlStart = 0x1;
-constexpr uint32_t kIrqSignal = 0x1;
-constexpr uint32_t kIrqHalt = 0x2;
-constexpr uint32_t kIrqIllegal = 0x4;
-constexpr uint32_t kIrqAxiError = 0x8;
-constexpr uint32_t kIrqAll = kIrqSignal | kIrqHalt | kIrqIllegal | kIrqAxiError;
 constexpr uint32_t kIrqEnd = kIrqHalt | kIrqIllegal | kIrqAxiError;
-constexpr uint32_t kSignalIdMask = 0xFF;
-constexpr uint32_t kTraceEnable = 0x1;
-constexpr uint32_t kTraceIdle = 0x2;
-constexpr uint32_t kTraceStatistics = 0x4;
 constexpr uint64_t kAddressLimit = uint64_t{1} << 32;
 
 std::string ErrnoMessage(std::string_view what,
@@ -319,8 +309,10 @@ std::expected<Counters, std::string> Device::Run(
     }
     const uint32_t pending = bus_.Read(Register::kIrqStatus) & enabled_irqs;
     if ((pending & kIrqSignal) != 0) {
-      const Signal signal{.id = bus_.Read(Register::kSignal) & kSignalIdMask,
-                          .value = bus_.Read(Register::kSignalValue)};
+      const Signal signal{
+          .id = (bus_.Read(Register::kSignal) >> kSignalId.lsb) &
+                ((1U << kSignalId.width) - 1),
+          .value = bus_.Read(Register::kSignalValue)};
       bus_.Write(Register::kIrqStatus, kIrqSignal);
       on_signal(signal);
       bus_.Write(Register::kHostGo, signal.value);

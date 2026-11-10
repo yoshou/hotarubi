@@ -11,16 +11,16 @@
 #include <utility>
 #include <vector>
 
+#include "hotarubi/driver.hpp"
+
 namespace hotarubi::tb {
 
 namespace {
 
-constexpr uint32_t kRegCtrl = 0x00;
-constexpr uint32_t kRegStatus = 0x04;
-constexpr uint32_t kRegInstrBase = 0x08;
-constexpr uint32_t kRegInstrCount = 0x0C;
-constexpr uint32_t kStatusHalted = 0x2;
-constexpr uint32_t kStatusError = 0x4;
+constexpr uint32_t kRegCtrl = Offset(Register::kCtrl);
+constexpr uint32_t kRegStatus = Offset(Register::kStatus);
+constexpr uint32_t kRegInstrBase = Offset(Register::kInstrBase);
+constexpr uint32_t kRegInstrCount = Offset(Register::kInstrCount);
 constexpr int kHandshakeLimit = 10000;
 
 Beat ToBeat(const VlWide<4>& wide) {
@@ -402,7 +402,7 @@ void NpuBench::LoadProgram(std::span<const Instruction> program,
 void NpuBench::Start(uint32_t address, uint32_t count) {
   WriteReg(kRegInstrBase, address);
   WriteReg(kRegInstrCount, count);
-  WriteReg(kRegCtrl, 1);
+  WriteReg(kRegCtrl, kCtrlStart);
 }
 
 bool NpuBench::WaitStatus(const std::function<bool(uint32_t)>& done,

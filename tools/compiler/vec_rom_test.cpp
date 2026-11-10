@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <format>
 #include <string>
 
 #include "hotarubi/isa.hpp"
@@ -40,7 +41,8 @@ TEST(VecRomTest, PlacesEveryLibraryProgramAtItsEntry) {
 TEST(VecRomTest, PackageListsEveryWord) {
   const std::string text = Package(Build());
   EXPECT_TRUE(text.starts_with("package vec_rom_pkg;\n"));
-  EXPECT_NE(text.find("localparam logic [127:0] Rom [256] = '{"),
+  EXPECT_NE(text.find(std::format("localparam logic [127:0] Rom [{}] = '{{",
+                                  vprog::kRomWords)),
             std::string::npos);
   EXPECT_TRUE(text.ends_with("  };\n\nendpackage\n"));
 }

@@ -13,6 +13,7 @@
 #include <system_error>
 
 #include "ddr_image.hpp"
+#include "hotarubi/isa.hpp"
 #include "hotarubi/json.hpp"
 #include "hotarubi/require.hpp"
 #include "program.hpp"
@@ -40,7 +41,7 @@ uint64_t TraceRegionBytes(const std::vector<Stream>& streams) {
   for (const Stream& stream : streams) {
     instructions = std::max<uint64_t>(instructions, stream.program.Size());
   }
-  return instructions * kTraceRecordBytes * kTraceRecordsPerInstruction;
+  return instructions * isa::trace::kRecordBytes * kTraceRecordsPerInstruction;
 }
 
 uint64_t ReserveTraceRegion(DdrImage& image,

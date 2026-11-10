@@ -1,4 +1,5 @@
 module vec_lane
+  import isa_pkg::*;
   import vec_pkg::*;
 (
   input  logic        clk_i,

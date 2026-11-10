@@ -22,7 +22,7 @@ namespace {
 constexpr uint32_t kBeatBytes = 16;
 constexpr uint32_t kWordBufferBytes = 144;
 constexpr uint32_t kMxint8WordBytes = 144;
-constexpr uint32_t kNullEntry = 0xFFFFFFFF;
+using isa::kNullEntry;
 constexpr std::byte kNullScale{0x7F};
 constexpr uint32_t kT32Rows = 8;
 constexpr uint32_t kT32Tokens = 32;
