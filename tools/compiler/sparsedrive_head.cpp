@@ -27,6 +27,9 @@ namespace hotarubi::compiler::sparsedrive {
 namespace {
 
 constexpr uint32_t kDetTile = 116;
+constexpr uint32_t kDetConst = 8 * kDetTile;
+constexpr uint32_t kDetWork = kDetConst + 3 + (2 * kDetTile);
+constexpr uint32_t kDetGatherQuads = 2;
 constexpr uint32_t kDetLearn = 6;
 constexpr uint32_t kGroups = 8;
 constexpr int kCbufKeypoints = 1;
@@ -1095,48 +1098,27 @@ void SparseHead::Deformable(const HeadLayer& layer, size_t index,
     }
   }
   DeformableWeights(layer, pb, note);
+  OnChip a2(kAbufWords);
+  const uint32_t ag = a2.Take(cf.nap / 4 * kKbD);
+  const uint32_t ring = cf.det ? kDetWork + DetKeypointWork(kDetTile) : 0;
+  const uint32_t ring_quads = cf.det ? kDetGatherQuads : 32;
+  Require(ring + (2 * ring_quads * kNwD) <= kFbufWords,
+          "GACC output buffers exceed FBUF");
+  uint32_t gathered = 0;
+  std::optional<Quantize> pending;
+  const auto gather = [&](uint32_t until) {
+    for (; gathered < until; ++gathered) {
+      Gather(gathered, ag, ring, ring_quads, note, pending);
+    }
+  };
   if (cf.det) {
-    Keypoints(index, pb, note);
+    Keypoints(index, pb, note, gather);
   } else {
     KeypointsMap(note);
   }
-  OnChip a2(kAbufWords);
-  const uint32_t ag = a2.Take(cf.nap / 4 * kKbD);
-  constexpr std::array<uint32_t, 2> kGb = {0, 1024};
-  for (uint32_t q = 0; q < cf.nap / 4; ++q) {
-    const uint32_t dst = kGb[(q / 32) % 2] + ((q % 32) * kNwD);
-    if (q < nq) {
-      for (uint32_t camera = 0; camera < ncam; ++camera) {
-        program_->Gacc(
-            {.list_offset = ListAddr(q, camera),
-             .dst = dst,
-             .slots = cf.scam,
-             .blocks = kKbD,
-             .coefficient_stride = static_cast<uint32_t>(wg * kWordF),
-             .acc = camera > 0,
-             .flush = camera == ncam - 1},
-            std::format("{} gacc q{} c{}", note, q, camera));
-      }
-    } else {
-      program_->Gacc({.list_offset = null_list,
-                      .dst = dst,
-                      .slots = 1,
-                      .blocks = kKbD,
-                      .coefficient_stride = static_cast<uint32_t>(wg * kWordF),
-                      .acc = false,
-                      .flush = true},
-                     std::format("{} gacc pad q{}", note, q));
-    }
-    if (q % 32 == 31 || q == (cf.nap / 4) - 1) {
-      const uint32_t t = q / 32;
-      program_->Vec({.op = VecOp::kCopy,
-                     .src = kGb[t % 2],
-                     .dst = ag + (t * 32 * kKbD),
-                     .rows_q = (q % 32) + 1,
-                     .n8 = kNwD,
-                     .q = true},
-                    std::format("{} Q(gacc) t{}", note, t));
-    }
+  gather(cf.nap / 4);
+  if (pending.has_value()) {
+    program_->Vec(pending->args, pending->note);
   }
   const Lin& opj = layer.oproj;
   opj.Load(*program_, 0, std::format("{} output_proj", note));
@@ -1172,6 +1154,51 @@ void SparseHead::Deformable(const HeadLayer& layer, size_t index,
          .row_words = kNwD,
          .ddr_stride = 64 * kWordF},
         std::format("{} st cat[256:] t{}", note, tile.t));
+  }
+}
+
+void SparseHead::Gather(uint32_t q, uint32_t ag, uint32_t ring,
+                        uint32_t ring_quads, std::string_view note,
+                        std::optional<Quantize>& pending) {
+  const HeadConfig& cf = C();
+  const uint32_t slot = ring + (((q / ring_quads) % 2) * ring_quads * kNwD);
+  const uint32_t dst = slot + ((q % ring_quads) * kNwD);
+  const uint32_t cameras = q < nq ? ncam : 1;
+  for (uint32_t camera = 0; camera < cameras; ++camera) {
+    if (q < nq) {
+      program_->Gacc({.list_offset = ListAddr(q, camera),
+                      .dst = dst,
+                      .slots = cf.scam,
+                      .blocks = kKbD,
+                      .coefficient_stride = static_cast<uint32_t>(wg * kWordF),
+                      .acc = camera > 0,
+                      .flush = camera == ncam - 1},
+                     std::format("{} gacc q{} c{}", note, q, camera));
+    } else {
+      program_->Gacc({.list_offset = null_list,
+                      .dst = dst,
+                      .slots = 1,
+                      .blocks = kKbD,
+                      .coefficient_stride = static_cast<uint32_t>(wg * kWordF),
+                      .acc = false,
+                      .flush = true},
+                     std::format("{} gacc pad q{}", note, q));
+    }
+    if (camera == 0 && pending.has_value()) {
+      program_->Vec(pending->args, pending->note);
+      pending.reset();
+    }
+  }
+  if (q % ring_quads == ring_quads - 1 || q == (cf.nap / 4) - 1) {
+    const uint32_t first = q - (q % ring_quads);
+    pending =
+        Quantize{.args = {.op = VecOp::kCopy,
+                          .src = slot,
+                          .dst = ag + (first * kKbD),
+                          .rows_q = (q % ring_quads) + 1,
+                          .n8 = kNwD,
+                          .q = true},
+                 .note = std::format("{} Q(gacc) t{}", note, q / ring_quads)};
   }
 }
 
@@ -1232,55 +1259,97 @@ void SparseHead::DeformableWeights(const HeadLayer& layer, const Keys& pb,
       }
     }
   }
-  const uint32_t tqs = std::max(1U, std::min(32U, kFbufWords / (2 * wq)));
-  const uint32_t sd = tqs * wq;
-  for (uint32_t g = 0; g < kGroups; ++g) {
-    for (uint32_t q0 = 0; q0 < nq; q0 += tqs) {
-      const uint32_t count = std::min(tqs, nq - q0);
-      const uint64_t addr =
-          w + (((uint64_t{g} * wg) + (uint64_t{q0} * wq)) * kWordF);
-      program_->Load(Words(addr, Mem::kFbuf, 0, count * wq),
-                     std::format("{} ld logits g{} q{}", note, g, q0));
-      if (wq <= 255) {
-        program_->Vec({.op = VecOp::kSoftmax,
-                       .src = 0,
-                       .dst = sd,
-                       .rows_q = count,
-                       .n8 = wq,
-                       .aux = s},
-                      std::format("{} softmax g{} q{}", note, g, q0));
-      } else {
-        program_->Run(
-            {.pc = kp.Pc("ls"),
-             .src = 0,
-             .src2 = sd,
-             .dst = sd,
-             .rows_q = count,
-             .imm = wq,
-             .reads = std::vector<Range>{{Mem::kFbuf, 0, count * wq},
-                                         {Mem::kFbuf, sd, sd + (count * wq)},
-                                         {Mem::kTbuf, 0, kTbufWords}},
-             .writes = std::vector<Range>{{Mem::kFbuf, sd, sd + (count * wq)}}},
-            std::format("{} softmax g{} q{}", note, g, q0));
-      }
-      program_->Store(Words(addr, Mem::kFbuf, sd, count * wq),
-                      std::format("{} st w g{} q{}", note, g, q0));
-    }
-  }
+  WeightSoftmax(note);
 }
 
-void SparseHead::Keypoints(size_t index, const Keys& pb,
-                           std::string_view note) {
+void SparseHead::WeightSoftmax(std::string_view note) {
+  Require(4 * wq <= kFbufWords, "softmax buffers exceed FBUF");
+  const uint32_t tqs = std::min(32U, kFbufWords / (4 * wq));
+  const uint32_t span = tqs * wq;
+  struct Part {
+    uint32_t g = 0;
+    uint32_t q0 = 0;
+    uint32_t count = 0;
+    uint64_t addr = 0;
+  };
+  std::vector<Part> parts;
+  for (uint32_t g = 0; g < kGroups; ++g) {
+    for (uint32_t q0 = 0; q0 < nq; q0 += tqs) {
+      parts.push_back(
+          {.g = g,
+           .q0 = q0,
+           .count = std::min(tqs, nq - q0),
+           .addr = w + (((uint64_t{g} * wg) + (uint64_t{q0} * wq)) * kWordF)});
+    }
+  }
+  const auto src = [&](size_t i) {
+    return static_cast<uint32_t>((i % 2) * 2 * span);
+  };
+  const auto load = [&](size_t i) {
+    const Part& part = parts[i];
+    program_->Load(Words(part.addr, Mem::kFbuf, src(i), part.count * wq),
+                   std::format("{} ld logits g{} q{}", note, part.g, part.q0));
+  };
+  const auto softmax = [&](size_t i) {
+    const Part& part = parts[i];
+    const uint32_t in = src(i);
+    const uint32_t out = in + span;
+    const uint32_t words = part.count * wq;
+    if (wq <= 255) {
+      program_->Vec({.op = VecOp::kSoftmax,
+                     .src = in,
+                     .dst = out,
+                     .rows_q = part.count,
+                     .n8 = wq,
+                     .aux = s},
+                    std::format("{} softmax g{} q{}", note, part.g, part.q0));
+    } else {
+      program_->Run(
+          {.pc = kp.Pc("ls"),
+           .src = in,
+           .src2 = out,
+           .dst = out,
+           .rows_q = part.count,
+           .imm = wq,
+           .reads = std::vector<Range>{{Mem::kFbuf, in, in + words},
+                                       {Mem::kFbuf, out, out + words},
+                                       {Mem::kTbuf, 0, kTbufWords}},
+           .writes = std::vector<Range>{{Mem::kFbuf, out, out + words}}},
+          std::format("{} softmax g{} q{}", note, part.g, part.q0));
+    }
+  };
+  const auto store = [&](size_t i) {
+    const Part& part = parts[i];
+    program_->Store(
+        Words(part.addr, Mem::kFbuf, src(i) + span, part.count * wq),
+        std::format("{} st w g{} q{}", note, part.g, part.q0));
+  };
+  load(0);
+  for (size_t i = 0; i < parts.size(); ++i) {
+    softmax(i);
+    if (i > 0) {
+      store(i - 1);
+    }
+    if (i + 1 < parts.size()) {
+      load(i + 1);
+    }
+  }
+  store(parts.size() - 1);
+}
+
+void SparseHead::Keypoints(size_t index, const Keys& pb, std::string_view note,
+                           const std::function<void(uint32_t)>& gather) {
   const HeadConfig& cf = C();
   constexpr uint32_t kTq = kDetTile;
   const uint64_t stride = uint64_t{ncam} * lbc;
   constexpr uint32_t kA = 0;
   constexpr uint32_t kLf = 4 * kTq;
-  constexpr uint32_t kConst = 8 * kTq;
+  constexpr uint32_t kConst = kDetConst;
   constexpr std::array<uint32_t, 2> kOut = {kConst + 3, kConst + 3 + kTq};
-  constexpr uint32_t kWork = kConst + 3 + (2 * kTq);
+  constexpr uint32_t kWork = kDetWork;
   Require(kWork + DetKeypointWork(kTq) <= kFbufWords,
           "keypoint work area exceeds FBUF");
+  const uint32_t stores = ncam * cf.npt * kLevels;
   const uint32_t pbv = pb.at(std::format("{} kplane", note));
   const uint32_t imm = kConst | (kWork << 12);
   const Rows& anchors = anc[cur_a];
@@ -1314,6 +1383,7 @@ void SparseHead::Keypoints(size_t index, const Keys& pb,
     program_->Load(Words(kp_fs.at(index), Mem::kFbuf, kConst + 1, 1),
                    std::format("{} kp ld fix_scale", note));
     const uint32_t rows = std::min(kTq, nq - q0);
+    const uint32_t ready = q0 - std::min(q0, kTq);
     uint32_t k = 0;
     for (uint32_t camera = 0; camera < ncam; ++camera) {
       program_->Load(
@@ -1343,6 +1413,7 @@ void SparseHead::Keypoints(size_t index, const Keys& pb,
                .ddr_stride = static_cast<uint32_t>(stride)},
               std::format("{} kp st lists t{} c{} p{} l{}", note, t, camera, pt,
                           l));
+          gather(ready + ((q0 - ready) * k / stores));
         }
       }
     }

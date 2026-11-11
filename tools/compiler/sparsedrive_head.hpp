@@ -165,6 +165,11 @@ class SparseHead {
   std::vector<std::tuple<Pbuf, Keys, std::string>> pb_layers;
 
  private:
+  struct Quantize {
+    VecArgs args;
+    std::string note;
+  };
+
   void PlaceParams();
   void QuantRows(const Rows& rows, uint32_t n, uint32_t abuf,
                  std::string_view note,
@@ -190,7 +195,11 @@ class SparseHead {
                   std::string_view note);
   void DeformableWeights(const HeadLayer& layer, const Keys& pb,
                          std::string_view note);
-  void Keypoints(size_t index, const Keys& pb, std::string_view note);
+  void WeightSoftmax(std::string_view note);
+  void Gather(uint32_t q, uint32_t ag, uint32_t ring, uint32_t ring_quads,
+              std::string_view note, std::optional<Quantize>& pending);
+  void Keypoints(size_t index, const Keys& pb, std::string_view note,
+                 const std::function<void(uint32_t)>& gather);
   void KeypointsMap(std::string_view note);
   void Ffn(const HeadLayer& layer, const Keys& pb, std::string_view note);
   void Refine(const HeadLayer& layer, const Keys& pb, std::string_view note);
