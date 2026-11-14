@@ -30,7 +30,6 @@ namespace {
 namespace sd = sparsedrive;
 
 constexpr uint64_t kStemGroupBytes = uint64_t{32} * 24 * 4 * 4;
-constexpr uint32_t kFsScratch = 512;
 
 struct FrameStartRegions {
   uint64_t meta = 0;
@@ -89,32 +88,40 @@ FrameStartRegions PlaceFrameStart(DdrImage& image, sd::SparseHead& det,
 void EmitFrameStart(Program& program, const FrameStartRegions& fs,
                     const sd::SparseHead& det, const sd::SparseHead& map,
                     const sd::MotionHead& motion, bool temp) {
-  const auto ld = [&](uint64_t ddr, Mem mem, uint32_t at, uint32_t words,
+  const auto ns = static_cast<uint32_t>(det.scale_patch.size());
+  const Tile area =
+      program.Alloc(Mem::kFbuf, sd::FrameStartWords(det.ncam + map.ncam));
+  const auto ld = [&](uint64_t ddr, uint32_t at, uint32_t words,
                       const std::string& note) {
-    program.Load(sd::Words(ddr, mem, at, words), note);
+    program.Load(sd::Words(ddr, Mem::kFbuf, area.At(at), words), note);
   };
   const auto st = [&](uint64_t ddr, uint32_t at, uint32_t words,
                       const std::string& note) {
-    program.Store(sd::Words(ddr, Mem::kFbuf, at, words), note);
+    program.Store(sd::Words(ddr, Mem::kFbuf, area.At(at), words), note);
   };
-  const auto ns = static_cast<uint32_t>(det.scale_patch.size());
-  ld(fs.prog, Mem::kCbuf, vprog::kRomWords,
-     static_cast<uint32_t>(fs.cbuf.Words().size()), "fs ld VEC programs");
-  ld(fs.meta, Mem::kFbuf, sd::kFsTs, 2, "fs ld TS TG");
-  ld(fs.state, Mem::kFbuf, sd::kFsPts, 2, "fs ld previous TS TG");
-  ld(fs.col8, Mem::kFbuf, sd::kFsCol8, 1, "fs ld COL8");
-  ld(det.kp_const, Mem::kFbuf, sd::kFsKp, det.ncam, "fs ld det kp_const");
-  ld(map.kp_const, Mem::kFbuf, sd::kFsKp + det.ncam, map.ncam,
-     "fs ld map kp_const");
+  program.Load(sd::Words(fs.prog, Mem::kCbuf, Place::Fixed(vprog::kRomWords),
+                         static_cast<uint32_t>(fs.cbuf.Words().size())),
+               "fs ld VEC programs");
+  ld(fs.meta, sd::kFsTs, 2, "fs ld TS TG");
+  ld(fs.state, sd::kFsPts, 2, "fs ld previous TS TG");
+  ld(fs.col8, sd::kFsCol8, 1, "fs ld COL8");
+  ld(det.kp_const, sd::kFsKp, det.ncam, "fs ld det kp_const");
+  ld(map.kp_const, sd::kFsKp + det.ncam, map.ncam, "fs ld map kp_const");
   if (ns != 0) {
-    ld(fs.sc, Mem::kFbuf, sd::kFsSc, ns, "fs ld scale");
+    ld(fs.sc, sd::kFsSc, ns, "fs ld scale");
   }
-  ld(fs.tpl_det, Mem::kFbuf, sd::kFsDi, 18, "fs ld det template");
-  ld(fs.tpl_map, Mem::kFbuf, sd::kFsMi, 9, "fs ld map template");
-  ld(fs.tinv, Mem::kPbuf, 0, 5, "fs ld Tinv");
-  program.Run(
-      {.pc = fs.cbuf.Pc("start"), .src = 0, .p_base = 0, .imm = temp ? 1U : 0U},
-      "fs run");
+  ld(fs.tpl_det, sd::kFsDi, 18, "fs ld det template");
+  ld(fs.tpl_map, sd::kFsMi, 9, "fs ld map template");
+  const Tile tinv = program.Alloc(Mem::kPbuf, 5);
+  program.Load(sd::Words(fs.tinv, Mem::kPbuf, tinv.At(), 5), "fs ld Tinv");
+  program.Run({.pc = fs.cbuf.Pc("start"),
+               .src = area.At(),
+               .p_base = tinv.At(),
+               .imm = temp ? 1U : 0U,
+               .imm_places = {},
+               .reads = {Whole(area), Whole(tinv)},
+               .writes = {Whole(area)}},
+              "fs run");
   st(det.proj_pb, sd::kFsDi, 18, "fs st det proj");
   st(map.proj_pb, sd::kFsMi, 9, "fs st map proj");
   for (const sd::SparseHead* h : {&det, &map}) {
@@ -128,6 +135,23 @@ void EmitFrameStart(Program& program, const FrameStartRegions& fs,
   st(map.kp_const, sd::kFsKp + det.ncam, map.ncam, "fs st map kp_const");
   st(fs.flag, sd::kFsFlag, 1, "fs st flag");
   st(fs.state, sd::kFsPts, 2, "fs st state");
+  const auto fill = [&](Transfer rows, uint32_t words, uint32_t value,
+                        std::string_view name) {
+    const Tile scratch = program.Alloc(Mem::kFbuf, words);
+    rows.onchip = scratch.At();
+    program.Load(rows, std::format("fs ld {}", name));
+    program.Run({.pc = fs.cbuf.Pc("fill"),
+                 .src = scratch.At(),
+                 .src2 = area.At(sd::kFsFlag),
+                 .dst = scratch.At(),
+                 .rows_q = words,
+                 .imm = value,
+                 .imm_places = {},
+                 .reads = {Whole(scratch), Part(area, sd::kFsFlag, 1)},
+                 .writes = {Whole(scratch)}},
+                std::format("fs {} if !mask", name));
+    program.Store(rows, std::format("fs st {}", name));
+  };
   struct Fill {
     std::string name;
     uint64_t offset;
@@ -146,31 +170,12 @@ void EmitFrameStart(Program& program, const FrameStartRegions& fs,
                                        .offset = motion.stlist,
                                        .words = sd::kMotionQueries / 32,
                                        .value = sd::kNullEntry}}};
-  for (const Fill& fill : fills) {
-    ld(fill.offset, Mem::kFbuf, kFsScratch, fill.words,
-       std::format("fs ld {}", fill.name));
-    program.Run({.pc = fs.cbuf.Pc("fill"),
-                 .src = kFsScratch,
-                 .src2 = sd::kFsFlag,
-                 .dst = kFsScratch,
-                 .rows_q = fill.words,
-                 .imm = fill.value},
-                std::format("fs {} if !mask", fill.name));
-    st(fill.offset, kFsScratch, fill.words, std::format("fs st {}", fill.name));
+  for (const Fill& f : fills) {
+    fill(sd::Words(f.offset, Mem::kFbuf, Place{}, f.words), f.words, f.value,
+         f.name);
   }
-  program.Load(sd::Tokens(motion.pst.Addr(0), Mem::kFbuf, kFsScratch, 4,
-                          motion.pst.Tok()),
-               "fs ld plan_status");
-  program.Run({.pc = fs.cbuf.Pc("fill"),
-               .src = kFsScratch,
-               .src2 = sd::kFsFlag,
-               .dst = kFsScratch,
-               .rows_q = 4,
-               .imm = 0},
-              "fs plan_status if !mask");
-  program.Store(sd::Tokens(motion.pst.Addr(0), Mem::kFbuf, kFsScratch, 4,
-                           motion.pst.Tok()),
-                "fs st plan_status");
+  fill(sd::Tokens(motion.pst.Addr(0), Mem::kFbuf, Place{}, 4, motion.pst.Tok()),
+       4, 0, "plan_status");
 }
 
 using Gathers = std::array<std::vector<size_t>, sd::kCameras>;
@@ -286,9 +291,7 @@ Compiled CompileSparseDrive(const SparseDriveOptions& options,
     }
   }
   for (Stream& stream : streams) {
-    if (options.schedule_window > 0) {
-      Schedule(stream.program, {.window = options.schedule_window});
-    }
+    stream.program.Finalize({.window = options.schedule_window});
     const std::vector<std::byte> bytes = stream.program.Bytes();
     stream.offset =
         image.Alloc(std::format("instr.{}", stream.name), bytes.size());

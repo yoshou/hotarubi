@@ -33,283 +33,14 @@ std::string_view ModeName(WeightMode mode) {
   return {};
 }
 
-struct W8Plane {
-  WeightMode mode;
-  std::string_view name;
-  uint32_t k_slot;
-  uint32_t v_slot;
-  bool acc;
-};
-
-constexpr std::array<W8Plane, 2> kW8Planes = {{{.mode = WeightMode::kW8Hi,
-                                                .name = "hi",
-                                                .k_slot = 0,
-                                                .v_slot = 2,
-                                                .acc = false},
-                                               {.mode = WeightMode::kW8Lo,
-                                                .name = "lo",
-                                                .k_slot = 1,
-                                                .v_slot = 3,
-                                                .acc = true}}};
-
-constexpr uint32_t kChunkQuads = 8;
-constexpr uint32_t kChunkLocalKeys = 128;
-
-uint32_t PlaneWords(uint32_t keys, uint32_t blocks) {
-  return keys * blocks / 8;
-}
-
-class AttentionEmitter {
- public:
-  AttentionEmitter(Program& program, const AttentionPlan& plan,
-                   std::string_view note);
-  void Emit();
-
- private:
-  void LoadKv(uint32_t h, uint32_t c, bool key);
-  void LoadQ(uint32_t h);
-  void Prefetch(uint32_t g);
-  [[nodiscard]] uint32_t Slot(uint32_t g) const;
-  void Scores(uint32_t g);
-  void Softmax(uint32_t g);
-  void Values(uint32_t g);
-  void Store(uint32_t g);
-
-  Program& program_;
-  const AttentionPlan& plan_;
-  std::string_view note_;
-  uint32_t kbq_;
-  uint32_t nwq_;
-  uint32_t hb_;
-  uint32_t nkc_;
-  uint32_t kbk_;
-  uint32_t kw_;
-  uint32_t chunks_;
-  uint64_t stride_;
-  std::array<uint32_t, 2> qh_{};
-  std::array<uint32_t, 2> pp_{};
-  std::array<uint32_t, 2> sc_{};
-  uint32_t scratch_ = 0;
-  std::array<uint32_t, 2> oo_{};
-  uint32_t mk_ = 0;
-  std::array<uint32_t, 2> kv_{};
-  uint32_t scale_ = 0;
-};
-
-AttentionEmitter::AttentionEmitter(Program& program, const AttentionPlan& plan,
-                                   std::string_view note)
-    : program_(program),
-      plan_(plan),
-      note_(note),
-      kbq_(plan.embed / 32),
-      nwq_(plan.embed / 8),
-      hb_(plan.hd / 32),
-      nkc_(plan.chunk_local ? kChunkLocalKeys : plan.keys),
-      kbk_(nkc_ / 32),
-      kw_(PlaneWords(nkc_, hb_)),
-      chunks_(plan.queries / 32),
-      stride_(uint64_t{kbq_} * kWordA) {
-  Require(
-      plan.queries % 32 == 0 && (plan.chunk_local || chunks_ >= 3),
-      std::format("attention over {} queries is not supported", plan.queries));
-  OnChip a(kAbufWords);
-  qh_ = {a.Take(plan.queries / 4 * hb_), a.Take(plan.queries / 4 * hb_)};
-  pp_ = {a.Take(8 * kbk_), a.Take(8 * kbk_)};
-  OnChip f(kFbufWords);
-  sc_ = {f.Take(nkc_), f.Take(nkc_)};
-  scratch_ = f.Take(nkc_);
-  oo_ = {f.Take(plan.hd), f.Take(plan.hd)};
-  if (plan.masked) {
-    mk_ = f.Take(nkc_);
-  }
-  kv_ = {0, 4 * kw_};
-  Require(8 * kw_ <= kWbufWords, "attention keys exceed WBUF");
-  scale_ = exact::Real::Binary64((exact::Real::Integer(1) /
-                                  exact::Sqrt(exact::Real::Integer(plan.hd)))
-                                     .ToBinary64())
-               .ToBinary32();
-}
-
-void AttentionEmitter::Emit() {
-  const uint32_t total = kHeads * chunks_;
-  LoadKv(0, 0, true);
-  LoadKv(0, 0, false);
-  LoadQ(0);
-  for (uint32_t g = 0; g < total; ++g) {
-    if (g >= 1) {
-      Softmax(g - 1);
-    }
-    Scores(g);
-    if (g >= 2) {
-      Store(g - 2);
-    }
-    if (g >= 1) {
-      Values(g - 1);
-    }
-    Prefetch(g);
-  }
-  Softmax(total - 1);
-  Store(total - 2);
-  Values(total - 1);
-  Store(total - 1);
-}
-
-void AttentionEmitter::LoadKv(uint32_t h, uint32_t c, bool key) {
-  const uint32_t slot =
-      plan_.chunk_local ? kv_[((h * chunks_) + c) % 2] : kv_[h % 2];
-  const uint64_t chunk =
-      plan_.chunk_local ? uint64_t{32} * c * kbq_ * kWordA : 0;
-  const uint64_t column = uint64_t{hb_} * h * kWordA;
-  program_.Load({.ddr_offset = (key ? plan_.k : plan_.v) + chunk + column,
-                 .mem = Mem::kWbuf,
-                 .onchip = slot + (key ? 0 : 2 * kw_),
-                 .rows = nkc_ / 4,
-                 .row_words = hb_,
-                 .ddr_stride = static_cast<uint32_t>(stride_),
-                 .kind = key ? DmaKind::kSplit8 : DmaKind::kT32Split8},
-                std::format("{} ld {} h{} c{}", note_, key ? "K" : "V", h, c));
-}
-
-void AttentionEmitter::LoadQ(uint32_t h) {
-  program_.Load({.ddr_offset = plan_.q + (uint64_t{hb_} * h * kWordA),
-                 .mem = Mem::kAbuf,
-                 .onchip = qh_[h % 2],
-                 .rows = plan_.queries / 4,
-                 .row_words = hb_,
-                 .ddr_stride = static_cast<uint32_t>(stride_)},
-                std::format("{} ld Q head {}", note_, h));
-}
-
-void AttentionEmitter::Prefetch(uint32_t g) {
-  if (plan_.chunk_local) {
-    const uint32_t next = g + 1;
-    if (next < kHeads * chunks_) {
-      LoadKv(next / chunks_, next % chunks_, true);
-      LoadKv(next / chunks_, next % chunks_, false);
-      if (next % chunks_ == 0) {
-        LoadQ(next / chunks_);
-      }
-    }
-    return;
-  }
-  const uint32_t h = g / chunks_;
-  const uint32_t c = g % chunks_;
-  if (c >= 3 || h + 1 >= kHeads) {
-    return;
-  }
-  if (c < 2) {
-    LoadKv(h + 1, 0, c == 0);
-  } else {
-    LoadQ(h + 1);
-  }
-}
-
-uint32_t AttentionEmitter::Slot(uint32_t g) const {
-  return plan_.chunk_local ? kv_[g % 2] : kv_[(g / chunks_) % 2];
-}
-
-void AttentionEmitter::Scores(uint32_t g) {
-  const uint32_t h = g / chunks_;
-  const uint32_t c = g % chunks_;
-  for (const W8Plane& plane : kW8Planes) {
-    program_.Gemm({.a_base = qh_[h % 2] + (c * kChunkQuads * hb_),
-                   .a_stride = hb_,
-                   .kb = hb_,
-                   .m = kChunkQuads * 4,
-                   .w_base = Slot(g) + (plane.k_slot * kw_),
-                   .w_stride = hb_,
-                   .n8 = nkc_ / 8,
-                   .c_base = sc_[g % 2],
-                   .wmode = plane.mode,
-                   .acc = plane.acc},
-                  std::format("{} S {} h{} c{}", note_, plane.name, h, c));
-  }
-  if (!plan_.masked) {
-    return;
-  }
-  program_.Load(Words(plan_.mask + (uint64_t{c} * plan_.mask_cs * kWordF),
-                      Mem::kFbuf, mk_, kChunkQuads * (nkc_ / 8)),
-                std::format("{} ld mask c{}", note_, c));
-  program_.Vec({.op = VecOp::kAdd,
-                .src = sc_[g % 2],
-                .src2 = mk_,
-                .dst = sc_[g % 2],
-                .rows_q = kChunkQuads,
-                .n8 = nkc_ / 8},
-               std::format("{} + mask h{} c{}", note_, h, c));
-}
-
-void AttentionEmitter::Softmax(uint32_t g) {
-  const uint32_t h = g / chunks_;
-  const uint32_t c = g % chunks_;
-  if (plan_.hd != 64) {
-    program_.Vec({.op = VecOp::kScale,
-                  .src = sc_[g % 2],
-                  .dst = sc_[g % 2],
-                  .rows_q = kChunkQuads,
-                  .n8 = nkc_ / 8,
-                  .imm = scale_},
-                 std::format("{} scale h{} c{}", note_, h, c));
-  }
-  program_.Vec({.op = VecOp::kSoftmax,
-                .src = sc_[g % 2],
-                .dst = pp_[g % 2],
-                .rows_q = kChunkQuads,
-                .n8 = nkc_ / 8,
-                .aux = plan_.chunk_local ? nkc_ : plan_.valid,
-                .q = true,
-                .scratch = scratch_},
-               std::format("{} softmax+Q h{} c{}", note_, h, c));
-}
-
-void AttentionEmitter::Values(uint32_t g) {
-  for (const W8Plane& plane : kW8Planes) {
-    program_.Gemm({.a_base = pp_[g % 2],
-                   .a_stride = kbk_,
-                   .kb = kbk_,
-                   .m = kChunkQuads * 4,
-                   .w_base = Slot(g) + (plane.v_slot * kw_),
-                   .w_stride = kbk_,
-                   .n8 = plan_.hd / 8,
-                   .c_base = oo_[g % 2],
-                   .wmode = plane.mode,
-                   .acc = plane.acc},
-                  std::format("{} PV {} h{} c{}", note_, plane.name,
-                              g / chunks_, g % chunks_));
-  }
-}
-
-void AttentionEmitter::Store(uint32_t g) {
-  const uint32_t h = g / chunks_;
-  const uint32_t c = g % chunks_;
-  program_.Store({.ddr_offset = plan_.o + (((uint64_t{c} * kChunkQuads * nwq_) +
-                                            (uint64_t{h} * (plan_.hd / 8))) *
-                                           kWordF),
-                  .mem = Mem::kFbuf,
-                  .onchip = oo_[g % 2],
-                  .rows = kChunkQuads,
-                  .row_words = plan_.hd / 8,
-                  .ddr_stride = static_cast<uint32_t>(uint64_t{nwq_} * kWordF)},
-                 std::format("{} st O h{} c{}", note_, h, c));
-}
-
 }  // namespace
 
-std::vector<Tile> Tiles(uint32_t n, uint32_t mt) {
-  std::vector<Tile> tiles;
+std::vector<Band> Bands(uint32_t n, uint32_t mt) {
+  std::vector<Band> bands;
   for (uint32_t t = 0; t * mt < n; ++t) {
-    tiles.push_back({.t = t, .i0 = t * mt, .m = std::min(mt, n - (t * mt))});
+    bands.push_back({.t = t, .i0 = t * mt, .m = std::min(mt, n - (t * mt))});
   }
-  return tiles;
-}
-
-uint32_t OnChip::Take(uint32_t n) {
-  Require(used_ + n <= size_,
-          std::format("on-chip area of {} words cannot take {} at {}", size_, n,
-                      used_));
-  const uint32_t at = used_;
-  used_ += n;
-  return at;
+  return bands;
 }
 
 Rows PlaceRows(DdrImage& image, std::string name, uint32_t n, uint32_t cols,
@@ -421,46 +152,41 @@ void Lin::Place(DdrImage& image, std::string_view name) {
   }
 }
 
-void Lin::Load(Program& program, uint32_t slot, std::string_view note) const {
-  Require(slot + TotalWords() <= kWbufWords,
-          std::format("{}: weights of {} words do not fit at {}", note,
-                      TotalWords(), slot));
+Tile Lin::Load(Program& program, std::string_view note) const {
+  const Tile w = program.Alloc(Mem::kWbuf, TotalWords());
   for (size_t i = 0; i < off_.size(); ++i) {
     program.Load(
         sparsedrive::Words(off_[i], Mem::kWbuf,
-                           slot + (static_cast<uint32_t>(i) * this->Words()),
+                           w.At(static_cast<uint32_t>(i) * this->Words()),
                            this->Words()),
         std::format("{} ld W{}", note, i));
   }
+  return w;
 }
 
-void Lin::Gemm(Program& program, uint32_t a_base, uint32_t a_stride, uint32_t m,
-               uint32_t c_base, uint32_t slot, std::string_view note,
-               const std::vector<Piece>& pieces, bool acc) const {
-  const std::vector<Piece> whole = {{.a_offset = 0, .kb_offset = 0, .kb = kb_}};
-  const std::vector<Piece>& parts = pieces.empty() ? whole : pieces;
-  for (size_t i = 0; i < parts.size(); ++i) {
+std::vector<Piece> Lin::Input(compiler::Place a) const {
+  return {{.a = a, .kb_offset = 0, .kb = kb_}};
+}
+
+void Lin::Gemm(Program& program, const std::vector<Piece>& pieces, uint32_t row,
+               uint32_t a_stride, uint32_t m, compiler::Place c, const Tile& w,
+               std::string_view note, bool acc) const {
+  for (size_t i = 0; i < pieces.size(); ++i) {
     for (size_t p = 0; p < modes_.size(); ++p) {
-      program.Gemm(
-          {.a_base = a_base + parts[i].a_offset,
-           .a_stride = a_stride,
-           .kb = parts[i].kb,
-           .m = m,
-           .w_base = slot + (static_cast<uint32_t>(p) * this->Words()) +
-                     parts[i].kb_offset,
-           .w_stride = kb_,
-           .n8 = Groups(),
-           .c_base = c_base,
-           .wmode = modes_[p],
-           .acc = acc || i > 0 || p > 0},
-          std::format("{} gemm p{}{}", note, i, ModeName(modes_[p])));
+      program.Gemm({.a_base = pieces[i].a + row,
+                    .a_stride = a_stride,
+                    .kb = pieces[i].kb,
+                    .m = m,
+                    .w_base = w.At((static_cast<uint32_t>(p) * this->Words()) +
+                                   pieces[i].kb_offset),
+                    .w_stride = kb_,
+                    .n8 = Groups(),
+                    .c_base = c,
+                    .wmode = modes_[p],
+                    .acc = acc || i > 0 || p > 0},
+                   std::format("{} gemm p{}{}", note, i, ModeName(modes_[p])));
     }
   }
-}
-
-void EmitAttention(Program& program, const AttentionPlan& plan,
-                   std::string_view note) {
-  AttentionEmitter(program, plan, note).Emit();
 }
 
 uint32_t Pbuf::Add(const std::vector<uint32_t>& values) {
@@ -487,9 +213,17 @@ void Pbuf::Place(DdrImage& image, std::string_view name) {
   image.Put(off_, bytes);
 }
 
-void Pbuf::Load(Program& program, std::string_view note) const {
-  program.Load(sparsedrive::Words(off_, Mem::kPbuf, 0, words_),
+Tile Pbuf::Load(Program& program, std::string_view note) const {
+  const Tile tile = program.Alloc(Mem::kPbuf, words_);
+  program.Load(sparsedrive::Words(off_, Mem::kPbuf, tile.At(), words_),
                std::format("{} ld PBUF", note));
+  return tile;
+}
+
+compiler::Place Params::At(std::string_view key) const {
+  const auto found = keys_->find(key);
+  Require(found != keys_->end(), std::format("no parameter {}", key));
+  return tile_.At(found->second);
 }
 
 Lin HeadWeights::Linear(std::string_view module, uint32_t n_pad,

@@ -125,8 +125,8 @@ std::vector<uint32_t> AddBits(const std::vector<uint32_t>& a,
 std::vector<uint32_t> PaddedBias(const std::vector<uint32_t>& bias);
 uint32_t Entry(uint64_t base, uint64_t offset);
 
-Transfer Words(uint64_t ddr, Mem mem, uint32_t onchip, uint32_t words);
-Transfer Tokens(uint64_t ddr, Mem mem, uint32_t onchip, uint32_t tokens,
+Transfer Words(uint64_t ddr, Mem mem, Place onchip, uint32_t words);
+Transfer Tokens(uint64_t ddr, Mem mem, Place onchip, uint32_t tokens,
                 uint32_t tok, bool index = false);
 
 struct Backbone {

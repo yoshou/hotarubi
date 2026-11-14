@@ -36,8 +36,11 @@ Compiled Example() {
   const uint64_t instructions = image.Alloc("instr", 4096);
   const uint64_t data = image.Alloc("data", 100);
   image.Put(data, std::vector<std::byte>(100, std::byte{0x5A}));
-  program.Load({.ddr_offset = data, .mem = Mem::kFbuf, .onchip = 0}, "ld");
+  const Tile tile = program.Alloc(Mem::kFbuf, 1);
+  program.Load({.ddr_offset = data, .mem = Mem::kFbuf, .onchip = tile.At()},
+               "ld");
   program.Halt();
+  program.Finalize();
   image.Put(instructions, program.Bytes());
   std::vector<Stream> streams;
   streams.push_back({.name = "inference",
@@ -81,6 +84,7 @@ TEST(OutputTest,
   for (int i = 0; i < 5; ++i) {
     second.Halt();
   }
+  second.Finalize();
   compiled.streams.push_back(
       {.name = "second", .program = std::move(second), .offset = 0});
   EXPECT_EQ(TraceRegionBytes(compiled.streams), 5U * 32);
@@ -92,6 +96,7 @@ TEST(OutputTest, MetadataListsEveryStreamWhenThereAreSeveral) {
   second.Halt();
   second.Halt();
   second.Halt();
+  second.Finalize();
   const uint64_t offset = compiled.image.Alloc("instr.second", 48);
   compiled.image.Put(offset, second.Bytes());
   compiled.streams.push_back(
@@ -153,6 +158,7 @@ TEST(OutputTest, TheRuntimeLoadsEveryStreamTheCompilerWrites) {
   Compiled compiled = Example();
   Program second(kBase);
   second.Halt();
+  second.Finalize();
   const uint64_t offset = compiled.image.Alloc("instr.second", 16);
   compiled.image.Put(offset, second.Bytes());
   compiled.streams.push_back(

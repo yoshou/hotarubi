@@ -108,14 +108,13 @@ struct Expert {
   std::vector<uint64_t> vt;
 };
 
-size_t Ld(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
-          uint32_t rows, uint32_t row_words, uint64_t stride,
-          std::string_view note, DmaKind kind = DmaKind::kRaw);
-size_t St(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
-          uint32_t rows, uint32_t row_words, uint64_t stride,
-          std::string_view note);
-uint64_t Place(DdrImage& image, std::string_view name,
-               std::span<const std::byte> data);
+size_t Ld(Program& program, uint64_t ddr, Mem mem, Place onchip, uint32_t rows,
+          uint32_t row_words, uint64_t stride, std::string_view note,
+          DmaKind kind = DmaKind::kRaw);
+size_t St(Program& program, uint64_t ddr, Mem mem, Place onchip, uint32_t rows,
+          uint32_t row_words, uint64_t stride, std::string_view note);
+uint64_t PlaceData(DdrImage& image, std::string_view name,
+                   std::span<const std::byte> data);
 uint32_t Fp32OfFp64(const exact::Real& value);
 uint32_t RmsEps();
 std::vector<std::byte> RopeTables(std::span<const uint32_t> positions);

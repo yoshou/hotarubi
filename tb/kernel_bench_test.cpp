@@ -42,11 +42,13 @@ class KernelBenchTest : public testing::Test {
       values[i] = static_cast<std::byte>(i % 7);
     }
     image.Put(input, values);
+    const compiler::Tile in = program.Alloc(compiler::Mem::kFbuf, 8);
+    const compiler::Tile out = program.Alloc(compiler::Mem::kFbuf, 8);
     {
       const compiler::Program::Scope scope(program, "setup");
       program.Load({.ddr_offset = input,
                     .mem = compiler::Mem::kFbuf,
-                    .onchip = 0,
+                    .onchip = in.At(),
                     .rows = 1,
                     .row_words = 8,
                     .ddr_stride = 0},
@@ -55,20 +57,21 @@ class KernelBenchTest : public testing::Test {
     {
       const compiler::Program::Scope scope(program, "kernel");
       program.Vec({.op = compiler::VecOp::kRelu,
-                   .src = 0,
-                   .dst = 8,
+                   .src = in.At(),
+                   .dst = out.At(),
                    .rows_q = 8,
                    .n8 = 1},
                   "relu");
       program.Store({.ddr_offset = output,
                      .mem = compiler::Mem::kFbuf,
-                     .onchip = 8,
+                     .onchip = out.At(),
                      .rows = 1,
                      .row_words = 8,
                      .ddr_stride = 0},
                     "st out");
     }
     program.Halt();
+    program.Finalize({.window = 1});
     image.Put(instructions, program.Bytes());
     count_ = static_cast<uint32_t>(program.Size());
     std::vector<compiler::Stream> streams;

@@ -603,7 +603,7 @@ The NPU toolchain is written in C++23:
 | Component | Contents |
 |---|---|
 | Instruction-set simulator | The bit-exact arithmetic of each unit, execution of instruction streams, a cycle model that assigns issue and completion cycles, writes trace records of both types and drives the cycle counters, and the hazard check of the executed streams |
-| Compiler | Generation of instruction streams, their scheduling, the DDR image and the JSON listings |
+| Compiler | Kernels that emit instructions on tiles, the scheduling and placement of instruction streams, the DDR image and the JSON listings |
 | Trace analyzer | Validation, reports, kernel tables, timelines, differences and calibration of execution traces; prediction of traces with the cycle model |
 | RTL testbenches | Verilator testbenches |
 | Runtime | Driver and runtime on the board, cross-compiled for aarch64 |
@@ -612,9 +612,29 @@ The NPU toolchain is written in C++23:
 
 The compiler writes a directory with `image.bin`, `meta.json` and one `<stream>.listing.json` per instruction stream. `meta.json` holds the base address, the main stream, the stream table, the listing file names, the parameters and the regions of the image; the `trace` region, allocated after the streams, holds 32 bytes per instruction of the longest stream. A listing holds the base address, the tag table and one entry per instruction with its index, engine, opcode, wait bits, hexadecimal word, tag index, note, and the on-chip ranges it reads and writes. Tags are the scopes open when the instruction was emitted, joined with `/`.
 
+### Kernels and tiles
+
+Kernels emit instructions in program order and decide neither their issue order nor their on-chip addresses. An operand in ABUF, WBUF, FBUF or PBUF is a place in a tile: a tile is a block of words of one of these memories without an address, and a place is a tile and a word offset in it. TBUF and CBUF are addressed directly.
+
+Every instruction lists the ranges it reads and writes: a DMA transfer its on-chip words; a GEMM its A rows, its weights and C, which it also reads when it accumulates; a library VEC command its operands, its scratch area, its PBUF parameters and, for ACT, ACT_MUL and SOFTMAX, all of TBUF; a VEC command that runs a loaded program the ranges given by the kernel and all of CBUF. The ranges of a loaded program include every tile it names through src, src2, dst, p_base or a place packed into imm; a packed place is shifted left by its given amount and ORed into the immediate.
+
 ### Scheduling
 
-Kernels emit instructions in program order with the on-chip ranges each instruction reads and writes. Two instructions conflict when one writes a range the other reads or writes, when both are DMA transfers and at least one is a store whose DDR extent overlaps the other's extent (the extent of an index-list or GACC transfer is all of DDR), when both are GACC transfers, when both are VEC commands and one of them runs a program outside the library, or when one of them is SIGNAL, WAIT_HOST or HALT. The compiler reorders each stream so that conflicting instructions keep their program order, choosing at every step, among the first `schedule-window` unscheduled instructions in program order whose conflicting predecessors are all scheduled, the one with the earliest predicted issue cycle under the sequencer rules and the cycle model, with program order as the tie-break. The wait bits are then recomputed for the new order: an instruction waits for an engine when a conflicting instruction of that engine was issued after the last point at which that engine was known to be idle. `--schedule-window 0` keeps the program order; the window is recorded in `meta.json`.
+Two instructions conflict when one writes a range of a tile or of a directly addressed memory that the other reads or writes, when both are DMA transfers and at least one is a store whose DDR extent overlaps the other's extent (the extent of an index-list or GACC transfer is all of DDR), when both are index-list or GACC transfers, when both are VEC commands and one of them runs a loaded program, or when one of them is SIGNAL, WAIT_HOST or HALT.
+
+The compiler orders each stream with a list scheduler that follows the sequencer rules and the cycle model. Conflicting instructions keep their program order. At every step the scheduler considers the first `schedule-window` unscheduled instructions in program order whose conflicting predecessors are all scheduled and whose tiles can be placed, and takes the one with the earliest predicted issue cycle, with program order as the tie-break. A window of 0 or 1 keeps the program order; the window is recorded in `meta.json`.
+
+A tile is placed when the first instruction that accesses it is scheduled, and its words become free when the last instruction that accesses it is scheduled. An instruction can be taken only if, in each memory, the placed tiles, the tiles it places and the unplaced tiles first accessed by earlier instructions fit. A tile is placed at either end of a free run of words that is large enough. The candidate positions are ordered by:
+
+1. Not overlapping the ranges of the latest instruction issued to each other engine.
+2. Next to a tile whose last access in program order is not earlier than the tile's own, or next to an end of the memory.
+3. The smallest distance in program order between the last accesses of the tile and of that neighbor.
+4. The smallest free run.
+5. The lowest address.
+
+The tile takes the first candidate after which the unscheduled instructions among the 256 instructions from the oldest unscheduled one can still place their tiles in program order, each tile at the lowest address of the smallest free run that fits and freed after its last access. When no candidate passes, the instruction waits, unless it is the oldest unscheduled instruction, which takes the first candidate.
+
+The wait bits are computed for the scheduled order on the placed addresses: an instruction waits for an engine when a conflicting instruction of that engine was issued after the last point at which that engine was known to be idle.
 
 ### Cycle model
 

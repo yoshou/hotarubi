@@ -4,7 +4,9 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -101,15 +103,24 @@ class MotionHead {
 
  private:
   void PlaceParams();
-  void QuantRows(const Rows& rows, uint32_t n, uint32_t abuf,
+  [[nodiscard]] Place Pb(std::string_view key) const;
+  void LoadRows(const Rows& rows, uint32_t j, uint32_t m, Place dst,
+                std::string_view note);
+  [[nodiscard]] Tile LoadRows(const Rows& rows, uint32_t j, uint32_t m,
+                              std::string_view note);
+  void StoreRows(const Rows& rows, uint32_t j, uint32_t m, Place src,
+                 std::string_view note);
+  void QuantRows(const Rows& rows, uint32_t n, Place abuf,
                  std::string_view note, const Rows* second = nullptr,
-                 std::optional<uint32_t> abuf_plain = std::nullopt);
+                 std::optional<Place> abuf_plain = std::nullopt);
   void ProjStore(const Lin& lin, const std::vector<Piece>& pieces,
                  uint32_t astride, uint32_t n, uint64_t out,
                  const std::string& key, std::string_view note);
   void ProjStream(const Lin& lin, const Rows& rows_a, const Rows* rows_b,
                   uint32_t n, uint64_t out, const std::string& key,
-                  std::string_view note, const Lin* pre = nullptr);
+                  std::string_view note);
+  void ProjThrough(const Lin& lin, const Lin& pre, const Rows& rows, uint32_t n,
+                   uint64_t out, const std::string& key, std::string_view note);
   void AttentionCore(const MotionLayer& layer, std::string_view note,
                      uint32_t keys, uint32_t valid, bool chunk_local,
                      bool masked);
@@ -120,19 +131,13 @@ class MotionHead {
   void Norm(std::string_view note);
   void Ffn(const MotionLayer& layer, std::string_view note);
   void Refine(const MotionLayer& layer, std::string_view note);
-  void Mlp(uint32_t a_in, uint32_t n, const MotionLayer& layer,
+  void Mlp(const Tile& a_in, uint32_t n, const MotionLayer& layer,
            const std::string& branch, bool relu_ln, const Rows& rows_out,
            uint32_t row0, std::string_view note);
   void Prep();
   void PrepNpu();
   void MotionAnchor();
   void Queue();
-  void AnchorEncoderOn(const Rows& a_rows, const Rows& e_out, uint32_t n,
-                       std::string_view note);
-  void LoadRows(const Rows& rows, uint32_t j, uint32_t m, uint32_t dst,
-                std::string_view note);
-  void StoreRows(const Rows& rows, uint32_t j, uint32_t m, uint32_t src,
-                 std::string_view note);
 
   DdrImage& image_;
   uint64_t base_;
@@ -171,7 +176,8 @@ class MotionHead {
   FMap ego_t_;
   FMap ego_o_;
   std::vector<std::pair<Pbuf, Keys>> pb_layers_;
-  Keys keys_;
+  Tile pb_;
+  const Keys* keys_ = nullptr;
 };
 
 }  // namespace hotarubi::compiler::sparsedrive

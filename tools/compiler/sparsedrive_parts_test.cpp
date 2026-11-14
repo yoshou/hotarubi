@@ -33,13 +33,14 @@ TEST(SparseDrivePartsDeathTest, ListEntriesRejectUnalignedAddresses) {
 
 TEST(SparseDrivePartsTest, TokenTransfersUseTheRowFormat) {
   Program program(kBase);
-  const size_t index =
-      program.Load(Tokens(0x2000, Mem::kAbuf, 8, 12, 8, true), "tokens");
-  const Instruction& instruction = program.Instructions()[index];
+  const Tile tile = program.Alloc(Mem::kAbuf, 24);
+  program.Load(Tokens(0x2000, Mem::kAbuf, tile.At(), 12, 8, true), "tokens");
+  program.Finalize();
+  const Instruction& instruction = program.Instructions()[0];
   EXPECT_EQ(instruction.Get(120, 8), 1U);
   EXPECT_EQ(instruction.Get(88, 28), (kBase + 0x2000) / 16);
   EXPECT_EQ(instruction.Get(85, 3), 0U);
-  EXPECT_EQ(instruction.Get(72, 13), 8U);
+  EXPECT_EQ(instruction.Get(72, 13), program.Address(tile));
   EXPECT_EQ(instruction.Get(60, 12), 1U);
   EXPECT_EQ(instruction.Get(48, 12), 12U);
   EXPECT_EQ(instruction.Get(25, 3), 2U);
@@ -48,11 +49,13 @@ TEST(SparseDrivePartsTest, TokenTransfersUseTheRowFormat) {
 
 TEST(SparseDrivePartsTest, WordTransfersAreOneRawRow) {
   Program program(kBase);
-  const size_t index = program.Store(Words(0x3000, Mem::kFbuf, 40, 5), "words");
-  const Instruction& instruction = program.Instructions()[index];
+  const Tile tile = program.Alloc(Mem::kFbuf, 45);
+  program.Store(Words(0x3000, Mem::kFbuf, tile.At(40), 5), "words");
+  program.Finalize();
+  const Instruction& instruction = program.Instructions()[0];
   EXPECT_EQ(instruction.Get(120, 8), 2U);
   EXPECT_EQ(instruction.Get(85, 3), 2U);
-  EXPECT_EQ(instruction.Get(72, 13), 40U);
+  EXPECT_EQ(instruction.Get(72, 13), program.Address(tile) + 40);
   EXPECT_EQ(instruction.Get(60, 12), 1U);
   EXPECT_EQ(instruction.Get(48, 12), 5U);
   EXPECT_EQ(instruction.Get(25, 3), 0U);

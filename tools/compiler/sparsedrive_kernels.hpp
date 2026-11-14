@@ -111,6 +111,7 @@ vprog::Assembler MotionCompact();
 vprog::Assembler MotionEmbed();
 vprog::Assembler AnchorProjectKernel(bool box, uint32_t words);
 vprog::Assembler FrameStartKernel(uint32_t nkp, uint32_t ns);
+uint32_t FrameStartWords(uint32_t nkp);
 vprog::Assembler MaskKernel(bool fill);
 vprog::Assembler IqueueState(uint32_t ncls);
 vprog::Assembler IqueueList();

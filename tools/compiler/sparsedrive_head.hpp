@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "ddr_image.hpp"
+#include "kernels.hpp"
 #include "program.hpp"
 #include "sparsedrive_kernels.hpp"
 #include "sparsedrive_layers.hpp"
@@ -94,10 +95,8 @@ class SparseHead {
              const std::vector<std::vector<Level>>& levels, uint64_t w_off);
 
   void EmitFrame(Program& program, bool temp);
-  void LoadRows(const Rows& rows, uint32_t j, uint32_t m, uint32_t dst,
-                std::string_view note);
-  void StoreRows(const Rows& rows, uint32_t j, uint32_t m, uint32_t src,
-                 std::string_view note);
+  void EncodeAnchors(Program& program, const Rows& anchors, const Rows& out,
+                     uint32_t n, std::string_view note);
 
   [[nodiscard]] const HeadConfig& C() const { return p.config; }
 
@@ -165,44 +164,49 @@ class SparseHead {
   std::vector<std::tuple<Pbuf, Keys, std::string>> pb_layers;
 
  private:
-  struct Quantize {
+  struct Pending {
     VecArgs args;
     std::string note;
   };
 
   void PlaceParams();
-  void QuantRows(const Rows& rows, uint32_t n, uint32_t abuf,
-                 std::string_view note,
-                 const std::function<void(uint32_t, uint32_t, uint32_t,
-                                          uint32_t)>& extra = {});
-  void QuantRowsAdd(const Rows& rows, const Rows& rows2, uint32_t n,
-                    uint32_t abuf, std::string_view note,
-                    std::optional<uint32_t> abuf_plain = std::nullopt,
-                    std::optional<uint32_t> pb_vec = std::nullopt);
-  void StoreColumns(const Rows& rows, uint32_t j, uint32_t m, uint32_t src,
+  void LoadRows(const Rows& rows, uint32_t j, uint32_t m, Place dst,
+                std::string_view note);
+  [[nodiscard]] Tile LoadRows(const Rows& rows, uint32_t j, uint32_t m,
+                              std::string_view note);
+  void StoreRows(const Rows& rows, uint32_t j, uint32_t m, Place src,
+                 std::string_view note);
+  void QuantRows(const Rows& rows, uint32_t n, Place abuf,
+                 std::string_view note, const QuantizeHook& before = {});
+  void QuantRowsAdd(const Rows& rows, const Rows& rows2, uint32_t n, Place abuf,
+                    std::string_view note,
+                    std::optional<Place> abuf_plain = std::nullopt,
+                    std::optional<Place> pb_vec = std::nullopt);
+  void StoreColumns(const Rows& rows, uint32_t j, uint32_t m, Place src,
                     uint32_t col0, uint32_t ncols, std::string_view note);
   void StoreColumnsStrided(const Rows& rows, uint32_t j, uint32_t m,
-                           uint32_t src, uint32_t n8_src, uint32_t col0,
+                           const Tile& src, uint32_t n8_src, uint32_t col0,
                            uint32_t ncols, std::string_view note);
-  void AnchorEncoder(std::string_view note);
-  void Attention(const HeadLayer& layer, const Keys& pb, std::string_view note);
-  void OutProjection(const HeadLayer& layer, const Keys& pb,
+  void Attention(const HeadLayer& layer, const Params& pb,
+                 std::string_view note);
+  void OutProjection(const HeadLayer& layer, const Params& pb,
                      std::string_view note);
-  void Norm(const Keys& pb, std::string_view note);
-  void CameraEncoder(const HeadLayer& layer, const Keys& pb,
+  void Norm(const Params& pb, std::string_view note);
+  void CameraEncoder(const HeadLayer& layer, const Params& pb,
                      std::string_view note);
-  void Deformable(const HeadLayer& layer, size_t index, const Keys& pb,
+  void Deformable(const HeadLayer& layer, size_t index, const Params& pb,
                   std::string_view note);
-  void DeformableWeights(const HeadLayer& layer, const Keys& pb,
-                         std::string_view note);
+  void DeformableWeights(const HeadLayer& layer, const Params& pb,
+                         std::string_view note, Tile aw);
   void WeightSoftmax(std::string_view note);
-  void Gather(uint32_t q, uint32_t ag, uint32_t ring, uint32_t ring_quads,
-              std::string_view note, std::optional<Quantize>& pending);
-  void Keypoints(size_t index, const Keys& pb, std::string_view note,
+  void Gather(uint32_t q, const Tile& ag, uint32_t ring_quads,
+              std::string_view note, std::optional<Pending>& pending,
+              Tile& slot);
+  void Keypoints(size_t index, const Params& pb, std::string_view note,
                  const std::function<void(uint32_t)>& gather);
   void KeypointsMap(std::string_view note);
-  void Ffn(const HeadLayer& layer, const Keys& pb, std::string_view note);
-  void Refine(const HeadLayer& layer, const Keys& pb, std::string_view note);
+  void Ffn(const HeadLayer& layer, const Params& pb, std::string_view note);
+  void Refine(const HeadLayer& layer, const Params& pb, std::string_view note);
   void Reorder(std::string_view note);
   void Keep(std::string_view note);
   void Init(std::string_view note);

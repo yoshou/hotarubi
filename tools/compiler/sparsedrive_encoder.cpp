@@ -195,38 +195,34 @@ class ConvEmitter {
     Plan();
     PlaceParams();
     PlaceLists();
-    program_.Load(Words(bias_, Mem::kPbuf, 0, (n_ + kBlock - 1) / kBlock),
+    const uint32_t bias_words = (n_ + kBlock - 1) / kBlock;
+    const Tile bias = program_.Alloc(Mem::kPbuf, bias_words);
+    program_.Load(Words(bias_, Mem::kPbuf, bias.At(), bias_words),
                   std::format("{} ld bias", spec_.name));
-    LoadFaces(0);
+    std::vector<Tile> resident;
     if (resident_) {
       for (size_t si = 0; si < spec_.srcs.size(); ++si) {
-        program_.Load(
-            Words(weights_[si], Mem::kWbuf, src_base_[si], src_words_[si]),
-            std::format("{} ld W (resident) s{}", spec_.name, si));
-      }
-    } else {
-      const uint64_t total = uint64_t{groups_} * jobs_.size();
-      for (uint64_t q = 0; q < std::min<uint64_t>(slots_ - 1, total); ++q) {
-        LoadWeight(q);
+        resident.push_back(program_.Alloc(Mem::kWbuf, src_words_[si]));
+        program_.Load(Words(weights_[si], Mem::kWbuf, resident.back().At(),
+                            src_words_[si]),
+                      std::format("{} ld W (resident) s{}", spec_.name, si));
       }
     }
-    if (spec_.residual != nullptr) {
-      LoadResidual(0);
+    for (uint32_t t = 0; t < tiles_; ++t) {
+      const std::map<Key, Tile> faces = LoadFaces(t);
+      for (uint32_t nt = 0; nt < tiles_n_; ++nt) {
+        Group(t, nt, faces, resident, bias);
+      }
     }
-    for (uint32_t g = 0; g < groups_; ++g) {
-      Group(g);
-    }
-    PostVec(groups_ - 1);
-    PostStore(groups_ - 1);
   }
 
  private:
+  using Key = std::array<size_t, 3>;
+
   void Plan() {
     CheckShapes();
     ChooseTile();
     tiles_ = (n_out_ + mt_ - 1) / mt_;
-    groups_ = tiles_ * tiles_n_;
-    PlaceFaceBuffers();
     PlanJobs();
     PlanWeights();
   }
@@ -252,24 +248,6 @@ class ConvEmitter {
     if (spec_.residual != nullptr) {
       Require(spec_.residual->planes[0] == nt_, "residual plane mismatch");
     }
-  }
-
-  void PlaceFaceBuffers() {
-    uint32_t a = 0;
-    for (uint32_t parity = 0; parity < 2; ++parity) {
-      for (size_t si = 0; si < spec_.srcs.size(); ++si) {
-        const Src& src = spec_.srcs[si];
-        for (size_t p = 0; p < src.x->planes.size(); ++p) {
-          for (size_t f = 0; f < src.faces.size(); ++f) {
-            face_base_[{parity, si, p, f}] = a;
-            a += src.FaceWords(mt_, p);
-          }
-        }
-      }
-    }
-    const uint32_t q_words = (mt_ / 4) * (nt_ / kBlock);
-    qb_ = {a, a + q_words};
-    Require(qb_[1] + q_words <= kAbufWords, "conv tile exceeds ABUF");
   }
 
   void PlanJobs() {
@@ -299,8 +277,6 @@ class ConvEmitter {
       total += src_words_.back();
     }
     resident_ = total <= kWbufWords;
-    slot_words_ = *std::ranges::max_element(job_words_);
-    slots_ = resident_ ? 0 : kWbufWords / slot_words_;
   }
 
   void ChooseTile() {
@@ -374,32 +350,30 @@ class ConvEmitter {
     lists_.Place(image_, std::format("{}.idx", spec_.name));
   }
 
-  [[nodiscard]] uint32_t FaceBase(uint32_t t, size_t si, size_t p,
-                                  size_t f) const {
-    return face_base_.at({t % 2, si, p, f});
-  }
-
-  void LoadFaces(uint32_t t) {
+  std::map<Key, Tile> LoadFaces(uint32_t t) {
+    std::map<Key, Tile> faces;
     for (size_t si = 0; si < spec_.srcs.size(); ++si) {
       const Src& src = spec_.srcs[si];
       for (size_t p = 0; p < src.x->planes.size(); ++p) {
         for (size_t f = 0; f < src.faces.size(); ++f) {
-          const uint32_t dst = FaceBase(t, si, p, f);
+          const Tile face = program_.Alloc(Mem::kAbuf, src.FaceWords(mt_, p));
+          faces.emplace(Key{si, p, f}, face);
           if (src.direct) {
             program_.Load(
-                Tokens(src.x->Addr(p, uint64_t{t} * mt_), Mem::kAbuf, dst, mt_,
-                       src.x->tok[p]),
+                Tokens(src.x->Addr(p, uint64_t{t} * mt_), Mem::kAbuf, face.At(),
+                       mt_, src.x->tok[p]),
                 std::format("{} ld A t{} s{} p{}", spec_.name, t, si, p));
           } else {
             program_.Load(
                 Tokens(lists_.Offset(list_ids_.at({t, si, p, f})), Mem::kAbuf,
-                       dst, src.FaceTokens(mt_), src.x->tok[p], true),
+                       face.At(), src.FaceTokens(mt_), src.x->tok[p], true),
                 std::format("{} ld face t{} s{} p{} f{}", spec_.name, t, si, p,
                             f));
           }
         }
       }
     }
+    return faces;
   }
 
   [[nodiscard]] uint64_t TileIndex(uint32_t nt, size_t k) const {
@@ -407,129 +381,82 @@ class ConvEmitter {
     return (uint64_t{nt} * jobs_per_src_[si]) + (k - first_job_[si]);
   }
 
-  void LoadWeight(uint64_t q) {
-    const auto g = static_cast<uint32_t>(q / jobs_.size());
-    const size_t k = q % jobs_.size();
-    const uint32_t nt = g % tiles_n_;
-    program_.Load(
-        Words(
-            weights_[jobs_[k].si] + (TileIndex(nt, k) * job_words_[k] * kWordA),
-            Mem::kWbuf, static_cast<uint32_t>(q % slots_) * slot_words_,
-            job_words_[k]),
-        std::format("{} ld W g{} k{}", spec_.name, g, k));
-  }
-
-  void LoadResidual(uint32_t g) {
-    const uint32_t t = g / tiles_n_;
-    const uint32_t nt = g % tiles_n_;
-    program_.Load(Tokens(spec_.residual->Addr(nt, uint64_t{t} * mt_),
-                         Mem::kFbuf, C(g), mt_, nt_ / kBlock),
-                  std::format("{} ld residual t{} nt{}", spec_.name, t, nt));
-  }
-
-  [[nodiscard]] uint32_t C(uint32_t g) const {
-    return (g % ns_) * (mt_ / 4) * (nt_ / 8);
-  }
-
-  void PostVec(uint32_t g) {
-    const uint32_t t = g / tiles_n_;
-    const uint32_t nt = g % tiles_n_;
-    const uint32_t c = C(g);
+  void Group(uint32_t t, uint32_t nt, const std::map<Key, Tile>& faces,
+             const std::vector<Tile>& resident, const Tile& bias) {
     const std::string where = std::format("t{} nt{}", t, nt);
-    program_.Vec({.op = VecOp::kAddP,
-                  .src = c,
-                  .dst = c,
-                  .rows_q = mt_ / 4,
-                  .n8 = nt_ / 8,
-                  .p_base = nt * (nt_ / kBlock)},
-                 std::format("{} bias {}", spec_.name, where));
-    if (spec_.relu && spec_.out_f32 != nullptr) {
-      program_.Vec({.op = VecOp::kRelu,
-                    .src = c,
-                    .dst = c,
-                    .rows_q = mt_ / 4,
-                    .n8 = nt_ / 8},
-                   std::format("{} relu {}", spec_.name, where));
-    }
-    if (spec_.out_i8 != nullptr) {
-      const bool relu = spec_.relu && spec_.out_f32 == nullptr;
-      program_.Vec(
-          {.op = relu ? VecOp::kRelu : VecOp::kCopy,
-           .src = c,
-           .dst = qb_[g % 2],
-           .rows_q = mt_ / 4,
-           .n8 = nt_ / 8,
-           .q = true},
-          std::format("{} {}+Q {}", spec_.name, relu ? "RELU" : "COPY", where));
-    }
-  }
-
-  void PostStore(uint32_t g) {
-    const uint32_t t = g / tiles_n_;
-    const uint32_t nt = g % tiles_n_;
-    const uint32_t m = std::min(mt_, n_out_ - (t * mt_));
-    if (spec_.out_f32 != nullptr) {
-      program_.Store(Tokens(spec_.out_f32->Addr(nt, uint64_t{t} * mt_),
-                            Mem::kFbuf, C(g), m, nt_ / kBlock),
-                     std::format("{} st f32 t{} nt{}", spec_.name, t, nt));
-    }
-    if (spec_.out_i8 != nullptr) {
-      program_.Store(Tokens(spec_.out_i8->Addr(nt, uint64_t{t} * mt_),
-                            Mem::kAbuf, qb_[g % 2], m, nt_ / kBlock),
-                     std::format("{} st i8 t{} nt{}", spec_.name, t, nt));
-    }
-  }
-
-  void Group(uint32_t g) {
-    const uint32_t t = g / tiles_n_;
-    const uint32_t nt = g % tiles_n_;
-    if (g > 0) {
-      PostVec(g - 1);
+    const uint32_t rows = mt_ / 4;
+    const Tile c = program_.Alloc(Mem::kFbuf, rows * (nt_ / 8));
+    if (spec_.residual != nullptr) {
+      program_.Load(Tokens(spec_.residual->Addr(nt, uint64_t{t} * mt_),
+                           Mem::kFbuf, c.At(), mt_, nt_ / kBlock),
+                    std::format("{} ld residual {}", spec_.name, where));
     }
     for (size_t k = 0; k < jobs_.size(); ++k) {
       const Job& job = jobs_[k];
       const Src& src = spec_.srcs[job.si];
       const Tap& tap = src.taps[job.f][job.ti];
       const uint32_t kb = src.x->tok[job.p];
-      const uint64_t q = (uint64_t{g} * jobs_.size()) + k;
-      const uint32_t w_base =
-          resident_
-              ? src_base_[job.si] +
-                    static_cast<uint32_t>(TileIndex(nt, k) * job_words_[k])
-              : static_cast<uint32_t>(q % slots_) * slot_words_;
+      Place w = resident_ ? resident[job.si].At(static_cast<uint32_t>(
+                                TileIndex(nt, k) * job_words_[k]))
+                          : Place();
+      if (!resident_) {
+        const Tile tile = program_.Alloc(Mem::kWbuf, job_words_[k]);
+        program_.Load(Words(weights_[job.si] +
+                                (TileIndex(nt, k) * job_words_[k] * kWordA),
+                            Mem::kWbuf, tile.At(), job_words_[k]),
+                      std::format("{} ld W {} k{}", spec_.name, where, k));
+        w = tile.At();
+      }
       program_.Gemm(
-          {.a_base = FaceBase(t, job.si, job.p, job.f) + (tap.qoff * kb),
+          {.a_base = faces.at({job.si, job.p, job.f}).At(tap.qoff * kb),
            .a_stride = kb,
            .kb = kb,
            .m = mt_,
-           .w_base = w_base,
+           .w_base = w,
            .w_stride = kb,
            .n8 = nt_ / 8,
-           .c_base = C(g),
+           .c_base = c.At(),
            .acc = k > 0 || spec_.residual != nullptr},
-          std::format("{} gemm t{} nt{} s{} p{} f{} tap{}{}", spec_.name, t, nt,
+          std::format("{} gemm {} s{} p{} f{} tap{}{}", spec_.name, where,
                       job.si, job.p, job.f, tap.ky, tap.kx));
-      if (k == 0) {
-        if (nt == 0 && t + 1 < tiles_) {
-          LoadFaces(t + 1);
-        }
-        if (spec_.residual != nullptr && g + 1 < groups_) {
-          LoadResidual(g + 1);
-        }
-        if (g > 0) {
-          PostStore(g - 1);
-        }
-      }
-      if (!resident_) {
-        const uint64_t next = q + slots_ - 1;
-        if (next < uint64_t{groups_} * jobs_.size()) {
-          LoadWeight(next);
-        }
-      }
+    }
+    program_.Vec({.op = VecOp::kAddP,
+                  .src = c.At(),
+                  .dst = c.At(),
+                  .rows_q = rows,
+                  .n8 = nt_ / 8,
+                  .p_base = bias.At(nt * (nt_ / kBlock))},
+                 std::format("{} bias {}", spec_.name, where));
+    if (spec_.relu && spec_.out_f32 != nullptr) {
+      program_.Vec({.op = VecOp::kRelu,
+                    .src = c.At(),
+                    .dst = c.At(),
+                    .rows_q = rows,
+                    .n8 = nt_ / 8},
+                   std::format("{} relu {}", spec_.name, where));
+    }
+    const uint32_t m = std::min(mt_, n_out_ - (t * mt_));
+    if (spec_.out_f32 != nullptr) {
+      program_.Store(Tokens(spec_.out_f32->Addr(nt, uint64_t{t} * mt_),
+                            Mem::kFbuf, c.At(), m, nt_ / kBlock),
+                     std::format("{} st f32 {}", spec_.name, where));
+    }
+    if (spec_.out_i8 != nullptr) {
+      const bool relu = spec_.relu && spec_.out_f32 == nullptr;
+      const Tile q = program_.Alloc(Mem::kAbuf, rows * (nt_ / kBlock));
+      program_.Vec(
+          {.op = relu ? VecOp::kRelu : VecOp::kCopy,
+           .src = c.At(),
+           .dst = q.At(),
+           .rows_q = rows,
+           .n8 = nt_ / 8,
+           .q = true},
+          std::format("{} {}+Q {}", spec_.name, relu ? "RELU" : "COPY", where));
+      program_.Store(Tokens(spec_.out_i8->Addr(nt, uint64_t{t} * mt_),
+                            Mem::kAbuf, q.At(), m, nt_ / kBlock),
+                     std::format("{} st i8 {}", spec_.name, where));
     }
   }
-
-  using Key = std::array<size_t, 4>;
 
   Program& program_;
   DdrImage& image_;
@@ -544,9 +471,6 @@ class ConvEmitter {
   uint32_t mt_ = 0;
   uint32_t ns_ = 0;
   uint32_t tiles_ = 0;
-  uint32_t groups_ = 0;
-  std::map<Key, uint32_t> face_base_;
-  std::array<uint32_t, 2> qb_{};
   std::vector<Job> jobs_;
   std::vector<size_t> first_job_;
   std::vector<size_t> jobs_per_src_;
@@ -554,12 +478,10 @@ class ConvEmitter {
   std::vector<uint32_t> src_base_;
   std::vector<uint32_t> src_words_;
   bool resident_ = false;
-  uint32_t slot_words_ = 0;
-  uint32_t slots_ = 0;
   std::vector<uint64_t> weights_;
   uint64_t bias_ = 0;
   Lists lists_;
-  std::map<Key, size_t> list_ids_;
+  std::map<std::array<size_t, 4>, size_t> list_ids_;
 };
 
 void EmitConv(Program& program, DdrImage& image, uint64_t base,
@@ -651,72 +573,71 @@ void EmitStem(Program& program, const StemParams& params, const FMap& out,
   constexpr uint32_t kQuads = kStemH / 4;
   constexpr uint32_t kFaceWords = kQuads * kStemWords * 4;
   constexpr uint32_t kAWords = kQuads * kStemWords;
-  constexpr std::array<uint32_t, 2> kA = {0, kAWords};
   constexpr uint32_t kCWords = kQuads * (kStemOut / 8);
-  constexpr uint32_t kSlots = 3;
   constexpr uint32_t kWWords = (kStemOut / 8) * kStemBlocks;
-  program.Load(
-      Words(params.program, Mem::kCbuf, vprog::kRomWords, params.program_words),
-      "stem ld VEC program");
-  program.Load(Words(params.bias, Mem::kPbuf, 0, kStemOut / kBlock),
+  program.Load(Words(params.program, Mem::kCbuf, Place::Fixed(vprog::kRomWords),
+                     params.program_words),
+               "stem ld VEC program");
+  const Tile bias = program.Alloc(Mem::kPbuf, kStemOut / kBlock);
+  program.Load(Words(params.bias, Mem::kPbuf, bias.At(), kStemOut / kBlock),
                "stem ld bias");
-  program.Load(Words(params.hi, Mem::kWbuf, 0, kWWords), "stem ld W hi");
-  program.Load(Words(params.lo, Mem::kWbuf, kWWords, kWWords), "stem ld W lo");
-  uint32_t column = 0;
+  const Tile hi = program.Alloc(Mem::kWbuf, kWWords);
+  const Tile lo = program.Alloc(Mem::kWbuf, kWWords);
+  program.Load(Words(params.hi, Mem::kWbuf, hi.At(), kWWords), "stem ld W hi");
+  program.Load(Words(params.lo, Mem::kWbuf, lo.At(), kWWords), "stem ld W lo");
   for (uint32_t gi = 0; gi < kStemW / 4; ++gi) {
     const uint32_t xb = StemGroupColumn(gi);
-    const uint32_t a = kA[gi % 2];
+    const Tile face = program.Alloc(Mem::kFbuf, kFaceWords);
     const size_t gather =
         program.Load(Tokens(params.lists + (uint64_t{gi} * kFaceWords * 4),
-                            Mem::kFbuf, 0, kFaceWords, 1, true),
+                            Mem::kFbuf, face.At(), kFaceWords, 1, true),
                      std::format("stem gather g{}", gi));
     if (gathers != nullptr) {
       gathers->push_back(gather);
     }
+    const Tile a = program.Alloc(Mem::kAbuf, kAWords);
     for (uint32_t g = 0; g < 4; ++g) {
       program.Run({.pc = vprog::kRomWords,
-                   .src = g,
-                   .dst = a + (kStemBlocks * g),
+                   .src = face.At(g),
+                   .dst = a.At(kStemBlocks * g),
                    .rows_q = kQuads,
                    .n8 = 4 * kStemWords,
-                   .reads =
-                       std::vector<Range>{
-                           {.mem = Mem::kFbuf, .lo = 0, .hi = kFaceWords}},
-                   .writes =
-                       std::vector<Range>{
-                           {.mem = Mem::kAbuf, .lo = a, .hi = a + kAWords}}},
+                   .imm_places = {},
+                   .reads = {Whole(face)},
+                   .writes = {Whole(a)}},
                   std::format("stem quant g{} c{}", gi, g));
     }
     for (uint32_t g = 0; g < 4; ++g) {
       const uint32_t x = xb + (4 * g);
-      const uint32_t c = kFaceWords + ((column++ % kSlots) * kCWords);
-      for (const bool lo : {false, true}) {
-        program.Gemm({.a_base = a + (kStemBlocks * g),
+      const Tile c = program.Alloc(Mem::kFbuf, kCWords);
+      for (const bool high : {true, false}) {
+        program.Gemm({.a_base = a.At(kStemBlocks * g),
                       .a_stride = kStemWords,
                       .kb = kStemBlocks,
                       .m = kStemH,
-                      .w_base = lo ? kWWords : 0,
+                      .w_base = high ? hi.At() : lo.At(),
                       .w_stride = kStemBlocks,
                       .n8 = kStemOut / 8,
-                      .c_base = c,
-                      .wmode = lo ? WeightMode::kW8Lo : WeightMode::kW8Hi,
-                      .acc = lo},
-                     std::format("stem gemm {} x{}", lo ? "lo" : "hi", x));
+                      .c_base = c.At(),
+                      .wmode = high ? WeightMode::kW8Hi : WeightMode::kW8Lo,
+                      .acc = !high},
+                     std::format("stem gemm {} x{}", high ? "hi" : "lo", x));
       }
       program.Vec({.op = VecOp::kAddP,
-                   .src = c,
-                   .dst = c,
+                   .src = c.At(),
+                   .dst = c.At(),
                    .rows_q = kQuads,
-                   .n8 = kStemOut / 8},
+                   .n8 = kStemOut / 8,
+                   .p_base = bias.At()},
                   std::format("stem bias x{}", x));
       program.Vec({.op = VecOp::kRelu,
-                   .src = c,
-                   .dst = c,
+                   .src = c.At(),
+                   .dst = c.At(),
                    .rows_q = kQuads,
                    .n8 = kStemOut / 8},
                   std::format("stem relu x{}", x));
-      program.Store(Tokens(out.Addr(0, uint64_t{x} * kStemH), Mem::kFbuf, c,
-                           kStemH, kStemOut / kBlock),
+      program.Store(Tokens(out.Addr(0, uint64_t{x} * kStemH), Mem::kFbuf,
+                           c.At(), kStemH, kStemOut / kBlock),
                     std::format("stem st x{}", x));
     }
   }
@@ -743,40 +664,33 @@ void EmitMaxpool(Program& program, DdrImage& image, uint64_t base,
     }
   }
   lists.Place(image, "maxpool.idx");
-  const auto face = [&](uint32_t t, uint32_t f) {
-    return ((t % 2) * 9 * face_words) + (f * face_words);
-  };
-  const auto load = [&](uint32_t t) {
+  for (uint32_t t = 0; t < tiles; ++t) {
+    std::vector<Tile> faces;
     for (uint32_t f = 0; f < 9; ++f) {
+      faces.push_back(program.Alloc(Mem::kFbuf, face_words));
       program.Load(Tokens(lists.Offset(ids[(t * 9) + f]), Mem::kFbuf,
-                          face(t, f), kMaxpoolTile, x.tok[0], true),
+                          faces.back().At(), kMaxpoolTile, x.tok[0], true),
                    std::format("maxpool ld face t{} f{}", t, f));
     }
-  };
-  load(0);
-  for (uint32_t t = 0; t < tiles; ++t) {
     for (uint32_t f = 1; f < 9; ++f) {
       program.Vec({.op = VecOp::kMax,
-                   .src = face(t, 0),
-                   .src2 = face(t, f),
-                   .dst = face(t, 0),
+                   .src = faces[0].At(),
+                   .src2 = faces[f].At(),
+                   .dst = faces[0].At(),
                    .rows_q = kMaxpoolTile / 4,
                    .n8 = x.c / 8},
                   std::format("maxpool max t{} f{}", t, f));
     }
+    const Tile q = program.Alloc(Mem::kAbuf, q_words);
     program.Vec({.op = VecOp::kCopy,
-                 .src = face(t, 0),
-                 .dst = (t % 2) * q_words,
+                 .src = faces[0].At(),
+                 .dst = q.At(),
                  .rows_q = kMaxpoolTile / 4,
                  .n8 = x.c / 8,
                  .q = true},
                 std::format("maxpool quant t{}", t));
-    if (t + 1 < tiles) {
-      load(t + 1);
-    }
     program.Store(
-        Tokens(out.Addr(0, uint64_t{t} * kMaxpoolTile), Mem::kAbuf,
-               (t % 2) * q_words,
+        Tokens(out.Addr(0, uint64_t{t} * kMaxpoolTile), Mem::kAbuf, q.At(),
                std::min(kMaxpoolTile, n_out - (t * kMaxpoolTile)), x.tok[0]),
         std::format("maxpool st t{}", t));
   }
@@ -787,27 +701,22 @@ void EmitQuantMap(Program& program, const FMap& x, const FMap& out,
   constexpr uint32_t kTile = kTopDownTile;
   const uint32_t tiles = (x.Tokens() + kTile - 1) / kTile;
   const uint32_t words = x.QuadWords(0);
-  const std::array<uint32_t, 2> xs = {0, (kTile / 4) * words};
-  const std::array<uint32_t, 2> qb = {0, (kTile / 4) * x.tok[0]};
-  program.Load(Tokens(x.Addr(0, 0), Mem::kFbuf, xs[0], kTile, x.tok[0]),
-               std::format("{} ld t0", name));
   for (uint32_t t = 0; t < tiles; ++t) {
+    const Tile rows = program.Alloc(Mem::kFbuf, (kTile / 4) * words);
+    program.Load(Tokens(x.Addr(0, uint64_t{t} * kTile), Mem::kFbuf, rows.At(),
+                        kTile, x.tok[0]),
+                 std::format("{} ld t{}", name, t));
+    const Tile q = program.Alloc(Mem::kAbuf, (kTile / 4) * x.tok[0]);
     program.Vec({.op = VecOp::kCopy,
-                 .src = xs[t % 2],
-                 .dst = qb[t % 2],
+                 .src = rows.At(),
+                 .dst = q.At(),
                  .rows_q = kTile / 4,
                  .n8 = words,
                  .q = true},
                 std::format("{} quant t{}", name, t));
-    if (t + 1 < tiles) {
-      program.Load(Tokens(x.Addr(0, uint64_t{t + 1} * kTile), Mem::kFbuf,
-                          xs[(t + 1) % 2], kTile, x.tok[0]),
-                   std::format("{} ld t{}", name, t + 1));
-    }
-    program.Store(
-        Tokens(out.Addr(0, uint64_t{t} * kTile), Mem::kAbuf, qb[t % 2],
-               std::min(kTile, x.Tokens() - (t * kTile)), x.tok[0]),
-        std::format("{} st t{}", name, t));
+    program.Store(Tokens(out.Addr(0, uint64_t{t} * kTile), Mem::kAbuf, q.At(),
+                         std::min(kTile, x.Tokens() - (t * kTile)), x.tok[0]),
+                  std::format("{} st t{}", name, t));
   }
 }
 
@@ -816,9 +725,7 @@ void EmitUpsampleAdd(Program& program, DdrImage& image, uint64_t base,
                      const FMap& out_i8, std::string_view name) {
   constexpr uint32_t kTile = kTopDownTile;
   constexpr uint32_t kSlot = (kTile / 4) * 32;
-  constexpr std::array<uint32_t, 2> kXa = {0, kSlot};
-  constexpr std::array<uint32_t, 2> kXb = {2 * kSlot, 3 * kSlot};
-  constexpr std::array<uint32_t, 2> kQb = {0, (kTile / 4) * 8};
+  constexpr uint32_t kQWords = (kTile / 4) * 8;
   const uint32_t tiles = (a.Tokens() + kTile - 1) / kTile;
   Lists lists;
   for (uint32_t t = 0; t < tiles; ++t) {
@@ -835,42 +742,38 @@ void EmitUpsampleAdd(Program& program, DdrImage& image, uint64_t base,
     lists.Add(std::move(list));
   }
   lists.Place(image, std::format("{}.idx", name));
-  const auto load = [&](uint32_t t) {
-    program.Load(Tokens(a.Addr(0, uint64_t{t} * kTile), Mem::kFbuf, kXa[t % 2],
-                        kTile, 8),
-                 std::format("{} ld A t{}", name, t));
-    program.Load(
-        Tokens(lists.Offset(t), Mem::kFbuf, kXb[t % 2], kTile, 8, true),
-        std::format("{} ld up(B) t{}", name, t));
-  };
-  load(0);
   for (uint32_t t = 0; t < tiles; ++t) {
     const uint32_t m = std::min(kTile, a.Tokens() - (t * kTile));
+    const Tile xa = program.Alloc(Mem::kFbuf, kSlot);
+    const Tile xb = program.Alloc(Mem::kFbuf, kSlot);
+    program.Load(
+        Tokens(a.Addr(0, uint64_t{t} * kTile), Mem::kFbuf, xa.At(), kTile, 8),
+        std::format("{} ld A t{}", name, t));
+    program.Load(Tokens(lists.Offset(t), Mem::kFbuf, xb.At(), kTile, 8, true),
+                 std::format("{} ld up(B) t{}", name, t));
     program.Vec({.op = VecOp::kAdd,
-                 .src = kXa[t % 2],
-                 .src2 = kXb[t % 2],
-                 .dst = kXa[t % 2],
+                 .src = xa.At(),
+                 .src2 = xb.At(),
+                 .dst = xa.At(),
                  .rows_q = kTile / 4,
                  .n8 = 32},
                 std::format("{} add t{}", name, t));
-    if (t + 1 < tiles) {
-      load(t + 1);
-    }
+    const Tile q = program.Alloc(Mem::kAbuf, kQWords);
     program.Vec({.op = VecOp::kCopy,
-                 .src = kXa[t % 2],
-                 .dst = kQb[t % 2],
+                 .src = xa.At(),
+                 .dst = q.At(),
                  .rows_q = kTile / 4,
                  .n8 = 32,
                  .q = true},
                 std::format("{} quant t{}", name, t));
     if (out_f32 != nullptr) {
       program.Store(Tokens(out_f32->Addr(0, uint64_t{t} * kTile), Mem::kFbuf,
-                           kXa[t % 2], m, 8),
+                           xa.At(), m, 8),
                     std::format("{} st f32 t{}", name, t));
     }
-    program.Store(Tokens(out_i8.Addr(0, uint64_t{t} * kTile), Mem::kAbuf,
-                         kQb[t % 2], m, 8),
-                  std::format("{} st i8 t{}", name, t));
+    program.Store(
+        Tokens(out_i8.Addr(0, uint64_t{t} * kTile), Mem::kAbuf, q.At(), m, 8),
+        std::format("{} st i8 t{}", name, t));
   }
 }
 

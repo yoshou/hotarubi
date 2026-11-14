@@ -40,9 +40,7 @@ Compiled CompileSmolVla(const SmolVlaOptions& options, const SafeTensors& quant,
   smolvla::EmitLm(program, lm, dims);
   smolvla::EmitExpert(program, expert, lm, dims);
   program.Halt();
-  if (options.schedule_window > 0) {
-    Schedule(program, {.window = options.schedule_window});
-  }
+  program.Finalize({.window = options.schedule_window});
   const std::vector<std::byte> bytes = program.Bytes();
   Require(bytes.size() <= kInstructionBytes,
           std::format("{} instructions exceed the instruction region",

@@ -23,23 +23,13 @@ inline constexpr uint32_t kHeads = 8;
 inline constexpr uint32_t kKbD = kD / 32;
 inline constexpr uint32_t kNwD = kD / 8;
 
-struct Tile {
+struct Band {
   uint32_t t = 0;
   uint32_t i0 = 0;
   uint32_t m = 0;
 };
 
-std::vector<Tile> Tiles(uint32_t n, uint32_t mt);
-
-class OnChip {
- public:
-  explicit OnChip(uint32_t size) : size_(size) {}
-  uint32_t Take(uint32_t n);
-
- private:
-  uint32_t size_;
-  uint32_t used_ = 0;
-};
+std::vector<Band> Bands(uint32_t n, uint32_t mt);
 
 struct Rows {
   std::string name;
@@ -68,7 +58,7 @@ struct LayerNorm {
 };
 
 struct Piece {
-  uint32_t a_offset = 0;
+  Place a{};
   uint32_t kb_offset = 0;
   uint32_t kb = 0;
 };
@@ -82,10 +72,11 @@ class Lin {
                 uint32_t n_pad, uint32_t k_shift);
 
   void Place(DdrImage& image, std::string_view name);
-  void Load(Program& program, uint32_t slot, std::string_view note) const;
-  void Gemm(Program& program, uint32_t a_base, uint32_t a_stride, uint32_t m,
-            uint32_t c_base, uint32_t slot, std::string_view note,
-            const std::vector<Piece>& pieces = {}, bool acc = false) const;
+  [[nodiscard]] Tile Load(Program& program, std::string_view note) const;
+  [[nodiscard]] std::vector<Piece> Input(compiler::Place a) const;
+  void Gemm(Program& program, const std::vector<Piece>& pieces, uint32_t row,
+            uint32_t a_stride, uint32_t m, compiler::Place c, const Tile& w,
+            std::string_view note, bool acc = false) const;
 
   [[nodiscard]] uint32_t N() const { return n_; }
   [[nodiscard]] uint32_t Rows() const { return rows_; }
@@ -113,7 +104,7 @@ class Pbuf {
   uint32_t Add(const std::vector<uint32_t>& values);
   uint32_t Norm(const LayerNorm& norm);
   void Place(DdrImage& image, std::string_view name);
-  void Load(Program& program, std::string_view note) const;
+  [[nodiscard]] Tile Load(Program& program, std::string_view note) const;
   [[nodiscard]] uint64_t Offset() const { return off_; }
   [[nodiscard]] uint32_t Words() const { return words_; }
 
@@ -125,24 +116,16 @@ class Pbuf {
 
 using Keys = std::map<std::string, uint32_t, std::less<>>;
 
-struct AttentionPlan {
-  uint64_t q = 0;
-  uint64_t k = 0;
-  uint64_t v = 0;
-  uint64_t o = 0;
-  uint32_t queries = 0;
-  uint32_t embed = 0;
-  uint32_t hd = 0;
-  uint32_t keys = 0;
-  uint32_t valid = 0;
-  bool chunk_local = false;
-  bool masked = false;
-  uint64_t mask = 0;
-  uint32_t mask_cs = 0;
-};
+class Params {
+ public:
+  Params(const Tile& tile, const Keys& keys) : tile_(tile), keys_(&keys) {}
 
-void EmitAttention(Program& program, const AttentionPlan& plan,
-                   std::string_view note);
+  [[nodiscard]] compiler::Place At(std::string_view key) const;
+
+ private:
+  Tile tile_;
+  const Keys* keys_;
+};
 
 class HeadWeights {
  public:

@@ -22,9 +22,9 @@ constexpr uint64_t kStrideLimit = uint64_t{1} << 24;
 
 }  // namespace
 
-size_t Ld(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
-          uint32_t rows, uint32_t row_words, uint64_t stride,
-          std::string_view note, DmaKind kind) {
+size_t Ld(Program& program, uint64_t ddr, Mem mem, Place onchip, uint32_t rows,
+          uint32_t row_words, uint64_t stride, std::string_view note,
+          DmaKind kind) {
   Require(stride < kStrideLimit,
           std::format("DMA stride {} is too large", stride));
   return program.Load({.ddr_offset = ddr,
@@ -37,9 +37,8 @@ size_t Ld(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
                       note);
 }
 
-size_t St(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
-          uint32_t rows, uint32_t row_words, uint64_t stride,
-          std::string_view note) {
+size_t St(Program& program, uint64_t ddr, Mem mem, Place onchip, uint32_t rows,
+          uint32_t row_words, uint64_t stride, std::string_view note) {
   Require(stride < kStrideLimit,
           std::format("DMA stride {} is too large", stride));
   return program.Store({.ddr_offset = ddr,
@@ -51,8 +50,8 @@ size_t St(Program& program, uint64_t ddr, Mem mem, uint32_t onchip,
                        note);
 }
 
-uint64_t Place(DdrImage& image, std::string_view name,
-               std::span<const std::byte> data) {
+uint64_t PlaceData(DdrImage& image, std::string_view name,
+                   std::span<const std::byte> data) {
   const uint64_t offset = image.Alloc(name, data.size());
   image.Put(offset, data);
   return offset;
@@ -97,9 +96,9 @@ W8Region PlaceW8(DdrImage& image, std::string_view name, const Matrix& weights,
                  uint32_t rows) {
   const W8Planes planes = SplitW8(EncodeMxint8(PadRows(weights, rows)));
   const uint64_t hi =
-      Place(image, std::format("{}_hi", name), PackWbuf(planes.hi));
+      PlaceData(image, std::format("{}_hi", name), PackWbuf(planes.hi));
   const uint64_t lo =
-      Place(image, std::format("{}_lo", name), PackWbuf(planes.lo));
+      PlaceData(image, std::format("{}_lo", name), PackWbuf(planes.lo));
   return {.hi = hi, .lo = lo};
 }
 

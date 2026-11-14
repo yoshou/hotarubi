@@ -13,6 +13,7 @@
 #include "hotarubi/exact.hpp"
 #include "hotarubi/sparsedrive_layout.hpp"
 #include "isa.hpp"
+#include "kernels.hpp"
 #include "program.hpp"
 #include "sparsedrive_head.hpp"
 #include "sparsedrive_kernels.hpp"
@@ -26,6 +27,8 @@ namespace hotarubi::compiler::sparsedrive {
 namespace {
 
 constexpr uint32_t kNa = 900;
+constexpr uint32_t kQuantQuads = 32;
+constexpr uint32_t kChunkKeys = kQueue * 32;
 constexpr std::string_view kModule = "head.motion_plan_head";
 constexpr std::array<int64_t, 8> kHalves = {0, 1, 2, 3, 4, 6, 8, 12};
 
@@ -505,172 +508,225 @@ void MotionHead::PlaceParams() {
   PutEntries(image_, rep_ego_, rep);
 }
 
-void MotionHead::LoadRows(const Rows& rows, uint32_t j, uint32_t m,
-                          uint32_t dst, std::string_view note) {
+Place MotionHead::Pb(std::string_view key) const {
+  return Params(pb_, *keys_).At(key);
+}
+
+void MotionHead::LoadRows(const Rows& rows, uint32_t j, uint32_t m, Place dst,
+                          std::string_view note) {
   program_->Load(Tokens(rows.Addr(j), Mem::kFbuf, dst, m, rows.Tok()), note);
 }
 
-void MotionHead::StoreRows(const Rows& rows, uint32_t j, uint32_t m,
-                           uint32_t src, std::string_view note) {
+Tile MotionHead::LoadRows(const Rows& rows, uint32_t j, uint32_t m,
+                          std::string_view note) {
+  const Tile tile = program_->Alloc(Mem::kFbuf, m / 4 * (rows.cols / 8));
+  LoadRows(rows, j, m, tile.At(), note);
+  return tile;
+}
+
+void MotionHead::StoreRows(const Rows& rows, uint32_t j, uint32_t m, Place src,
+                           std::string_view note) {
   program_->Store(Tokens(rows.Addr(j), Mem::kFbuf, src, m, rows.Tok()), note);
 }
 
-void MotionHead::QuantRows(const Rows& rows, uint32_t n, uint32_t abuf,
+void MotionHead::QuantRows(const Rows& rows, uint32_t n, Place abuf,
                            std::string_view note, const Rows* second,
-                           std::optional<uint32_t> abuf_plain) {
-  constexpr std::array<uint32_t, 2> kSlots = {0, 1024};
-  constexpr std::array<uint32_t, 2> kSecond = {2048, 3072};
+                           std::optional<Place> abuf_plain) {
   const uint32_t words = rows.cols / 8;
-  const uint32_t blocks = rows.cols / 32;
-  for (const Tile& tile : Tiles(n, 128)) {
-    const uint32_t slot = kSlots[tile.t % 2];
-    const uint32_t rq = tile.m / 4;
-    LoadRows(rows, tile.i0, tile.m, slot,
-             std::format("{} ld t{}", note, tile.t));
-    if (second != nullptr) {
-      LoadRows(*second, tile.i0, 4 * rq, kSecond[tile.t % 2],
-               std::format("{} ld 2nd t{}", note, tile.t));
+  QuantizeHook add;
+  if (second != nullptr) {
+    add = [&](const Tile& x, uint32_t quad, uint32_t quads) {
+      const uint32_t t = quad / kQuantQuads;
+      const Tile b = LoadRows(*second, 4 * quad, 4 * quads,
+                              std::format("{} ld 2nd t{}", note, t));
       if (abuf_plain.has_value()) {
         program_->Vec({.op = VecOp::kCopy,
-                       .src = slot,
-                       .dst = *abuf_plain + ((tile.i0 / 4) * blocks),
-                       .rows_q = rq,
+                       .src = x.At(),
+                       .dst = *abuf_plain + (quad * (words / 4)),
+                       .rows_q = quads,
                        .n8 = words,
                        .q = true},
-                      std::format("{} Q(plain) t{}", note, tile.t));
+                      std::format("{} Q(plain) t{}", note, t));
       }
       program_->Vec({.op = VecOp::kAdd,
-                     .src = slot,
-                     .src2 = kSecond[tile.t % 2],
-                     .dst = slot,
-                     .rows_q = rq,
+                     .src = x.At(),
+                     .src2 = b.At(),
+                     .dst = x.At(),
+                     .rows_q = quads,
                      .n8 = words},
-                    std::format("{} add t{}", note, tile.t));
-    }
-    program_->Vec({.op = VecOp::kCopy,
-                   .src = slot,
-                   .dst = abuf + ((tile.i0 / 4) * blocks),
-                   .rows_q = rq,
-                   .n8 = words,
-                   .q = true},
-                  std::format("{} quant t{}", note, tile.t));
+                    std::format("{} add t{}", note, t));
+    };
   }
+  EmitQuantize(*program_,
+               {.x = rows.Addr(0),
+                .quads = n / 4,
+                .words = words,
+                .tile_quads = kQuantQuads,
+                .tokens = true,
+                .dst = abuf},
+               note, add);
 }
 
 void MotionHead::ProjStore(const Lin& lin, const std::vector<Piece>& pieces,
                            uint32_t astride, uint32_t n, uint64_t out,
                            const std::string& key, std::string_view note) {
-  constexpr std::array<uint32_t, 2> kSlots = {0, 1024};
-  constexpr std::array<uint32_t, 2> kTmp = {7424, 7680};
   const uint32_t blocks = lin.Groups() / 4;
-  lin.Load(*program_, 0, note);
-  for (const Tile& tile : Tiles(n, 64)) {
-    const uint32_t c = kSlots[tile.t % 2];
-    const uint32_t q0 = tile.i0 / 4;
-    lin.Gemm(*program_, q0 * astride, astride, tile.m, c, 0,
-             std::format("{} t{}", note, tile.t), pieces);
+  const Tile weights = lin.Load(*program_, note);
+  for (const Band& band : Bands(n, 64)) {
+    const uint32_t q0 = band.i0 / 4;
+    const uint32_t rq = band.m / 4;
+    const Tile c = program_->Alloc(Mem::kFbuf, rq * lin.Groups());
+    lin.Gemm(*program_, pieces, q0 * astride, astride, band.m, c.At(), weights,
+             std::format("{} t{}", note, band.t));
+    const Tile q = program_->Alloc(Mem::kAbuf, rq * blocks);
     program_->Vec({.op = VecOp::kAddP,
-                   .src = c,
-                   .dst = kTmp[tile.t % 2],
-                   .rows_q = tile.m / 4,
+                   .src = c.At(),
+                   .dst = q.At(),
+                   .rows_q = rq,
                    .n8 = lin.Groups(),
-                   .p_base = keys_.at(key),
+                   .p_base = Pb(key),
                    .q = true},
-                  std::format("{} bias+Q t{}", note, tile.t));
+                  std::format("{} bias+Q t{}", note, band.t));
     program_->Store(Words(out + (uint64_t{q0} * blocks * kWordA), Mem::kAbuf,
-                          kTmp[tile.t % 2], (tile.m / 4) * blocks),
-                    std::format("{} st t{}", note, tile.t));
+                          q.At(), rq * blocks),
+                    std::format("{} st t{}", note, band.t));
   }
 }
 
 void MotionHead::ProjStream(const Lin& lin, const Rows& rows_a,
                             const Rows* rows_b, uint32_t n, uint64_t out,
-                            const std::string& key, std::string_view note,
-                            const Lin* pre) {
+                            const std::string& key, std::string_view note) {
   const uint32_t blocks = lin.Groups() / 4;
-  constexpr uint32_t kA1 = 0;
-  constexpr uint32_t kA2 = 16 * kKbD;
-  constexpr uint32_t kAf = 32 * kKbD;
-  const std::array<uint32_t, 2> tmp = {48 * kKbD, (48 * kKbD) + (16 * blocks)};
-  lin.Load(*program_, 0, note);
-  if (pre != nullptr) {
-    pre->Load(*program_, 1024, std::format("{} pre", note));
-  }
-  for (const Tile& tile : Tiles(n, 64)) {
-    const uint32_t rq = tile.m / 4;
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    LoadRows(rows_a, tile.i0, tile.m, slot,
-             std::format("{} ld a t{}", note, tile.t));
+  const Tile weights = lin.Load(*program_, note);
+  for (const Band& band : Bands(n, 64)) {
+    const uint32_t rq = band.m / 4;
+    const Tile a = LoadRows(rows_a, band.i0, band.m,
+                            std::format("{} ld a t{}", note, band.t));
+    const Tile qa = program_->Alloc(Mem::kAbuf, rq * kKbD);
     program_->Vec({.op = VecOp::kCopy,
-                   .src = slot,
-                   .dst = kA1,
+                   .src = a.At(),
+                   .dst = qa.At(),
                    .rows_q = rq,
                    .n8 = kNwD,
                    .q = true},
-                  std::format("{} Q(a) t{}", note, tile.t));
+                  std::format("{} Q(a) t{}", note, band.t));
     std::vector<Piece> pieces;
-    uint32_t astride = kKbD;
-    if (pre != nullptr) {
-      pre->Gemm(*program_, kA1, kKbD, tile.m, 2048, 1024,
-                std::format("{} pre t{}", note, tile.t));
+    if (rows_b != nullptr) {
+      const Tile b = LoadRows(*rows_b, band.i0, band.m,
+                              std::format("{} ld b t{}", note, band.t));
+      const Tile qb = program_->Alloc(Mem::kAbuf, rq * kKbD);
       program_->Vec({.op = VecOp::kCopy,
-                     .src = 2048,
-                     .dst = kAf,
-                     .rows_q = rq,
-                     .n8 = pre->Groups(),
-                     .q = true},
-                    std::format("{} Q(pre) t{}", note, tile.t));
-      astride = pre->Groups() / 4;
-      pieces = {{.a_offset = kAf, .kb_offset = 0, .kb = astride}};
-    } else if (rows_b != nullptr) {
-      LoadRows(*rows_b, tile.i0, tile.m, 2048,
-               std::format("{} ld b t{}", note, tile.t));
-      program_->Vec({.op = VecOp::kCopy,
-                     .src = 2048,
-                     .dst = kA2,
+                     .src = b.At(),
+                     .dst = qb.At(),
                      .rows_q = rq,
                      .n8 = kNwD,
                      .q = true},
-                    std::format("{} Q(b) t{}", note, tile.t));
-      pieces = {{.a_offset = kA1, .kb_offset = 0, .kb = kKbD},
-                {.a_offset = kA2, .kb_offset = kKbD, .kb = kKbD}};
+                    std::format("{} Q(b) t{}", note, band.t));
+      pieces = {{.a = qa.At(), .kb_offset = 0, .kb = kKbD},
+                {.a = qb.At(), .kb_offset = kKbD, .kb = kKbD}};
     } else {
-      pieces = {{.a_offset = kA1, .kb_offset = 0, .kb = kKbD}};
+      pieces = {{.a = qa.At(), .kb_offset = 0, .kb = kKbD}};
     }
-    lin.Gemm(*program_, 0, astride, tile.m, 3072, 0,
-             std::format("{} t{}", note, tile.t), pieces);
+    const Tile c = program_->Alloc(Mem::kFbuf, rq * lin.Groups());
+    lin.Gemm(*program_, pieces, 0, kKbD, band.m, c.At(), weights,
+             std::format("{} t{}", note, band.t));
+    const Tile q = program_->Alloc(Mem::kAbuf, rq * blocks);
     program_->Vec({.op = VecOp::kAddP,
-                   .src = 3072,
-                   .dst = tmp[tile.t % 2],
+                   .src = c.At(),
+                   .dst = q.At(),
                    .rows_q = rq,
                    .n8 = lin.Groups(),
-                   .p_base = keys_.at(key),
+                   .p_base = Pb(key),
                    .q = true},
-                  std::format("{} bias+Q t{}", note, tile.t));
-    program_->Store(Words(out + (uint64_t{tile.i0 / 4} * blocks * kWordA),
-                          Mem::kAbuf, tmp[tile.t % 2], rq * blocks),
-                    std::format("{} st t{}", note, tile.t));
+                  std::format("{} bias+Q t{}", note, band.t));
+    program_->Store(Words(out + (uint64_t{band.i0 / 4} * blocks * kWordA),
+                          Mem::kAbuf, q.At(), rq * blocks),
+                    std::format("{} st t{}", note, band.t));
+  }
+}
+
+void MotionHead::ProjThrough(const Lin& lin, const Lin& pre, const Rows& rows,
+                             uint32_t n, uint64_t out, const std::string& key,
+                             std::string_view note) {
+  constexpr uint32_t kChunk = 1024;
+  const uint32_t blocks = lin.Groups() / 4;
+  const uint32_t mid = pre.Groups() / 4;
+  for (const Band& chunk : Bands(n, kChunk)) {
+    const Tile hidden = program_->Alloc(Mem::kAbuf, chunk.m / 4 * mid);
+    const Tile first =
+        pre.Load(*program_, std::format("{} pre ch{}", note, chunk.t));
+    for (const Band& band : Bands(chunk.m, 64)) {
+      const uint32_t rq = band.m / 4;
+      const Tile a =
+          LoadRows(rows, chunk.i0 + band.i0, band.m,
+                   std::format("{} ld ch{} t{}", note, chunk.t, band.t));
+      const Tile qa = program_->Alloc(Mem::kAbuf, rq * kKbD);
+      program_->Vec({.op = VecOp::kCopy,
+                     .src = a.At(),
+                     .dst = qa.At(),
+                     .rows_q = rq,
+                     .n8 = kNwD,
+                     .q = true},
+                    std::format("{} Q(a) ch{} t{}", note, chunk.t, band.t));
+      const Tile c = program_->Alloc(Mem::kFbuf, rq * pre.Groups());
+      pre.Gemm(*program_, pre.Input(qa.At()), 0, kKbD, band.m, c.At(), first,
+               std::format("{} pre ch{} t{}", note, chunk.t, band.t));
+      program_->Vec({.op = VecOp::kCopy,
+                     .src = c.At(),
+                     .dst = hidden.At((band.i0 / 4) * mid),
+                     .rows_q = rq,
+                     .n8 = pre.Groups(),
+                     .q = true},
+                    std::format("{} Q(pre) ch{} t{}", note, chunk.t, band.t));
+    }
+    const Tile second =
+        lin.Load(*program_, std::format("{} ch{}", note, chunk.t));
+    for (const Band& band : Bands(chunk.m, 64)) {
+      const uint32_t rq = band.m / 4;
+      const Tile c = program_->Alloc(Mem::kFbuf, rq * lin.Groups());
+      lin.Gemm(*program_, lin.Input(hidden.At()), (band.i0 / 4) * mid, mid,
+               band.m, c.At(), second,
+               std::format("{} ch{} t{}", note, chunk.t, band.t));
+      const Tile q = program_->Alloc(Mem::kAbuf, rq * blocks);
+      program_->Vec({.op = VecOp::kAddP,
+                     .src = c.At(),
+                     .dst = q.At(),
+                     .rows_q = rq,
+                     .n8 = lin.Groups(),
+                     .p_base = Pb(key),
+                     .q = true},
+                    std::format("{} bias+Q ch{} t{}", note, chunk.t, band.t));
+      program_->Store(
+          Words(out + (uint64_t{(chunk.i0 + band.i0) / 4} * blocks * kWordA),
+                Mem::kAbuf, q.At(), rq * blocks),
+          std::format("{} st ch{} t{}", note, chunk.t, band.t));
+    }
   }
 }
 
 void MotionHead::AttentionCore(const MotionLayer& layer, std::string_view note,
                                uint32_t keys, uint32_t valid, bool chunk_local,
                                bool masked) {
-  EmitAttention(*program_,
-                {.q = qb_,
-                 .k = kb_,
-                 .v = vb_,
-                 .o = ob_,
-                 .queries = kMotionQueries,
-                 .embed = layer.embed,
-                 .hd = layer.hd,
-                 .keys = keys,
-                 .valid = valid,
-                 .chunk_local = chunk_local,
-                 .masked = masked,
-                 .mask = mask,
-                 .mask_cs = mask_cs},
-                note);
+  EmitAttention(
+      *program_,
+      {.q = qb_,
+       .k = kb_,
+       .v = vb_,
+       .o = ob_,
+       .heads = kHeads,
+       .kv_heads = kHeads,
+       .rows = kMotionQueries,
+       .chunk_quads = 8,
+       .embed = layer.embed,
+       .kv_blocks = layer.embed / 32,
+       .hd = layer.hd,
+       .keys = chunk_local ? kChunkKeys : keys,
+       .valid = {{.quad = 0, .keys = chunk_local ? kChunkKeys : valid}},
+       .chunk_local = chunk_local,
+       .scale = layer.hd != 64,
+       .mask = masked ? std::optional<uint64_t>(mask) : std::nullopt,
+       .mask_stride = mask_cs},
+      note);
 }
 
 void MotionHead::OutProj(const MotionLayer& layer, std::string_view note,
@@ -679,108 +735,108 @@ void MotionHead::OutProj(const MotionLayer& layer, std::string_view note,
   const Rows& xo = x[(cur_x + 1) % 3];
   const uint32_t kbq = layer.embed / 32;
   const uint32_t nwq = layer.embed / 8;
-  OnChip a(kAbufWords);
-  const uint32_t ao = a.Take(kMotionQueries / 4 * kbq);
-  const std::array<uint32_t, 2> ot = nwq == 64
-                                         ? std::array<uint32_t, 2>{0, 2048}
-                                         : std::array<uint32_t, 2>{0, 1024};
-  for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-    const uint32_t slot = ot[tile.t % 2];
-    const uint32_t q0 = tile.i0 / 4;
-    program_->Load(Words(ob_ + (uint64_t{q0} * nwq * kWordF), Mem::kFbuf, slot,
-                         (tile.m / 4) * nwq),
-                   std::format("{} ld O t{}", note, tile.t));
+  const Tile ao = program_->Alloc(Mem::kAbuf, kMotionQueries / 4 * kbq);
+  for (const Band& band : Bands(kMotionQueries, 128)) {
+    const uint32_t q0 = band.i0 / 4;
+    const uint32_t rq = band.m / 4;
+    const Tile o = program_->Alloc(Mem::kFbuf, rq * nwq);
+    program_->Load(Words(ob_ + (uint64_t{q0} * nwq * kWordF), Mem::kFbuf,
+                         o.At(), rq * nwq),
+                   std::format("{} ld O t{}", note, band.t));
     program_->Vec({.op = VecOp::kCopy,
-                   .src = slot,
-                   .dst = ao + (q0 * kbq),
-                   .rows_q = tile.m / 4,
+                   .src = o.At(),
+                   .dst = ao.At(q0 * kbq),
+                   .rows_q = rq,
                    .n8 = nwq,
                    .q = true},
-                  std::format("{} Q(O) t{}", note, tile.t));
+                  std::format("{} Q(O) t{}", note, band.t));
   }
   const Lin& op = layer.attn[3];
-  op.Load(*program_, 0, std::format("{} out_proj", note));
-  constexpr std::array<uint32_t, 2> kCt = {0, 512};
-  constexpr std::array<uint32_t, 2> kXt = {1024, 1536};
-  const uint32_t pbo = keys_.at(std::format("{} o", note));
+  const Tile weights = op.Load(*program_, std::format("{} out_proj", note));
+  const Place pbo = Pb(std::format("{} o", note));
   if (decoupled) {
-    const std::array<uint32_t, 2> af = {a.Take(kMotionQueries / 4 * kKbD),
-                                        a.Take(kMotionQueries / 4 * kKbD)};
+    const std::array<Tile, 2> af = {
+        program_->Alloc(Mem::kAbuf, kMotionQueries / 4 * kKbD),
+        program_->Alloc(Mem::kAbuf, kMotionQueries / 4 * kKbD)};
     for (uint32_t half = 0; half < 2; ++half) {
       const Rows& res = half == 0 ? xr : e;
-      for (const Tile& tile : Tiles(kMotionQueries, 64)) {
-        const uint32_t c = kCt[tile.t % 2];
-        const uint32_t xt = kXt[tile.t % 2];
-        const uint32_t q0 = tile.i0 / 4;
-        program_->Gemm({.a_base = ao + (q0 * kbq),
+      for (const Band& band : Bands(kMotionQueries, 64)) {
+        const uint32_t q0 = band.i0 / 4;
+        const uint32_t rq = band.m / 4;
+        const Tile c = program_->Alloc(Mem::kFbuf, rq * kNwD);
+        program_->Gemm({.a_base = ao.At(q0 * kbq),
                         .a_stride = kbq,
                         .kb = kbq,
-                        .m = tile.m,
-                        .w_base = half * 32 * op.Kb(),
+                        .m = band.m,
+                        .w_base = weights.At(half * 32 * op.Kb()),
                         .w_stride = op.Kb(),
                         .n8 = 32,
-                        .c_base = c},
-                       std::format("{} out_proj h{} t{}", note, half, tile.t));
-        LoadRows(res, tile.i0, tile.m, xt,
-                 std::format("{} ld identity h{} t{}", note, half, tile.t));
+                        .c_base = c.At()},
+                       std::format("{} out_proj h{} t{}", note, half, band.t));
+        const Tile identity =
+            LoadRows(res, band.i0, band.m,
+                     std::format("{} ld identity h{} t{}", note, half, band.t));
         program_->Vec({.op = VecOp::kAddP,
-                       .src = c,
-                       .dst = c,
-                       .rows_q = tile.m / 4,
+                       .src = c.At(),
+                       .dst = c.At(),
+                       .rows_q = rq,
                        .n8 = kNwD,
                        .p_base = pbo + (half * (kNwD / 4))},
-                      std::format("{} bias h{} t{}", note, half, tile.t));
+                      std::format("{} bias h{} t{}", note, half, band.t));
         program_->Vec({.op = VecOp::kAdd,
-                       .src = c,
-                       .src2 = xt,
-                       .dst = c,
-                       .rows_q = tile.m / 4,
+                       .src = c.At(),
+                       .src2 = identity.At(),
+                       .dst = c.At(),
+                       .rows_q = rq,
                        .n8 = kNwD},
-                      std::format("{} + identity h{} t{}", note, half, tile.t));
+                      std::format("{} + identity h{} t{}", note, half, band.t));
         program_->Vec({.op = VecOp::kCopy,
-                       .src = c,
-                       .dst = af[half] + (q0 * kKbD),
-                       .rows_q = tile.m / 4,
+                       .src = c.At(),
+                       .dst = af.at(half).At(q0 * kKbD),
+                       .rows_q = rq,
                        .n8 = kNwD,
                        .q = true},
-                      std::format("{} Q h{} t{}", note, half, tile.t));
+                      std::format("{} Q h{} t{}", note, half, band.t));
       }
     }
-    p_.fc_after.Load(*program_, 0, std::format("{} fc_after", note));
-    for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-      const uint32_t c = tile.t % 2 == 0 ? 0 : 1024;
-      p_.fc_after.Gemm(*program_, (tile.i0 / 4) * kKbD, kKbD, tile.m, c, 0,
-                       std::format("{} fc_after t{}", note, tile.t),
-                       {{.a_offset = af[0], .kb_offset = 0, .kb = kKbD},
-                        {.a_offset = af[1], .kb_offset = kKbD, .kb = kKbD}});
-      StoreRows(xo, tile.i0, tile.m, c,
-                std::format("{} st x t{}", note, tile.t));
+    const Tile wa =
+        p_.fc_after.Load(*program_, std::format("{} fc_after", note));
+    for (const Band& band : Bands(kMotionQueries, 128)) {
+      const Tile c =
+          program_->Alloc(Mem::kFbuf, band.m / 4 * p_.fc_after.Groups());
+      p_.fc_after.Gemm(*program_,
+                       {{.a = af[0].At(), .kb_offset = 0, .kb = kKbD},
+                        {.a = af[1].At(), .kb_offset = kKbD, .kb = kKbD}},
+                       (band.i0 / 4) * kKbD, kKbD, band.m, c.At(), wa,
+                       std::format("{} fc_after t{}", note, band.t));
+      StoreRows(xo, band.i0, band.m, c.At(),
+                std::format("{} st x t{}", note, band.t));
     }
   } else {
-    for (const Tile& tile : Tiles(kMotionQueries, 64)) {
-      const uint32_t c = kCt[tile.t % 2];
-      const uint32_t xt = kXt[tile.t % 2];
-      const uint32_t q0 = tile.i0 / 4;
-      op.Gemm(*program_, ao + (q0 * kbq), kbq, tile.m, c, 0,
-              std::format("{} out_proj t{}", note, tile.t));
-      LoadRows(xr, tile.i0, tile.m, xt,
-               std::format("{} ld identity t{}", note, tile.t));
+    for (const Band& band : Bands(kMotionQueries, 64)) {
+      const uint32_t q0 = band.i0 / 4;
+      const uint32_t rq = band.m / 4;
+      const Tile c = program_->Alloc(Mem::kFbuf, rq * kNwD);
+      op.Gemm(*program_, op.Input(ao.At()), q0 * kbq, kbq, band.m, c.At(),
+              weights, std::format("{} out_proj t{}", note, band.t));
+      const Tile identity = LoadRows(
+          xr, band.i0, band.m, std::format("{} ld identity t{}", note, band.t));
       program_->Vec({.op = VecOp::kAddP,
-                     .src = c,
-                     .dst = c,
-                     .rows_q = tile.m / 4,
+                     .src = c.At(),
+                     .dst = c.At(),
+                     .rows_q = rq,
                      .n8 = kNwD,
                      .p_base = pbo},
-                    std::format("{} bias t{}", note, tile.t));
+                    std::format("{} bias t{}", note, band.t));
       program_->Vec({.op = VecOp::kAdd,
-                     .src = c,
-                     .src2 = xt,
-                     .dst = c,
-                     .rows_q = tile.m / 4,
+                     .src = c.At(),
+                     .src2 = identity.At(),
+                     .dst = c.At(),
+                     .rows_q = rq,
                      .n8 = kNwD},
-                    std::format("{} + identity t{}", note, tile.t));
-      StoreRows(xo, tile.i0, tile.m, c,
-                std::format("{} st x t{}", note, tile.t));
+                    std::format("{} + identity t{}", note, band.t));
+      StoreRows(xo, band.i0, band.m, c.At(),
+                std::format("{} st x t{}", note, band.t));
     }
   }
   cur_x = (cur_x + 1) % 3;
@@ -791,9 +847,8 @@ void MotionHead::TempGnn(const MotionLayer& layer, std::string_view note) {
              std::format("{} q", note), std::format("{} q", note));
   ProjStream(layer.attn[1], tx, &te, kTemporalKeys, kb_,
              std::format("{} k", note), std::format("{} k", note));
-  ProjStream(layer.attn[2], tx, nullptr, kTemporalKeys, vb_,
-             std::format("{} v", note), std::format("{} v", note),
-             &p_.fc_before);
+  ProjThrough(layer.attn[2], p_.fc_before, tx, kTemporalKeys, vb_,
+              std::format("{} v", note), std::format("{} v", note));
   AttentionCore(layer, note, kTemporalKeys, kTemporalKeys, true, true);
   OutProj(layer, note, true);
 }
@@ -803,28 +858,28 @@ void MotionHead::Gnn(const MotionLayer& layer, std::string_view note) {
              std::format("{} q", note), std::format("{} q", note));
   ProjStream(layer.attn[1], xsel, &esel, kSelectedPadded, kb_,
              std::format("{} k", note), std::format("{} k", note));
-  ProjStream(layer.attn[2], xsel, nullptr, kSelectedPadded, vb_,
-             std::format("{} v", note), std::format("{} v", note),
-             &p_.fc_before);
+  ProjThrough(layer.attn[2], p_.fc_before, xsel, kSelectedPadded, vb_,
+              std::format("{} v", note), std::format("{} v", note));
   AttentionCore(layer, note, kSelectedPadded, kSelected, false, false);
   OutProj(layer, note, true);
 }
 
 void MotionHead::CrossGnn(const MotionLayer& layer, std::string_view note) {
-  constexpr uint32_t kAq = 0;
-  constexpr uint32_t kAk = kMotionQueries / 4 * kKbD;
-  constexpr uint32_t kAv = kAk + (kMapSelectedPadded / 4 * kKbD);
-  QuantRows(x[cur_x], kMotionQueries, kAq, std::format("{} Q(x+E)", note), &e);
-  QuantRows(mxsel, kMapSelectedPadded, kAk, std::format("{} Q(mx+mE)", note),
-            &mesel, kAv);
-  ProjStore(layer.attn[0], {{.a_offset = kAq, .kb_offset = 0, .kb = kKbD}},
-            kKbD, kMotionQueries, qb_, std::format("{} q", note),
+  const Tile aq = program_->Alloc(Mem::kAbuf, kMotionQueries / 4 * kKbD);
+  const Tile ak = program_->Alloc(Mem::kAbuf, kMapSelectedPadded / 4 * kKbD);
+  const Tile av = program_->Alloc(Mem::kAbuf, kMapSelectedPadded / 4 * kKbD);
+  QuantRows(x[cur_x], kMotionQueries, aq.At(), std::format("{} Q(x+E)", note),
+            &e);
+  QuantRows(mxsel, kMapSelectedPadded, ak.At(),
+            std::format("{} Q(mx+mE)", note), &mesel, av.At());
+  ProjStore(layer.attn[0], {{.a = aq.At(), .kb_offset = 0, .kb = kKbD}}, kKbD,
+            kMotionQueries, qb_, std::format("{} q", note),
             std::format("{} q", note));
-  ProjStore(layer.attn[1], {{.a_offset = kAk, .kb_offset = 0, .kb = kKbD}},
-            kKbD, kMapSelectedPadded, kb_, std::format("{} k", note),
+  ProjStore(layer.attn[1], {{.a = ak.At(), .kb_offset = 0, .kb = kKbD}}, kKbD,
+            kMapSelectedPadded, kb_, std::format("{} k", note),
             std::format("{} k", note));
-  ProjStore(layer.attn[2], {{.a_offset = kAv, .kb_offset = 0, .kb = kKbD}},
-            kKbD, kMapSelectedPadded, vb_, std::format("{} v", note),
+  ProjStore(layer.attn[2], {{.a = av.At(), .kb_offset = 0, .kb = kKbD}}, kKbD,
+            kMapSelectedPadded, vb_, std::format("{} v", note),
             std::format("{} v", note));
   AttentionCore(layer, note, kMapSelectedPadded, kMapSelected, false, false);
   OutProj(layer, note, false);
@@ -833,19 +888,21 @@ void MotionHead::CrossGnn(const MotionLayer& layer, std::string_view note) {
 void MotionHead::Norm(std::string_view note) {
   const Rows& xr = x[cur_x];
   const Rows& xo = x[(cur_x + 1) % 3];
-  for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    LoadRows(xr, tile.i0, tile.m, slot, std::format("{} ld t{}", note, tile.t));
+  for (const Band& band : Bands(kMotionQueries, 128)) {
+    const uint32_t rq = band.m / 4;
+    const Tile in =
+        LoadRows(xr, band.i0, band.m, std::format("{} ld t{}", note, band.t));
+    const Tile out = program_->Alloc(Mem::kFbuf, rq * kNwD);
     program_->Vec({.op = VecOp::kLayerNorm,
-                   .src = slot,
-                   .dst = 2048,
-                   .rows_q = tile.m / 4,
+                   .src = in.At(),
+                   .dst = out.At(),
+                   .rows_q = rq,
                    .n8 = kNwD,
-                   .p_base = keys_.at(std::string(note)),
+                   .p_base = Pb(note),
                    .imm = LnEpsBits()},
-                  std::format("{} LN t{}", note, tile.t));
-    StoreRows(xo, tile.i0, tile.m, 2048,
-              std::format("{} st t{}", note, tile.t));
+                  std::format("{} LN t{}", note, band.t));
+    StoreRows(xo, band.i0, band.m, out.At(),
+              std::format("{} st t{}", note, band.t));
   }
   cur_x = (cur_x + 1) % 3;
 }
@@ -853,415 +910,365 @@ void MotionHead::Norm(std::string_view note) {
 void MotionHead::Ffn(const MotionLayer& layer, std::string_view note) {
   const Rows& xr = x[cur_x];
   const Rows& xo = x[(cur_x + 1) % 3];
-  OnChip a(kAbufWords);
-  const uint32_t aff = a.Take(kMotionQueries / 4 * kKbD);
-  const uint32_t ah = a.Take(kMotionQueries / 4 * 16);
-  for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    LoadRows(xr, tile.i0, tile.m, slot,
-             std::format("{} ld x t{}", note, tile.t));
+  const Tile aff = program_->Alloc(Mem::kAbuf, kMotionQueries / 4 * kKbD);
+  const Tile ah = program_->Alloc(Mem::kAbuf, kMotionQueries / 4 * 16);
+  for (const Band& band : Bands(kMotionQueries, 128)) {
+    const uint32_t rq = band.m / 4;
+    const Tile in =
+        LoadRows(xr, band.i0, band.m, std::format("{} ld x t{}", note, band.t));
+    const Tile scratch = program_->Alloc(Mem::kFbuf, rq * kNwD);
     program_->Vec({.op = VecOp::kLayerNorm,
-                   .src = slot,
-                   .dst = aff + ((tile.i0 / 4) * kKbD),
-                   .rows_q = tile.m / 4,
+                   .src = in.At(),
+                   .dst = aff.At((band.i0 / 4) * kKbD),
+                   .rows_q = rq,
                    .n8 = kNwD,
-                   .p_base = keys_.at(std::format("{} ln", note)),
+                   .p_base = Pb(std::format("{} ln", note)),
                    .imm = LnEpsBits(),
                    .q = true,
-                   .scratch = 2048},
-                  std::format("{} LN+Q t{}", note, tile.t));
+                   .scratch = scratch.At()},
+                  std::format("{} LN+Q t{}", note, band.t));
   }
-  layer.fc1.Load(*program_, 0, std::format("{} fc1", note));
-  layer.fc2.Load(*program_, 1024, std::format("{} fc2", note));
-  for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-    const uint32_t q0 = tile.i0 / 4;
-    const uint32_t rq = tile.m / 4;
-    layer.fc1.Gemm(*program_, aff + (q0 * kKbD), kKbD, tile.m, 0, 0,
-                   std::format("{} fc1 t{}", note, tile.t));
+  const Tile w1 = layer.fc1.Load(*program_, std::format("{} fc1", note));
+  const Tile w2 = layer.fc2.Load(*program_, std::format("{} fc2", note));
+  for (const Band& band : Bands(kMotionQueries, 128)) {
+    const uint32_t q0 = band.i0 / 4;
+    const uint32_t rq = band.m / 4;
+    const Tile h = program_->Alloc(Mem::kFbuf, rq * layer.fc1.Groups());
+    layer.fc1.Gemm(*program_, layer.fc1.Input(aff.At()), q0 * kKbD, kKbD,
+                   band.m, h.At(), w1, std::format("{} fc1 t{}", note, band.t));
     program_->Vec({.op = VecOp::kAddP,
-                   .src = 0,
-                   .dst = 0,
+                   .src = h.At(),
+                   .dst = h.At(),
                    .rows_q = rq,
                    .n8 = 64,
-                   .p_base = keys_.at(std::format("{} fc1", note))},
-                  std::format("{} fc1 bias t{}", note, tile.t));
+                   .p_base = Pb(std::format("{} fc1", note))},
+                  std::format("{} fc1 bias t{}", note, band.t));
     program_->Vec({.op = VecOp::kRelu,
-                   .src = 0,
-                   .dst = ah + (q0 * 16),
+                   .src = h.At(),
+                   .dst = ah.At(q0 * 16),
                    .rows_q = rq,
                    .n8 = 64,
                    .q = true},
-                  std::format("{} fc1 relu+Q t{}", note, tile.t));
+                  std::format("{} fc1 relu+Q t{}", note, band.t));
   }
-  layer.idf.Load(*program_, 0, std::format("{} idf", note));
-  for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-    const uint32_t q0 = tile.i0 / 4;
-    const uint32_t rq = tile.m / 4;
-    const uint32_t c = tile.t % 2 == 0 ? 2048 : 3072;
-    layer.fc2.Gemm(*program_, ah + (q0 * 16), 16, tile.m, c, 1024,
-                   std::format("{} fc2 t{}", note, tile.t));
-    layer.idf.Gemm(*program_, aff + (q0 * kKbD), kKbD, tile.m, c, 0,
-                   std::format("{} identity_fc t{}", note, tile.t), {}, true);
+  const Tile wi = layer.idf.Load(*program_, std::format("{} idf", note));
+  for (const Band& band : Bands(kMotionQueries, 128)) {
+    const uint32_t q0 = band.i0 / 4;
+    const uint32_t rq = band.m / 4;
+    const Tile c = program_->Alloc(Mem::kFbuf, rq * kNwD);
+    layer.fc2.Gemm(*program_, layer.fc2.Input(ah.At()), q0 * 16, 16, band.m,
+                   c.At(), w2, std::format("{} fc2 t{}", note, band.t));
+    layer.idf.Gemm(*program_, layer.idf.Input(aff.At()), q0 * kKbD, kKbD,
+                   band.m, c.At(), wi,
+                   std::format("{} identity_fc t{}", note, band.t), true);
     program_->Vec({.op = VecOp::kAddP,
-                   .src = c,
-                   .dst = c,
+                   .src = c.At(),
+                   .dst = c.At(),
                    .rows_q = rq,
                    .n8 = kNwD,
-                   .p_base = keys_.at(std::format("{} fc2", note))},
-                  std::format("{} bias t{}", note, tile.t));
-    StoreRows(xo, tile.i0, tile.m, c, std::format("{} st x t{}", note, tile.t));
+                   .p_base = Pb(std::format("{} fc2", note))},
+                  std::format("{} bias t{}", note, band.t));
+    StoreRows(xo, band.i0, band.m, c.At(),
+              std::format("{} st x t{}", note, band.t));
   }
   cur_x = (cur_x + 1) % 3;
 }
 
-void MotionHead::Mlp(uint32_t a_in, uint32_t n, const MotionLayer& layer,
+void MotionHead::Mlp(const Tile& a_in, uint32_t n, const MotionLayer& layer,
                      const std::string& branch, bool relu_ln,
                      const Rows& rows_out, uint32_t row0,
                      std::string_view note) {
   constexpr uint32_t kTile = 224;
-  constexpr uint32_t kCt = 0;
-  constexpr uint32_t kScratch = 1792;
-  const uint32_t a2 = a_in + (n / 4 * kKbD);
-  const uint32_t a3 = a2 + (n / 4 * kKbD);
-  Require(a3 + (n / 4 * kKbD) <= kAbufWords, "motion MLP exceeds ABUF");
   const std::string bkey = std::format("{} {}", note, branch);
   const auto& lins = layer.branch.find(branch)->second;
-  uint32_t src = a_in;
+  Tile src = a_in;
   for (size_t i = 0; i < lins.size(); ++i) {
-    const uint32_t dst = src != a2 ? a2 : a3;
+    const Tile dst = program_->Alloc(Mem::kAbuf, n / 4 * kKbD);
     const std::string name = std::format("{}{}", bkey, i);
-    lins[i].Load(*program_, 0, name);
-    for (const Tile& tile : Tiles(n, kTile)) {
-      const uint32_t q0 = tile.i0 / 4;
-      const uint32_t rq = tile.m / 4;
-      lins[i].Gemm(*program_, src + (q0 * kKbD), kKbD, tile.m, kCt, 0,
-                   std::format("{} t{}", name, tile.t));
+    const Tile weights = lins[i].Load(*program_, name);
+    for (const Band& band : Bands(n, kTile)) {
+      const uint32_t q0 = band.i0 / 4;
+      const uint32_t rq = band.m / 4;
+      const Tile c = program_->Alloc(Mem::kFbuf, rq * kNwD);
+      lins[i].Gemm(*program_, lins[i].Input(src.At()), q0 * kKbD, kKbD, band.m,
+                   c.At(), weights, std::format("{} t{}", name, band.t));
       program_->Vec({.op = VecOp::kAddP,
-                     .src = kCt,
-                     .dst = kCt,
+                     .src = c.At(),
+                     .dst = c.At(),
                      .rows_q = rq,
                      .n8 = kNwD,
-                     .p_base = keys_.at(name)},
-                    std::format("{} bias t{}", name, tile.t));
+                     .p_base = Pb(name)},
+                    std::format("{} bias t{}", name, band.t));
       if (relu_ln) {
         program_->Vec({.op = VecOp::kRelu,
-                       .src = kCt,
-                       .dst = kCt,
+                       .src = c.At(),
+                       .dst = c.At(),
                        .rows_q = rq,
                        .n8 = kNwD},
-                      std::format("{} relu t{}", name, tile.t));
-        program_->Vec(
-            {.op = VecOp::kLayerNorm,
-             .src = kCt,
-             .dst = dst + (q0 * kKbD),
-             .rows_q = rq,
-             .n8 = kNwD,
-             .p_base = keys_.at(std::format("{} {}_ln{}", note, branch, i)),
-             .imm = LnEpsBits(),
-             .q = true,
-             .scratch = kScratch},
-            std::format("{} LN+Q t{}", name, tile.t));
+                      std::format("{} relu t{}", name, band.t));
+        const Tile scratch = program_->Alloc(Mem::kFbuf, rq * kNwD);
+        program_->Vec({.op = VecOp::kLayerNorm,
+                       .src = c.At(),
+                       .dst = dst.At(q0 * kKbD),
+                       .rows_q = rq,
+                       .n8 = kNwD,
+                       .p_base = Pb(std::format("{} {}_ln{}", note, branch, i)),
+                       .imm = LnEpsBits(),
+                       .q = true,
+                       .scratch = scratch.At()},
+                      std::format("{} LN+Q t{}", name, band.t));
       } else {
         program_->Vec({.op = VecOp::kRelu,
-                       .src = kCt,
-                       .dst = dst + (q0 * kKbD),
+                       .src = c.At(),
+                       .dst = dst.At(q0 * kKbD),
                        .rows_q = rq,
                        .n8 = kNwD,
                        .q = true},
-                      std::format("{} relu+Q t{}", name, tile.t));
+                      std::format("{} relu+Q t{}", name, band.t));
       }
     }
     src = dst;
   }
   const Lin& out = layer.branch_out.find(branch)->second;
-  out.Load(*program_, 0, std::format("{} out", bkey));
-  for (const Tile& tile : Tiles(n, kTile)) {
-    const uint32_t q0 = tile.i0 / 4;
-    const uint32_t rq = tile.m / 4;
-    out.Gemm(*program_, src + (q0 * kKbD), kKbD, tile.m, kCt, 0,
-             std::format("{} out t{}", bkey, tile.t));
+  const Tile weights = out.Load(*program_, std::format("{} out", bkey));
+  for (const Band& band : Bands(n, kTile)) {
+    const uint32_t q0 = band.i0 / 4;
+    const uint32_t rq = band.m / 4;
+    const Tile c = program_->Alloc(Mem::kFbuf, rq * out.Groups());
+    out.Gemm(*program_, out.Input(src.At()), q0 * kKbD, kKbD, band.m, c.At(),
+             weights, std::format("{} out t{}", bkey, band.t));
     program_->Vec({.op = VecOp::kAddP,
-                   .src = kCt,
-                   .dst = kCt,
+                   .src = c.At(),
+                   .dst = c.At(),
                    .rows_q = rq,
                    .n8 = out.Groups(),
-                   .p_base = keys_.at(std::format("{}_out", bkey))},
-                  std::format("{} out bias t{}", bkey, tile.t));
-    StoreRows(rows_out, row0 + tile.i0, tile.m, kCt,
-              std::format("{} out st t{}", bkey, tile.t));
+                   .p_base = Pb(std::format("{}_out", bkey))},
+                  std::format("{} out bias t{}", bkey, band.t));
+    StoreRows(rows_out, row0 + band.i0, band.m, c.At(),
+              std::format("{} out st t{}", bkey, band.t));
   }
 }
 
 void MotionHead::Refine(const MotionLayer& layer, std::string_view note) {
   const Rows& xr = x[cur_x];
-  for (const Tile& tile : Tiles(kMotionQueries, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    LoadRows(xr, tile.i0, tile.m, slot,
-             std::format("{} ld x t{}", note, tile.t));
-    LoadRows(e, tile.i0, tile.m, 2048,
-             std::format("{} ld E t{}", note, tile.t));
+  for (const Band& band : Bands(kMotionQueries, 128)) {
+    const Tile rows =
+        LoadRows(xr, band.i0, band.m, std::format("{} ld x t{}", note, band.t));
+    const Tile embed =
+        LoadRows(e, band.i0, band.m, std::format("{} ld E t{}", note, band.t));
     program_->Vec({.op = VecOp::kAdd,
-                   .src = slot,
-                   .src2 = 2048,
-                   .dst = slot,
-                   .rows_q = tile.m / 4,
+                   .src = rows.At(),
+                   .src2 = embed.At(),
+                   .dst = rows.At(),
+                   .rows_q = band.m / 4,
                    .n8 = kNwD},
-                  std::format("{} x+E t{}", note, tile.t));
-    StoreRows(xe, tile.i0, tile.m, slot,
-              std::format("{} st xE t{}", note, tile.t));
+                  std::format("{} x+E t{}", note, band.t));
+    StoreRows(xe, band.i0, band.m, rows.At(),
+              std::format("{} st xE t{}", note, band.t));
   }
-  for (const Tile& chunk : Tiles(kModeQueriesPadded, kMotionQueries)) {
-    for (const Tile& tile : Tiles(chunk.m, 128)) {
-      const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-      LoadRows(sine, chunk.i0 + tile.i0, tile.m, slot,
-               std::format("{} ld sine ch{} t{}", note, chunk.t, tile.t));
+  for (const Band& chunk : Bands(kModeQueriesPadded, kMotionQueries)) {
+    const uint32_t words = chunk.m / 4 * kKbD;
+    const Tile qs = program_->Alloc(Mem::kAbuf, words);
+    for (const Band& band : Bands(chunk.m, 128)) {
+      const Tile rows =
+          LoadRows(sine, chunk.i0 + band.i0, band.m,
+                   std::format("{} ld sine ch{} t{}", note, chunk.t, band.t));
       program_->Vec({.op = VecOp::kCopy,
-                     .src = slot,
-                     .dst = 4096 + ((tile.i0 / 4) * kKbD),
-                     .rows_q = tile.m / 4,
+                     .src = rows.At(),
+                     .dst = qs.At((band.i0 / 4) * kKbD),
+                     .rows_q = band.m / 4,
                      .n8 = kNwD,
                      .q = true},
-                    std::format("{} Q(sine) t{}", note, tile.t));
+                    std::format("{} Q(sine) t{}", note, band.t));
     }
-    p_.mae0.Load(*program_, 0, std::format("{} mae0", note));
-    p_.mae1.Load(*program_, 1024, std::format("{} mae1", note));
-    for (const Tile& tile : Tiles(chunk.m, 128)) {
-      const uint32_t q0 = tile.i0 / 4;
-      const uint32_t rq = tile.m / 4;
-      p_.mae0.Gemm(*program_, 4096 + (q0 * kKbD), kKbD, tile.m, 0, 0,
-                   std::format("{} mae0 ch{} t{}", note, chunk.t, tile.t));
+    const Tile w0 = p_.mae0.Load(*program_, std::format("{} mae0", note));
+    const Tile w1 = p_.mae1.Load(*program_, std::format("{} mae1", note));
+    const Tile hidden = program_->Alloc(Mem::kAbuf, words);
+    const Tile query = program_->Alloc(Mem::kAbuf, words);
+    for (const Band& band : Bands(chunk.m, 128)) {
+      const uint32_t q0 = band.i0 / 4;
+      const uint32_t rq = band.m / 4;
+      const Tile c0 = program_->Alloc(Mem::kFbuf, rq * kNwD);
+      p_.mae0.Gemm(*program_, p_.mae0.Input(qs.At()), q0 * kKbD, kKbD, band.m,
+                   c0.At(), w0,
+                   std::format("{} mae0 ch{} t{}", note, chunk.t, band.t));
       program_->Vec({.op = VecOp::kAddP,
-                     .src = 0,
-                     .dst = 0,
+                     .src = c0.At(),
+                     .dst = c0.At(),
                      .rows_q = rq,
                      .n8 = kNwD,
-                     .p_base = keys_.at("mae b0")},
-                    std::format("{} mae0 bias t{}", note, tile.t));
-      program_->Vec(
-          {.op = VecOp::kRelu, .src = 0, .dst = 0, .rows_q = rq, .n8 = kNwD},
-          std::format("{} mae0 relu t{}", note, tile.t));
-      program_->Vec({.op = VecOp::kLayerNorm,
-                     .src = 0,
-                     .dst = 6144 + (q0 * kKbD),
-                     .rows_q = rq,
-                     .n8 = kNwD,
-                     .p_base = keys_.at("mae ln"),
-                     .imm = LnEpsBits(),
-                     .q = true,
-                     .scratch = 1024},
-                    std::format("{} mae0 LN+Q t{}", note, tile.t));
-      p_.mae1.Gemm(*program_, 6144 + (q0 * kKbD), kKbD, tile.m, 0, 1024,
-                   std::format("{} mae1 ch{} t{}", note, chunk.t, tile.t));
-      program_->Vec({.op = VecOp::kAddP,
-                     .src = 0,
-                     .dst = 0,
-                     .rows_q = rq,
-                     .n8 = kNwD,
-                     .p_base = keys_.at("mae b1")},
-                    std::format("{} mae1 bias t{}", note, tile.t));
-      program_->Load(
-          Tokens(rep6_ + (uint64_t{chunk.i0 + tile.i0} * 4), Mem::kFbuf, 2048,
-                 tile.m, kKbD, true),
-          std::format("{} ld xE rep6 ch{} t{}", note, chunk.t, tile.t));
-      program_->Vec({.op = VecOp::kAdd,
-                     .src = 0,
-                     .src2 = 2048,
-                     .dst = 0,
+                     .p_base = Pb("mae b0")},
+                    std::format("{} mae0 bias t{}", note, band.t));
+      program_->Vec({.op = VecOp::kRelu,
+                     .src = c0.At(),
+                     .dst = c0.At(),
                      .rows_q = rq,
                      .n8 = kNwD},
-                    std::format("{} + xE t{}", note, tile.t));
+                    std::format("{} mae0 relu t{}", note, band.t));
+      const Tile scratch = program_->Alloc(Mem::kFbuf, rq * kNwD);
+      program_->Vec({.op = VecOp::kLayerNorm,
+                     .src = c0.At(),
+                     .dst = hidden.At(q0 * kKbD),
+                     .rows_q = rq,
+                     .n8 = kNwD,
+                     .p_base = Pb("mae ln"),
+                     .imm = LnEpsBits(),
+                     .q = true,
+                     .scratch = scratch.At()},
+                    std::format("{} mae0 LN+Q t{}", note, band.t));
+      const Tile c1 = program_->Alloc(Mem::kFbuf, rq * kNwD);
+      p_.mae1.Gemm(*program_, p_.mae1.Input(hidden.At()), q0 * kKbD, kKbD,
+                   band.m, c1.At(), w1,
+                   std::format("{} mae1 ch{} t{}", note, chunk.t, band.t));
+      program_->Vec({.op = VecOp::kAddP,
+                     .src = c1.At(),
+                     .dst = c1.At(),
+                     .rows_q = rq,
+                     .n8 = kNwD,
+                     .p_base = Pb("mae b1")},
+                    std::format("{} mae1 bias t{}", note, band.t));
+      const Tile rep = program_->Alloc(Mem::kFbuf, rq * kNwD);
+      program_->Load(
+          Tokens(rep6_ + (uint64_t{chunk.i0 + band.i0} * 4), Mem::kFbuf,
+                 rep.At(), band.m, kKbD, true),
+          std::format("{} ld xE rep6 ch{} t{}", note, chunk.t, band.t));
+      program_->Vec({.op = VecOp::kAdd,
+                     .src = c1.At(),
+                     .src2 = rep.At(),
+                     .dst = c1.At(),
+                     .rows_q = rq,
+                     .n8 = kNwD},
+                    std::format("{} + xE t{}", note, band.t));
       program_->Vec({.op = VecOp::kCopy,
-                     .src = 0,
-                     .dst = q0 * kKbD,
+                     .src = c1.At(),
+                     .dst = query.At(q0 * kKbD),
                      .rows_q = rq,
                      .n8 = kNwD,
                      .q = true},
-                    std::format("{} Q(motion_query) t{}", note, tile.t));
+                    std::format("{} Q(motion_query) t{}", note, band.t));
     }
-    Mlp(0, chunk.m, layer, "mcls", true, mcls, chunk.i0, std::string(note));
-    Mlp(0, chunk.m, layer, "mreg", false, mreg, chunk.i0, std::string(note));
+    Mlp(query, chunk.m, layer, "mcls", true, mcls, chunk.i0, note);
+    Mlp(query, chunk.m, layer, "mreg", false, mreg, chunk.i0, note);
   }
-  LoadRows(pmq, 0, kPlanQueriesPadded, 0,
-           std::format("{} ld plan_modeq", note));
+  constexpr uint32_t kPlanQuads = kPlanQueriesPadded / 4;
+  const Tile plan = LoadRows(pmq, 0, kPlanQueriesPadded,
+                             std::format("{} ld plan_modeq", note));
+  const Tile ego = program_->Alloc(Mem::kFbuf, kPlanQuads * kNwD);
   program_->Load(
-      Tokens(rep_ego_, Mem::kFbuf, 1024, kPlanQueriesPadded, kKbD, true),
+      Tokens(rep_ego_, Mem::kFbuf, ego.At(), kPlanQueriesPadded, kKbD, true),
       std::format("{} ld xE[900] x18", note));
   program_->Vec({.op = VecOp::kAdd,
-                 .src = 0,
-                 .src2 = 1024,
-                 .dst = 0,
-                 .rows_q = kPlanQueriesPadded / 4,
+                 .src = plan.At(),
+                 .src2 = ego.At(),
+                 .dst = plan.At(),
+                 .rows_q = kPlanQuads,
                  .n8 = kNwD},
                 std::format("{} plan_query", note));
+  const Tile plan_q = program_->Alloc(Mem::kAbuf, kPlanQuads * kKbD);
   program_->Vec({.op = VecOp::kCopy,
-                 .src = 0,
-                 .dst = 0,
-                 .rows_q = kPlanQueriesPadded / 4,
+                 .src = plan.At(),
+                 .dst = plan_q.At(),
+                 .rows_q = kPlanQuads,
                  .n8 = kNwD,
                  .q = true},
                 std::format("{} Q(plan_query)", note));
-  Mlp(0, kPlanQueriesPadded, layer, "pcls", true, pcls, 0, std::string(note));
-  Mlp(0, kPlanQueriesPadded, layer, "preg", false, preg, 0, std::string(note));
+  Mlp(plan_q, kPlanQueriesPadded, layer, "pcls", true, pcls, 0, note);
+  Mlp(plan_q, kPlanQueriesPadded, layer, "preg", false, preg, 0, note);
+  const Tile ego_q = program_->Alloc(Mem::kAbuf, kPlanQuads * kKbD);
   program_->Vec({.op = VecOp::kCopy,
-                 .src = 1024,
-                 .dst = 0,
-                 .rows_q = kPlanQueriesPadded / 4,
+                 .src = ego.At(),
+                 .dst = ego_q.At(),
+                 .rows_q = kPlanQuads,
                  .n8 = kNwD,
                  .q = true},
                 std::format("{} Q(xE[900])", note));
-  Mlp(0, 32, layer, "pst", false, pst, 0, std::string(note));
-}
-
-void MotionHead::AnchorEncoderOn(const Rows& a_rows, const Rows& e_out,
-                                 uint32_t n, std::string_view note) {
-  constexpr uint32_t kTile = 224;
-  constexpr uint32_t kAt = 0;
-  constexpr uint32_t kCt = 512;
-  constexpr uint32_t kScratch = 2304;
-  constexpr uint32_t kA1 = 0;
-  constexpr uint32_t kA2 = kTile / 4;
-  det_.pb_enc.Load(*program_, note);
-  for (const Tile& tile : Tiles(n, kTile)) {
-    const uint32_t rq = tile.m / 4;
-    LoadRows(a_rows, tile.i0, tile.m, kAt,
-             std::format("{} ld anchors t{}", note, tile.t));
-    for (const auto& branch : det_.p.enc) {
-      program_->Vec(
-          {.op = VecOp::kMulP,
-           .src = kAt,
-           .dst = kA1,
-           .rows_q = rq,
-           .n8 = 4,
-           .p_base = det_.keys_enc.at("mask." + branch.name),
-           .q = true},
-          std::format("{} {} select+Q t{}", note, branch.name, tile.t));
-      for (size_t i = 0; i < branch.chain.size(); ++i) {
-        const Lin& lin = branch.chain[i].first;
-        const std::string where = std::format("{} {}{}", note, branch.name, i);
-        lin.Load(*program_, 0, where);
-        lin.Gemm(*program_, i == 0 ? kA1 : kA2, i == 0 ? 1 : lin.Kb(), tile.m,
-                 kCt, 0, std::format("{} t{}", where, tile.t));
-        program_->Vec({.op = VecOp::kAddP,
-                       .src = kCt,
-                       .dst = kCt,
-                       .rows_q = rq,
-                       .n8 = lin.Groups(),
-                       .p_base = det_.keys_enc.at(
-                           std::format("enc.{}.b{}", branch.name, i))},
-                      std::format("{} bias t{}", where, tile.t));
-        program_->Vec({.op = VecOp::kRelu,
-                       .src = kCt,
-                       .dst = kCt,
-                       .rows_q = rq,
-                       .n8 = lin.Groups()},
-                      std::format("{} relu t{}", where, tile.t));
-        const uint32_t ln =
-            det_.keys_enc.at(std::format("enc.{}.ln{}", branch.name, i));
-        if (i + 1 < branch.chain.size()) {
-          program_->Vec({.op = VecOp::kLayerNorm,
-                         .src = kCt,
-                         .dst = kA2,
-                         .rows_q = rq,
-                         .n8 = lin.Groups(),
-                         .p_base = ln,
-                         .imm = LnEpsBits(),
-                         .q = true,
-                         .scratch = kScratch},
-                        std::format("{} LN+Q t{}", where, tile.t));
-        } else {
-          program_->Vec({.op = VecOp::kLayerNorm,
-                         .src = kCt,
-                         .dst = kScratch,
-                         .rows_q = rq,
-                         .n8 = lin.Groups(),
-                         .p_base = ln,
-                         .imm = LnEpsBits()},
-                        std::format("{} LN t{}", where, tile.t));
-          program_->Store(
-              {.ddr_offset = e_out.Addr(tile.i0) + (uint64_t{branch.col0} * 4),
-               .mem = Mem::kFbuf,
-               .onchip = kScratch,
-               .rows = tile.m,
-               .row_words = 1,
-               .ddr_stride = static_cast<uint32_t>(e_out.Tb()),
-               .kind = DmaKind::kRow,
-               .tok = lin.Rows() / 32},
-              std::format("{} {} st E t{}", note, branch.name, tile.t));
-        }
-      }
-    }
-  }
+  Mlp(ego_q, kPlanQueriesPadded, layer, "pst", false, pst, 0, note);
 }
 
 void MotionHead::Queue() {
   constexpr uint32_t kQ = kMotionQueries / 4;
   constexpr uint32_t kNw = kMotionQueries / 32;
-  program_->Load(Words(det_.pjprog, Mem::kCbuf, vprog::kRomWords,
+  program_->Load(Words(det_.pjprog, Mem::kCbuf, Place::Fixed(vprog::kRomWords),
                        static_cast<uint32_t>(det_.pj.Words().size())),
                  std::format("{} iq ld VEC program (anchor proj)", tag));
-  program_->Load(Words(det_.proj_pb, Mem::kPbuf, 0, 18),
+  const Tile project = program_->Alloc(Mem::kPbuf, 18);
+  program_->Load(Words(det_.proj_pb, Mem::kPbuf, project.At(), 18),
                  std::format("{} iq ld PBUF (T)", tag));
-  program_->Load(Words(iq_zero_, Mem::kFbuf, 2048, 1),
+  const Tile dt = program_->Alloc(Mem::kFbuf, 1);
+  program_->Load(Words(iq_zero_, Mem::kFbuf, dt.At(), 1),
                  std::format("{} iq ld dt = 0", tag));
-  for (const Tile& tile : Tiles(kTemporalKeys, 1024)) {
-    LoadRows(tanc, tile.i0, tile.m, 0,
-             std::format("{} iq ld anchors t{}", tag, tile.t));
-    program_->Run({.pc = vprog::kRomWords,
-                   .src = 0,
-                   .src2 = 2048,
-                   .dst = 1024,
-                   .rows_q = tile.m / 4,
+  for (const Band& band : Bands(kTemporalKeys, 1024)) {
+    const Tile raw = LoadRows(tanc, band.i0, band.m,
+                              std::format("{} iq ld anchors t{}", tag, band.t));
+    const Tile out = program_->Alloc(Mem::kFbuf, band.m);
+    program_->Run({.pc = det_.pj.Pc("project"),
+                   .src = raw.At(),
+                   .src2 = dt.At(),
+                   .dst = out.At(),
+                   .rows_q = band.m / 4,
                    .n8 = 4,
-                   .p_base = 0},
-                  std::format("{} iq anchor proj t{}", tag, tile.t));
-    StoreRows(tanc_old, tile.i0, tile.m, 1024,
-              std::format("{} iq st anchors t{}", tag, tile.t));
+                   .p_base = project.At(),
+                   .imm_places = {},
+                   .reads = {Whole(raw), Whole(dt), Whole(out), Whole(project)},
+                   .writes = {Whole(out)}},
+                  std::format("{} iq anchor proj t{}", tag, band.t));
+    StoreRows(tanc_old, band.i0, band.m, out.At(),
+              std::format("{} iq st anchors t{}", tag, band.t));
   }
-  for (const Tile& tile : Tiles(kTemporalKeys, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    LoadRows(tx, tile.i0, tile.m, slot,
-             std::format("{} iq ld temp_x t{}", tag, tile.t));
-    StoreRows(tx_old, tile.i0, tile.m, slot,
-              std::format("{} iq st temp_x t{}", tag, tile.t));
+  for (const Band& band : Bands(kTemporalKeys, 128)) {
+    const Tile rows = LoadRows(tx, band.i0, band.m,
+                               std::format("{} iq ld temp_x t{}", tag, band.t));
+    StoreRows(tx_old, band.i0, band.m, rows.At(),
+              std::format("{} iq st temp_x t{}", tag, band.t));
   }
-  program_->Load(Words(iqprog_, Mem::kCbuf, vprog::kRomWords,
+  program_->Load(Words(iqprog_, Mem::kCbuf, Place::Fixed(vprog::kRomWords),
                        static_cast<uint32_t>(iq_.Words().size())),
                  std::format("{} ld VEC programs (instance queue)", tag));
-  LoadRows(ego_anc0, 0, 4, 0, std::format("{} iq ld ego anchor", tag));
-  LoadRows(pst, 0, 4, 4, std::format("{} iq ld plan_status", tag));
-  program_->Run({.pc = iq_.Pc("ego"), .src2 = 4, .dst = 1},
+  const Tile ego =
+      LoadRows(ego_anc0, 0, 4, std::format("{} iq ld ego anchor", tag));
+  const Tile status =
+      LoadRows(pst, 0, 4, std::format("{} iq ld plan_status", tag));
+  program_->Run({.pc = iq_.Pc("ego"),
+                 .src2 = status.At(),
+                 .dst = ego.At(1),
+                 .imm_places = {},
+                 .reads = {Part(status, 0, 1), Part(ego, 1, 1)},
+                 .writes = {Part(ego, 1, 1)}},
                 std::format("{} iq ego anchor VY", tag));
-  StoreRows(anc, 900, 4, 0, std::format("{} iq st ego anchor", tag));
-  constexpr uint32_t kG = 0;
-  constexpr uint32_t kCls = 4 * kQ;
-  constexpr uint32_t kI = 8 * kQ;
-  constexpr uint32_t kMa = 12 * kQ;
-  constexpr uint32_t kMb = 13 * kQ;
-  constexpr uint32_t kList = 14 * kQ;
-  constexpr uint32_t kConst = kList + (kQ / 2);
-  program_->Load(Words(iq_t_, Mem::kPbuf, 0, 1),
+  StoreRows(anc, 900, 4, ego.At(), std::format("{} iq st ego anchor", tag));
+  const Tile t = program_->Alloc(Mem::kPbuf, 1);
+  program_->Load(Words(iq_t_, Mem::kPbuf, t.At(), 1),
                  std::format("{} iq ld PBUF (t)", tag));
-  program_->Load(Tokens(stlist, Mem::kFbuf, kG, kMotionQueries, 1, true),
-                 std::format("{} iq gather state", tag));
-  det_.LoadRows(det_.cls, 0, kMotionQueries, kCls,
-                std::format("{} iq ld cls", tag));
-  LoadRows(st, 0, kMotionQueries, kI, std::format("{} iq ld own state", tag));
-  program_->Load(Words(iq_cs_, Mem::kFbuf, kConst, 1),
+  const Tile state = program_->Alloc(Mem::kFbuf, 4 * kQ);
+  program_->Load(
+      Tokens(stlist, Mem::kFbuf, state.At(), kMotionQueries, 1, true),
+      std::format("{} iq gather state", tag));
+  const Tile own = program_->Alloc(Mem::kFbuf, 8 * kQ);
+  LoadRows(det_.cls, 0, kMotionQueries, own.At(),
+           std::format("{} iq ld cls", tag));
+  LoadRows(st, 0, kMotionQueries, own.At(4 * kQ),
+           std::format("{} iq ld own state", tag));
+  const Tile masks = program_->Alloc(Mem::kFbuf, 2 * kQ);
+  const Tile cs = program_->Alloc(Mem::kFbuf, 1);
+  program_->Load(Words(iq_cs_, Mem::kFbuf, cs.At(), 1),
                  std::format("{} iq ld const", tag));
   program_->Run({.pc = iq_.Pc("state"),
-                 .src = kG,
-                 .src2 = kCls,
-                 .dst = kMa,
+                 .src = state.At(),
+                 .src2 = own.At(),
+                 .dst = masks.At(),
                  .rows_q = kQ,
                  .n8 = det_.ncls,
-                 .p_base = 0,
-                 .imm = kConst},
+                 .p_base = t.At(),
+                 .imm_places = {{.place = cs.At(), .shift = 0}},
+                 .reads = {Whole(state), Whole(own), Whole(cs), Whole(t)},
+                 .writes = {Whole(state), Whole(own), Whole(masks)}},
                 std::format("{} iq state + mask", tag));
-  StoreRows(st, 0, kMotionQueries, kG, std::format("{} iq st state", tag));
-  for (const auto& [at, src] : {std::pair{0U, kMa}, {1U, kMb}}) {
+  StoreRows(st, 0, kMotionQueries, state.At(),
+            std::format("{} iq st state", tag));
+  for (uint32_t at = 0; at < 2; ++at) {
     program_->Store({.ddr_offset = mask + (uint64_t{at} * kWordF),
                      .mem = Mem::kFbuf,
-                     .onchip = src,
+                     .onchip = masks.At(at * kQ),
                      .rows = kQ,
                      .row_words = 1,
                      .ddr_stride = 18 * kWordF},
@@ -1270,48 +1277,59 @@ void MotionHead::Queue() {
   for (const auto& [word, list, name] :
        {std::tuple{iq_cx_, tlist, "temp_x"},
         std::tuple{iq_ca_, talist, "temp_anchor"}}) {
-    program_->Load(Words(word, Mem::kFbuf, kConst, 1),
+    const Tile cl = program_->Alloc(Mem::kFbuf, 1);
+    program_->Load(Words(word, Mem::kFbuf, cl.At(), 1),
                    std::format("{} iq ld const ({})", tag, name));
+    const Tile out = program_->Alloc(Mem::kFbuf, kQ / 2);
     program_->Run({.pc = iq_.Pc("list"),
-                   .src = kG,
-                   .src2 = kCls,
-                   .dst = kList,
+                   .src = state.At(),
+                   .src2 = own.At(),
+                   .dst = out.At(),
                    .rows_q = kQ,
-                   .imm = kConst},
+                   .imm_places = {{.place = cl.At(), .shift = 0}},
+                   .reads = {Whole(state), Whole(own), Whole(cl), Whole(out)},
+                   .writes = {Whole(own), Whole(out)}},
                   std::format("{} iq list {}", tag, name));
-    program_->Store(Words(list, Mem::kFbuf, kList, kQ / 2),
+    program_->Store(Words(list, Mem::kFbuf, out.At(), kQ / 2),
                     std::format("{} iq st list {}", tag, name));
   }
-  program_->Load(Words(det_.selidx, Mem::kFbuf, 0, kNw),
+  const Tile selected = program_->Alloc(Mem::kFbuf, kNw);
+  program_->Load(Words(det_.selidx, Mem::kFbuf, selected.At(), kNw),
                  std::format("{} iq ld selidx", tag));
-  program_->Load(Words(det_.ib_idx, Mem::kFbuf, kNw, kNw),
+  const Tile index = program_->Alloc(Mem::kFbuf, kNw);
+  program_->Load(Words(det_.ib_idx, Mem::kFbuf, index.At(), kNw),
                  std::format("{} iq ld idx", tag));
-  program_->Load(Words(iq_cl_, Mem::kFbuf, kConst, 1),
+  const Tile cl = program_->Alloc(Mem::kFbuf, 1);
+  program_->Load(Words(iq_cl_, Mem::kFbuf, cl.At(), 1),
                  std::format("{} iq ld const (stlist)", tag));
-  program_->Run({.pc = iq_.Pc("stlist"),
-                 .src = 0,
-                 .src2 = kNw,
-                 .dst = 2 * kNw,
-                 .rows_q = kNw,
-                 .imm = kConst},
-                std::format("{} iq stlist", tag));
-  program_->Store(Words(stlist, Mem::kFbuf, 2 * kNw, kNw),
+  const Tile out = program_->Alloc(Mem::kFbuf, 2 * kNw);
+  program_->Run(
+      {.pc = iq_.Pc("stlist"),
+       .src = selected.At(),
+       .src2 = index.At(),
+       .dst = out.At(),
+       .rows_q = kNw,
+       .imm_places = {{.place = cl.At(), .shift = 0}},
+       .reads = {Whole(selected), Whole(index), Whole(cl), Whole(out)},
+       .writes = {Whole(out)}},
+      std::format("{} iq stlist", tag));
+  program_->Store(Words(stlist, Mem::kFbuf, out.At(), kNw),
                   std::format("{} iq st stlist", tag));
-  for (const Tile& tile : Tiles(kTemporalKeys, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    program_->Load(Tokens(tlist + (uint64_t{tile.i0} * 4), Mem::kFbuf, slot,
-                          tile.m, kKbD, true),
-                   std::format("{} gather temp_x t{}", tag, tile.t));
-    StoreRows(tx, tile.i0, tile.m, slot,
-              std::format("{} st temp_x t{}", tag, tile.t));
+  for (const Band& band : Bands(kTemporalKeys, 128)) {
+    const Tile rows = program_->Alloc(Mem::kFbuf, band.m / 4 * kNwD);
+    program_->Load(Tokens(tlist + (uint64_t{band.i0} * 4), Mem::kFbuf,
+                          rows.At(), band.m, kKbD, true),
+                   std::format("{} gather temp_x t{}", tag, band.t));
+    StoreRows(tx, band.i0, band.m, rows.At(),
+              std::format("{} st temp_x t{}", tag, band.t));
   }
-  for (const Tile& tile : Tiles(kTemporalKeys, 1024)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    program_->Load(Tokens(talist + (uint64_t{tile.i0} * 4), Mem::kFbuf, slot,
-                          tile.m, 1, true),
-                   std::format("{} gather temp_anchor t{}", tag, tile.t));
-    StoreRows(tanc, tile.i0, tile.m, slot,
-              std::format("{} st temp_anchor t{}", tag, tile.t));
+  for (const Band& band : Bands(kTemporalKeys, 1024)) {
+    const Tile rows = program_->Alloc(Mem::kFbuf, band.m);
+    program_->Load(Tokens(talist + (uint64_t{band.i0} * 4), Mem::kFbuf,
+                          rows.At(), band.m, 1, true),
+                   std::format("{} gather temp_anchor t{}", tag, band.t));
+    StoreRows(tanc, band.i0, band.m, rows.At(),
+              std::format("{} st temp_anchor t{}", tag, band.t));
   }
 }
 
@@ -1319,90 +1337,119 @@ void MotionHead::MotionAnchor() {
   const uint32_t nap = det_.C().nap;
   const uint32_t q = nap / 4;
   const uint32_t nw = nap / 32;
-  program_->Load(Words(maprog_, Mem::kCbuf, vprog::kRomWords,
+  const Access table = Fixed(Mem::kTbuf, 0, kTbufWords);
+  program_->Load(Words(maprog_, Mem::kCbuf, Place::Fixed(vprog::kRomWords),
                        static_cast<uint32_t>(ma_.Words().size())),
                  std::format("{} ld VEC programs (motion anchor)", tag));
-  const uint32_t cls_at = 0;
-  const uint32_t work = 4 * q;
-  const uint32_t list = (8 * q) + 2;
-  const uint32_t cst = list + nw;
-  det_.LoadRows(det_.cls, 0, nap, cls_at, std::format("{} ma ld cls", tag));
-  program_->Load(Words(ma_const_, Mem::kFbuf, cst, 1),
+  const Tile cls = LoadRows(det_.cls, 0, nap, std::format("{} ma ld cls", tag));
+  const Tile work = program_->Alloc(Mem::kFbuf, (4 * q) + 2);
+  const Tile list = program_->Alloc(Mem::kFbuf, nw);
+  const Tile cst = program_->Alloc(Mem::kFbuf, 1);
+  program_->Load(Words(ma_const_, Mem::kFbuf, cst.At(), 1),
                  std::format("{} ma ld const", tag));
   program_->Run({.pc = ma_.Pc("clsidx"),
-                 .src = cls_at,
-                 .src2 = work,
-                 .dst = list,
+                 .src = cls.At(),
+                 .src2 = work.At(),
+                 .dst = list.At(),
                  .rows_q = q,
                  .n8 = det_.ncls,
-                 .imm = cst},
+                 .imm_places = {{.place = cst.At(), .shift = 0}},
+                 .reads = {Whole(cls), Whole(work), Whole(list), Whole(cst)},
+                 .writes = {Whole(work), Whole(list)}},
                 std::format("{} ma clsidx", tag));
-  program_->Store(Words(ma_list_, Mem::kFbuf, list, nw),
+  program_->Store(Words(ma_list_, Mem::kFbuf, list.At(), nw),
                   std::format("{} ma st list", tag));
-  const uint32_t anc_at = 0;
-  const uint32_t tab = 4 * q;
-  const uint32_t rx = 8 * q;
-  const uint32_t bc = 0;
-  det_.LoadRows(det_.anc[det_.cur_a], 0, nap, anc_at,
-                std::format("{} ma ld anchor", tag));
-  program_->Load(Tokens(ma_list_, Mem::kFbuf, tab, nap, 1, true),
+  const Tile anchors = LoadRows(det_.anc[det_.cur_a], 0, nap,
+                                std::format("{} ma ld anchor", tag));
+  const Tile rows = program_->Alloc(Mem::kFbuf, 4 * q);
+  program_->Load(Tokens(ma_list_, Mem::kFbuf, rows.At(), nap, 1, true),
                  std::format("{} ma gather table rows", tag));
-  program_->Run(
-      {.pc = ma_.Pc("rot"), .src = anc_at, .src2 = tab, .dst = rx, .rows_q = q},
-      std::format("{} ma rot", tag));
+  const Tile rotated = program_->Alloc(Mem::kFbuf, 4 * q);
+  program_->Run({.pc = ma_.Pc("rot"),
+                 .src = anchors.At(),
+                 .src2 = rows.At(),
+                 .dst = rotated.At(),
+                 .rows_q = q,
+                 .imm_places = {},
+                 .reads = {Whole(anchors), Whole(rows), Whole(rotated)},
+                 .writes = {Whole(anchors), Whole(rows), Whole(rotated)}},
+                std::format("{} ma rot", tag));
   for (uint32_t m = 0; m < kModes; ++m) {
-    program_->Run(
-        {.pc = ma_.Pc("bc"), .src = rx, .dst = bc, .rows_q = q, .n8 = m},
-        std::format("{} ma bcast m{}", tag, m));
-    StoreRows(rxm_[m], 0, nap, bc, std::format("{} ma st rx{}", tag, m));
-    StoreRows(rym_[m], 0, nap, bc + (4 * q),
+    const Tile modes = program_->Alloc(Mem::kFbuf, 8 * q);
+    program_->Run({.pc = ma_.Pc("bc"),
+                   .src = rotated.At(),
+                   .dst = modes.At(),
+                   .rows_q = q,
+                   .n8 = m,
+                   .imm_places = {},
+                   .reads = {Whole(rotated)},
+                   .writes = {Whole(modes)}},
+                  std::format("{} ma bcast m{}", tag, m));
+    StoreRows(rxm_[m], 0, nap, modes.At(),
+              std::format("{} ma st rx{}", tag, m));
+    StoreRows(rym_[m], 0, nap, modes.At(4 * q),
               std::format("{} ma st ry{}", tag, m));
   }
   program_->Load(
       {.ddr_offset = ma_tb_,
        .mem = Mem::kTbuf,
-       .onchip = 0,
+       .onchip = Place::Fixed(0),
        .rows = 1,
        .row_words = kTbufWords,
        .ddr_stride = static_cast<uint32_t>(uint64_t{kTbufWords} * kWordT)},
       std::format("{} ma ld TBUF (sin)", tag));
-  program_->Load(Words(ma_pb_, Mem::kPbuf, 0, 32),
+  const Tile embed = program_->Alloc(Mem::kPbuf, 32);
+  program_->Load(Words(ma_pb_, Mem::kPbuf, embed.At(), 32),
                  std::format("{} ma ld PBUF", tag));
   constexpr uint32_t kTq = 64;
-  constexpr uint32_t kPy = 0;
-  constexpr uint32_t kPx = 4 * kTq;
-  constexpr uint32_t kPly = 8 * kTq;
-  constexpr uint32_t kPlx = 9 * kTq;
-  constexpr uint32_t kOut = 10 * kTq;
-  for (const Tile& tile : Tiles(kModeQueriesPadded, 4 * kTq)) {
-    const uint32_t count = tile.m / 4;
-    program_->Load(Tokens(ma_glist_ + (uint64_t{tile.i0} * 4), Mem::kFbuf, kPx,
-                          tile.m, 1, true),
-                   std::format("{} ma gather posx t{}", tag, tile.t));
+  for (const Band& band : Bands(kModeQueriesPadded, 4 * kTq)) {
+    const uint32_t count = band.m / 4;
+    const Tile px = program_->Alloc(Mem::kFbuf, band.m);
+    program_->Load(Tokens(ma_glist_ + (uint64_t{band.i0} * 4), Mem::kFbuf,
+                          px.At(), band.m, 1, true),
+                   std::format("{} ma gather posx t{}", tag, band.t));
+    const Tile py = program_->Alloc(Mem::kFbuf, band.m);
     program_->Load(Tokens(ma_glist_ + (uint64_t{kModeQueriesPadded} * 4) +
-                              (uint64_t{tile.i0} * 4),
-                          Mem::kFbuf, kPy, tile.m, 1, true),
-                   std::format("{} ma gather posy t{}", tag, tile.t));
-    program_->Run(
-        {.pc = ma_.Pc("compact"), .src = kPy, .dst = kPly, .rows_q = count},
-        std::format("{} ma compact y t{}", tag, tile.t));
-    program_->Run(
-        {.pc = ma_.Pc("compact"), .src = kPx, .dst = kPlx, .rows_q = count},
-        std::format("{} ma compact x t{}", tag, tile.t));
-    program_->Run({.pc = ma_.Pc("embed"),
-                   .src = kPly,
-                   .src2 = kPlx,
-                   .dst = kOut,
+                              (uint64_t{band.i0} * 4),
+                          Mem::kFbuf, py.At(), band.m, 1, true),
+                   std::format("{} ma gather posy t{}", tag, band.t));
+    const Tile ply = program_->Alloc(Mem::kFbuf, count);
+    program_->Run({.pc = ma_.Pc("compact"),
+                   .src = py.At(),
+                   .dst = ply.At(),
                    .rows_q = count,
-                   .p_base = 0},
-                  std::format("{} ma embed t{}", tag, tile.t));
-    StoreRows(sine, tile.i0, tile.m, kOut,
-              std::format("{} ma st sine t{}", tag, tile.t));
+                   .imm_places = {},
+                   .reads = {Whole(py)},
+                   .writes = {Whole(ply)}},
+                  std::format("{} ma compact y t{}", tag, band.t));
+    const Tile plx = program_->Alloc(Mem::kFbuf, count);
+    program_->Run({.pc = ma_.Pc("compact"),
+                   .src = px.At(),
+                   .dst = plx.At(),
+                   .rows_q = count,
+                   .imm_places = {},
+                   .reads = {Whole(px)},
+                   .writes = {Whole(plx)}},
+                  std::format("{} ma compact x t{}", tag, band.t));
+    const Tile out = program_->Alloc(Mem::kFbuf, count * kNwD);
+    program_->Run(
+        {.pc = ma_.Pc("embed"),
+         .src = ply.At(),
+         .src2 = plx.At(),
+         .dst = out.At(),
+         .rows_q = count,
+         .p_base = embed.At(),
+         .imm_places = {},
+         .reads = {Whole(ply), Whole(plx), Whole(out), Whole(embed), table},
+         .writes = {Whole(out)}},
+        std::format("{} ma embed t{}", tag, band.t));
+    StoreRows(sine, band.i0, band.m, out.At(),
+              std::format("{} ma st sine t{}", tag, band.t));
   }
   program_->Load(
       {.ddr_offset = det_.tb,
        .mem = Mem::kTbuf,
-       .onchip = 0,
+       .onchip = Place::Fixed(0),
        .rows = 1,
        .row_words = kTbufWords,
        .ddr_stride = static_cast<uint32_t>(uint64_t{kTbufWords} * kWordT)},
@@ -1410,19 +1457,27 @@ void MotionHead::MotionAnchor() {
 }
 
 void MotionHead::PrepNpu() {
-  program_->Load(Words(mpprog_, Mem::kCbuf, vprog::kRomWords,
+  program_->Load(Words(mpprog_, Mem::kCbuf, Place::Fixed(vprog::kRomWords),
                        static_cast<uint32_t>(mp_.Words().size())),
                  std::format("{} ld VEC programs (prep)", tag));
-  program_->Load(Tokens(ego_o_.Addr(0, 0), Mem::kFbuf, 0, 44, kKbD),
-                 std::format("{} ego ld", tag));
-  program_->Run(
-      {.pc = mp_.Pc("ego"),
-       .src = 0,
-       .dst = 352,
-       .imm = exact::Real::Binary64(exact::Real::Ratio(1, 44).ToBinary64())
-                  .ToBinary32()},
-      std::format("{} ego mean", tag));
-  StoreRows(x[0], 900, 4, 352, std::format("{} ego st rows 900..903", tag));
+  constexpr uint32_t kEgoTokens = 44;
+  const Tile ego = program_->Alloc(Mem::kFbuf, kEgoTokens / 4 * kNwD);
+  program_->Load(
+      Tokens(ego_o_.Addr(0, 0), Mem::kFbuf, ego.At(), kEgoTokens, kKbD),
+      std::format("{} ego ld", tag));
+  const Tile mean = program_->Alloc(Mem::kFbuf, kNwD);
+  program_->Run({.pc = mp_.Pc("ego"),
+                 .src = ego.At(),
+                 .dst = mean.At(),
+                 .imm = exact::Real::Binary64(
+                            exact::Real::Ratio(1, kEgoTokens).ToBinary64())
+                            .ToBinary32(),
+                 .imm_places = {},
+                 .reads = {Whole(ego), Whole(mean)},
+                 .writes = {Whole(mean)}},
+                std::format("{} ego mean", tag));
+  StoreRows(x[0], 900, 4, mean.At(),
+            std::format("{} ego st rows 900..903", tag));
   for (int which = 0; which < 2; ++which) {
     SparseHead& h = which == 0 ? det_ : map_;
     const std::string name = which == 0 ? "seld" : "selm";
@@ -1447,38 +1502,44 @@ void MotionHead::PrepNpu() {
                           static_cast<uint32_t>(h.e.Tb() / 16), h.C().na, 0)});
       mp_const_[key] = offset;
     }
-    LoadRows(h.cls, 0, nap, 0, std::format("{} {} ld cls", tag, note));
-    program_->Load(Words(h.ib_idx, Mem::kFbuf, work + nw, nw),
+    const Tile area = program_->Alloc(Mem::kFbuf, cst + 1);
+    LoadRows(h.cls, 0, nap, area.At(), std::format("{} {} ld cls", tag, note));
+    program_->Load(Words(h.ib_idx, Mem::kFbuf, area.At(work + nw), nw),
                    std::format("{} {} ld idx", tag, note));
-    program_->Load(Words(h.ib_lane, Mem::kFbuf, work + (6 * nw) + 2, 1),
-                   std::format("{} {} ld lane", tag, note));
-    program_->Load(Words(list, Mem::kFbuf, out, nlw),
+    program_->Load(
+        Words(h.ib_lane, Mem::kFbuf, area.At(work + (6 * nw) + 2), 1),
+        std::format("{} {} ld lane", tag, note));
+    program_->Load(Words(list, Mem::kFbuf, area.At(out), nlw),
                    std::format("{} {} ld list x", tag, note));
-    program_->Load(Words(list + (uint64_t{nl} * 4), Mem::kFbuf, out + nw, nlw),
-                   std::format("{} {} ld list E", tag, note));
-    program_->Load(Words(mp_const_.at(key), Mem::kFbuf, cst, 1),
+    program_->Load(
+        Words(list + (uint64_t{nl} * 4), Mem::kFbuf, area.At(out + nw), nlw),
+        std::format("{} {} ld list E", tag, note));
+    program_->Load(Words(mp_const_.at(key), Mem::kFbuf, area.At(cst), 1),
                    std::format("{} {} ld const", tag, note));
-    program_->Run({.pc = mp_.Pc(name),
-                   .src = 0,
-                   .src2 = work,
-                   .dst = out,
-                   .rows_q = nap / 4,
-                   .n8 = h.ncls,
-                   .p_base = 0,
-                   .imm = cst},
-                  std::format("{} {} run", tag, note));
-    program_->Store(Words(list, Mem::kFbuf, out, nlw),
+    program_->Run(
+        {.pc = mp_.Pc(name),
+         .src = area.At(),
+         .src2 = area.At(work),
+         .dst = area.At(out),
+         .rows_q = nap / 4,
+         .n8 = h.ncls,
+         .imm_places = {{.place = area.At(cst), .shift = 0}},
+         .reads = {Part(area, 0, cst + 1), Fixed(Mem::kTbuf, 0, kTbufWords)},
+         .writes = {Part(area, work, cst - work)}},
+        std::format("{} {} run", tag, note));
+    program_->Store(Words(list, Mem::kFbuf, area.At(out), nlw),
                     std::format("{} {} st list x", tag, note));
-    program_->Store(Words(list + (uint64_t{nl} * 4), Mem::kFbuf, out + nw, nlw),
-                    std::format("{} {} st list E", tag, note));
+    program_->Store(
+        Words(list + (uint64_t{nl} * 4), Mem::kFbuf, area.At(out + nw), nlw),
+        std::format("{} {} st list E", tag, note));
   }
-  for (const Tile& tile : Tiles(900, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    const uint32_t m4 = (tile.m + 3) / 4 * 4;
-    det_.LoadRows(det_.anc[det_.cur_a], tile.i0, m4, slot,
-                  std::format("{} ld det anchor t{}", tag, tile.t));
-    StoreRows(anc, tile.i0, m4, slot,
-              std::format("{} st anchor t{}", tag, tile.t));
+  for (const Band& band : Bands(900, 128)) {
+    const uint32_t m4 = (band.m + 3) / 4 * 4;
+    const Tile rows =
+        LoadRows(det_.anc[det_.cur_a], band.i0, m4,
+                 std::format("{} ld det anchor t{}", tag, band.t));
+    StoreRows(anc, band.i0, m4, rows.At(),
+              std::format("{} st anchor t{}", tag, band.t));
   }
   MotionAnchor();
 }
@@ -1490,17 +1551,19 @@ void MotionHead::Prep() {
                  p_.ego_conv[1], 2, &ego_o_, nullptr, true);
   PrepNpu();
   const Rows& xd = det_.x[det_.cur_x];
-  for (const Tile& tile : Tiles(900, 128)) {
-    const uint32_t slot = tile.t % 2 == 0 ? 0 : 1024;
-    const uint32_t m4 = (tile.m + 3) / 4 * 4;
-    LoadRows(xd, tile.i0, m4, slot,
-             std::format("{} ld det x t{}", tag, tile.t));
-    StoreRows(x[0], tile.i0, m4, slot, std::format("{} st x t{}", tag, tile.t));
+  for (const Band& band : Bands(900, 128)) {
+    const uint32_t m4 = (band.m + 3) / 4 * 4;
+    const Tile rows =
+        LoadRows(xd, band.i0, m4, std::format("{} ld det x t{}", tag, band.t));
+    StoreRows(x[0], band.i0, m4, rows.At(),
+              std::format("{} st x t{}", tag, band.t));
   }
   cur_x = 0;
   Queue();
-  AnchorEncoderOn(anc, e, kMotionQueries, std::format("{} E", tag));
-  AnchorEncoderOn(tanc, te, kTemporalKeys, std::format("{} temp_E", tag));
+  det_.EncodeAnchors(*program_, anc, e, kMotionQueries,
+                     std::format("{} E", tag));
+  det_.EncodeAnchors(*program_, tanc, te, kTemporalKeys,
+                     std::format("{} temp_E", tag));
   const std::array<std::tuple<uint64_t, const Rows*, uint32_t>, 4> gathers = {
       {{sel, &xsel, kSelectedPadded},
        {sel + (uint64_t{kSelectedPadded} * 4), &esel, kSelectedPadded},
@@ -1509,9 +1572,10 @@ void MotionHead::Prep() {
         kMapSelectedPadded}}};
   for (size_t i = 0; i < gathers.size(); ++i) {
     const auto& [list, rows, n] = gathers[i];
-    program_->Load(Tokens(list, Mem::kFbuf, 0, n, kKbD, true),
+    const Tile gathered = program_->Alloc(Mem::kFbuf, n / 4 * kNwD);
+    program_->Load(Tokens(list, Mem::kFbuf, gathered.At(), n, kKbD, true),
                    std::format("{} gather sel {}", tag, i));
-    StoreRows(*rows, 0, n, 0, std::format("{} st sel {}", tag, i));
+    StoreRows(*rows, 0, n, gathered.At(), std::format("{} st sel {}", tag, i));
   }
 }
 
@@ -1526,8 +1590,8 @@ void MotionHead::EmitFrame(Program& program) {
     const std::string note = std::format("{} L{} {}", tag, l, Name(layer.op));
     const Program::Scope scope(program,
                                std::format("L{}.{}", l, Name(layer.op)));
-    pb_layers_[l].first.Load(program, note);
-    keys_ = pb_layers_[l].second;
+    pb_ = pb_layers_[l].first.Load(program, note);
+    keys_ = &pb_layers_[l].second;
     switch (layer.op) {
       case Op::kTempGnn:
         TempGnn(layer, note);
@@ -1554,11 +1618,12 @@ void MotionHead::EmitFrame(Program& program) {
   const Program::Scope scope(program, "end");
   const Rows& xr = x[cur_x];
   const std::string note = std::format("{} cache ego feature", tag);
-  program.Load(Words(xr.Addr(900), Mem::kFbuf, 0, kD / 32),
+  const Tile feature = program.Alloc(Mem::kFbuf, kD / 32);
+  program.Load(Words(xr.Addr(900), Mem::kFbuf, feature.At(), kD / 32),
                std::format("{} ld", note));
-  program.Store(
-      Words(tx.Addr((900 * kQueue) + kQueue - 1), Mem::kFbuf, 0, kD / 32),
-      std::format("{} st", note));
+  program.Store(Words(tx.Addr((900 * kQueue) + kQueue - 1), Mem::kFbuf,
+                      feature.At(), kD / 32),
+                std::format("{} st", note));
   program.Signal(::hotarubi::sparsedrive::kMotionDoneSignal,
                  ::hotarubi::sparsedrive::kMotionDoneSignal,
                  std::format("{} SIGNAL motion done", tag));

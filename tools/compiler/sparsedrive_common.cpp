@@ -180,7 +180,7 @@ uint32_t Entry(uint64_t base, uint64_t offset) {
   return static_cast<uint32_t>(entry);
 }
 
-Transfer Words(uint64_t ddr, Mem mem, uint32_t onchip, uint32_t words) {
+Transfer Words(uint64_t ddr, Mem mem, Place onchip, uint32_t words) {
   return {.ddr_offset = ddr,
           .mem = mem,
           .onchip = onchip,
@@ -188,7 +188,7 @@ Transfer Words(uint64_t ddr, Mem mem, uint32_t onchip, uint32_t words) {
           .row_words = words};
 }
 
-Transfer Tokens(uint64_t ddr, Mem mem, uint32_t onchip, uint32_t tokens,
+Transfer Tokens(uint64_t ddr, Mem mem, Place onchip, uint32_t tokens,
                 uint32_t tok, bool index) {
   return {.ddr_offset = ddr,
           .mem = mem,

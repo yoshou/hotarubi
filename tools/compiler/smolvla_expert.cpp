@@ -1,17 +1,20 @@
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <format>
-#include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "ddr_image.hpp"
 #include "hotarubi/exact.hpp"
 #include "hotarubi/safetensors.hpp"
 #include "isa.hpp"
+#include "kernels.hpp"
 #include "program.hpp"
 #include "smolvla_parts.hpp"
 #include "tensors.hpp"
@@ -38,20 +41,16 @@ constexpr uint32_t kGateTiles = kHidden / (8 * kGateGroups);
 constexpr uint32_t kGateBlocks = kGateGroups / 4;
 constexpr uint32_t kPbLn1 = 0;
 constexpr uint32_t kPbLn2 = 23;
-constexpr uint32_t kPbCosSelf = 48;
-constexpr uint32_t kPbCosCross = 176;
-constexpr uint32_t kPbIn = 304;
-constexpr uint32_t kPbMlpIn = 327;
-constexpr uint32_t kPbMlpOut = 350;
-constexpr uint32_t kPbFinal = 373;
-constexpr uint32_t kPbOut = 396;
-constexpr uint32_t kPbEnd = 397;
+constexpr uint32_t kRopeSelf = 0;
+constexpr uint32_t kRopeCross = 128;
 constexpr uint32_t kRopeWords = 256;
-constexpr std::array<uint32_t, 4> kTileGroups = {28, 28, 28, 8};
-constexpr std::array<uint32_t, 4> kTileFirst = {0, 28, 56, 84};
-constexpr uint32_t kWeightPlane = 1024;
-constexpr uint32_t kKvPlane = 400;
-constexpr uint32_t kKvOut = 1024;
+constexpr uint32_t kBiasIn = 0;
+constexpr uint32_t kBiasMlpIn = 23;
+constexpr uint32_t kBiasMlpOut = 46;
+constexpr uint32_t kFinalGamma = 69;
+constexpr uint32_t kBiasOut = 92;
+constexpr uint32_t kHeadsWords = 93;
+constexpr uint32_t kTileGroups = 28;
 constexpr uint32_t kFrequencies = kWidth / 2;
 constexpr int64_t kMinPeriodPerMille = 4;
 constexpr int64_t kMaxPeriod = 4;
@@ -73,39 +72,11 @@ constexpr std::array<std::string_view, 7> kLinearTags = {
     "q", "k", "v", "o", "gate", "up", "down"};
 constexpr std::string_view kExpertModel = "model.vlm_with_expert.lm_expert";
 
-using Hook = std::function<void(uint32_t)>;
-
 bool IsCross(uint32_t layer) { return layer % 2 == 1; }
 
 uint64_t CacheRow(uint32_t prefix_slots) {
   return uint64_t{prefix_slots / 4} * kKvBlocks;
 }
-
-uint32_t ScoreWords(const Dims& dims) {
-  return kQuads * (dims.Tokens() + kSuffix) / 8;
-}
-
-struct Plane {
-  WeightMode mode = WeightMode::kFp4;
-  uint64_t offset = 0;
-};
-
-struct Piece {
-  uint32_t a_base = 0;
-  uint32_t a_stride = 0;
-  uint32_t kb = 0;
-  uint32_t kb_offset = 0;
-};
-
-struct Tiles {
-  std::vector<Plane> planes;
-  uint32_t kb_total = 0;
-  std::vector<Piece> pieces;
-  std::vector<uint32_t> groups;
-  std::vector<uint32_t> first;
-  uint32_t c_base = 0;
-  bool accumulate = false;
-};
 
 exact::Real Rn64(const exact::Real& value) {
   return exact::Real::Binary64(value.ToBinary64());
@@ -205,7 +176,7 @@ void PlaceHeads(DdrImage& image, const SafeTensors& model, Expert& out) {
   const std::vector<uint32_t> bias =
       model.Float32Bits("model.action_out_proj.bias");
   pbuf.insert(pbuf.end(), bias.begin(), bias.end());
-  out.pb_heads = Place(image, "ex.pb_heads", PackPbuf(pbuf));
+  out.pb_heads = PlaceData(image, "ex.pb_heads", PackPbuf(pbuf));
 }
 
 void PlaceLayer(DdrImage& image, const SafeTensors& quant,
@@ -217,8 +188,8 @@ void PlaceLayer(DdrImage& image, const SafeTensors& quant,
         ReadMxfp4(quant, std::format("{}.{}", prefix, kLinearModules[i]));
     const uint32_t rows = i == kO || i == kDown ? kPadded : raw.rows;
     out.weights[i] =
-        Place(image, std::format("{}.w{}", tag, kLinearTags[i]),
-              PackWbuf(CanonicalMxfp4(raw, i == 0 ? -3 : 0, rows)));
+        PlaceData(image, std::format("{}.w{}", tag, kLinearTags[i]),
+                  PackWbuf(CanonicalMxfp4(raw, i == 0 ? -3 : 0, rows)));
   }
   std::vector<uint32_t> pbuf = PadValues(
       model.Float32Bits(std::format("{}.input_layernorm.weight", prefix)),
@@ -228,471 +199,214 @@ void PlaceLayer(DdrImage& image, const SafeTensors& quant,
                     std::format("{}.post_attention_layernorm.weight", prefix)),
                 kPadded);
   pbuf.insert(pbuf.end(), post.begin(), post.end());
-  out.pbuf = Place(image, std::format("{}.pbuf", tag), PackPbuf(pbuf));
+  out.pbuf = PlaceData(image, std::format("{}.pbuf", tag), PackPbuf(pbuf));
 }
 
-void LinearTiles(Program& program, const Tiles& tiles, std::string_view note,
-                 const Hook& after_first, const Hook& post) {
-  struct Step {
-    uint32_t nt = 0;
-    uint32_t p = 0;
-    uint32_t pl = 0;
-  };
-  std::vector<Step> steps;
-  for (uint32_t nt = 0; nt < tiles.groups.size(); ++nt) {
-    for (uint32_t p = 0; p < tiles.pieces.size(); ++p) {
-      for (uint32_t pl = 0; pl < tiles.planes.size(); ++pl) {
-        steps.push_back({.nt = nt, .p = p, .pl = pl});
-      }
-    }
-  }
-  const auto load_w = [&](size_t wt) {
-    const Step& step = steps[wt];
-    const Piece& piece = tiles.pieces[step.p];
-    Require(tiles.groups[step.nt] * piece.kb <= kWeightPlane,
-            "weight tile exceeds its WBUF plane");
-    Ld(program,
-       tiles.planes[step.pl].offset +
-           (((uint64_t{tiles.first[step.nt]} * tiles.kb_total) +
-             piece.kb_offset) *
-            kWordA),
-       Mem::kWbuf, static_cast<uint32_t>(wt % 2) * kWeightPlane,
-       tiles.groups[step.nt], piece.kb, tiles.kb_total * kWordA,
-       std::format("{} ld W nt{} p{} pl{}", note, step.nt, step.p, step.pl));
-  };
-  load_w(0);
-  for (size_t wt = 0; wt < steps.size(); ++wt) {
-    const Step& step = steps[wt];
-    const Piece& piece = tiles.pieces[step.p];
-    const bool first = step.p == 0 && step.pl == 0;
-    if (first && step.nt >= 1 && post) {
-      post(step.nt - 1);
-    }
-    program.Gemm(
-        {.a_base = piece.a_base,
-         .a_stride = piece.a_stride,
-         .kb = piece.kb,
-         .m = kSuffix,
-         .w_base = static_cast<uint32_t>(wt % 2) * kWeightPlane,
-         .w_stride = piece.kb,
-         .n8 = tiles.groups[step.nt],
-         .c_base = tiles.c_base + (kQuads * tiles.first[step.nt]),
-         .wmode = tiles.planes[step.pl].mode,
-         .acc = tiles.accumulate || !first},
-        std::format("{} gemm nt{} p{} pl{}", note, step.nt, step.p, step.pl));
-    if (first && after_first) {
-      after_first(step.nt);
-    }
-    if (wt + 1 < steps.size()) {
-      load_w(wt + 1);
-    }
-  }
-  if (post) {
-    post(static_cast<uint32_t>(tiles.groups.size() - 1));
-  }
-}
-
-Tiles PaddedTiles(std::vector<Plane> planes, uint32_t kb_total,
-                  std::vector<Piece> pieces, bool accumulate) {
+Linear Product(std::vector<LinearPlane> planes, uint32_t kb_total,
+               std::vector<LinearPiece> pieces) {
   return {.planes = std::move(planes),
           .kb_total = kb_total,
           .pieces = std::move(pieces),
-          .groups = {kTileGroups.begin(), kTileGroups.end()},
-          .first = {kTileFirst.begin(), kTileFirst.end()},
-          .c_base = 0,
-          .accumulate = accumulate};
+          .quads = kQuads,
+          .chunk_quads = kQuads,
+          .groups = kWords,
+          .tile_groups = kTileGroups};
 }
 
-std::vector<Piece> TiledPieces(uint32_t a_base) {
-  std::vector<Piece> pieces;
-  for (size_t i = 0; i < kTileGroups.size(); ++i) {
-    const uint32_t blocks = kTileGroups[i] / 4;
-    pieces.push_back({.a_base = a_base + (kQuads * (kTileFirst[i] / 4)),
+std::vector<LinearPiece> TiledPieces(const Tile& a) {
+  std::vector<LinearPiece> pieces;
+  pieces.reserve((kWords + kTileGroups - 1) / kTileGroups);
+  for (uint32_t first = 0; first < kWords; first += kTileGroups) {
+    const uint32_t blocks = std::min(kTileGroups, kWords - first) / 4;
+    pieces.push_back({.a = a.At(kQuads * (first / 4)),
                       .a_stride = blocks,
                       .kb = blocks,
-                      .kb_offset = kTileFirst[i] / 4});
+                      .kb_offset = first / 4});
   }
   return pieces;
 }
 
-std::vector<Plane> W8Planes(const W8Region& region) {
-  return {{.mode = WeightMode::kW8Hi, .offset = region.hi},
-          {.mode = WeightMode::kW8Lo, .offset = region.lo}};
+std::vector<LinearPlane> W8Planes(const W8Region& region) {
+  return {{.mode = WeightMode::kW8Hi, .w = region.hi},
+          {.mode = WeightMode::kW8Lo, .w = region.lo}};
 }
 
-void RmsNormQ(Program& program, uint64_t x, uint32_t pb, uint32_t dst,
+Tile RmsNormQ(Program& program, uint64_t x, Place gamma,
               std::string_view note) {
-  constexpr uint32_t kScratch = 1472;
-  Ld(program, x, Mem::kFbuf, 0, kQuads, kWords, kWords * kWordF,
-     std::format("{} ld x", note));
-  program.Vec({.op = VecOp::kRmsNorm,
-               .src = 0,
-               .dst = dst,
-               .rows_q = kQuads,
-               .n8 = kWords,
-               .p_base = pb,
-               .aux = kWidth,
-               .imm = RmsEps(),
-               .q = true,
-               .scratch = kScratch},
-              std::format("{} RMSNorm+Q", note));
+  const Tile a = program.Alloc(Mem::kAbuf, kQuads * kKb);
+  EmitQuantize(program,
+               {.x = x,
+                .quads = kQuads,
+                .words = kWords,
+                .tile_quads = kQuads,
+                .op = VecOp::kRmsNorm,
+                .p_base = gamma,
+                .aux = kWidth,
+                .imm = RmsEps(),
+                .dst = a.At()},
+               note);
+  return a;
 }
 
-class Qkv {
- public:
-  Qkv(Program& program, const DecoderLayer& layer, const Lm& lm, uint32_t l,
-      uint32_t prefix_slots, std::string_view note)
-      : program_(program),
-        layer_(layer),
-        k_cache_(lm.k[l]),
-        v_cache_(lm.v[l]),
-        cross_(IsCross(l)),
-        row0_(CacheRow(prefix_slots)),
-        note_(note) {
-    for (size_t linear = 0; linear < (cross_ ? 1U : 3U); ++linear) {
-      const uint32_t count = linear == 0 ? kQueryHeads : kKvHeads;
-      for (uint32_t h = 0; h < count; ++h) {
-        heads_.push_back({linear, h});
-      }
-    }
+void Qkv(Program& program, const DecoderLayer& layer, const Lm& lm, uint32_t l,
+         uint32_t prefix_slots, const Tile& a, const Tile& q, const Tile& rope,
+         std::string_view note) {
+  const bool cross = IsCross(l);
+  const uint32_t head = 2 * kQuads;
+  const Tile scratch = program.Alloc(Mem::kFbuf, kQuads * kHeadWords);
+  for (size_t linear = 0; linear < (cross ? 1U : 3U); ++linear) {
+    const std::string name = std::format("{} {}", note, kLinearTags[linear]);
+    EmitLinear(
+        program,
+        {.planes = {{.w = layer.weights[linear]}},
+         .kb_total = kKb,
+         .pieces = {{.a = a.At(), .a_stride = kKb, .kb = kKb, .kb_offset = 0}},
+         .quads = kQuads,
+         .chunk_quads = kQuads,
+         .groups = (linear == 0 ? kQueryHeads : kKvHeads) * kHeadWords,
+         .tile_groups = kHeadWords},
+        name, [&](const LinearTile& tile) {
+          Place out = q.At(tile.tile * head);
+          if (linear != 0) {
+            out = program.Alloc(Mem::kAbuf, head).At();
+          }
+          if (linear == 2) {
+            program.Vec({.op = VecOp::kCopy,
+                         .src = tile.c.At(),
+                         .dst = out,
+                         .rows_q = kQuads,
+                         .n8 = kHeadWords,
+                         .q = true},
+                        std::format("{}{} quant", name, tile.tile));
+          } else {
+            program.Vec({.op = VecOp::kRope,
+                         .src = tile.c.At(),
+                         .dst = out,
+                         .rows_q = kQuads,
+                         .n8 = kHeadWords,
+                         .p_base = rope.At(cross ? kRopeCross : kRopeSelf),
+                         .aux = 1,
+                         .q = true,
+                         .scratch = scratch.At()},
+                        std::format("{}{} rope+Q", name, tile.tile));
+          }
+          if (linear != 0) {
+            St(program,
+               (linear == 1 ? lm.k[l] : lm.v[l]) +
+                   ((CacheRow(prefix_slots) + (uint64_t{2} * tile.tile)) *
+                    kWordA),
+               Mem::kAbuf, out, kQuads, 2, kKvBlocks * kWordA,
+               std::format("{}{} st suffix", name, tile.tile));
+          }
+        });
   }
+}
 
-  void Emit(uint32_t a_base, uint32_t q_abuf) {
-    LoadWeight(0);
-    for (size_t j = 0; j < heads_.size(); ++j) {
-      if (j >= 1) {
-        PostVec(j - 1, q_abuf);
-      }
-      program_.Gemm({.a_base = a_base,
-                     .a_stride = kKb,
-                     .kb = kKb,
-                     .m = kSuffix,
-                     .w_base = kWt[j % 2],
-                     .w_stride = kKb,
-                     .n8 = kHeadWords,
-                     .c_base = kCb[j % 2]},
-                    std::format("{} gemm {}", note_, Name(j)));
-      if (j + 1 < heads_.size()) {
-        LoadWeight(j + 1);
-      }
-      if (j >= 1) {
-        PostStore(j - 1);
-      }
-    }
-    PostVec(heads_.size() - 1, q_abuf);
-    PostStore(heads_.size() - 1);
-  }
-
- private:
-  struct Head {
-    size_t linear = 0;
-    uint32_t index = 0;
-  };
-
-  static constexpr std::array<uint32_t, 2> kWt = {0, 184};
-  static constexpr std::array<uint32_t, 2> kCb = {0, 128};
-  static constexpr uint32_t kScratch = 256;
-  static constexpr std::array<uint32_t, 2> kKt = {1792, 1824};
-  static constexpr std::array<uint32_t, 2> kVt = {1856, 1888};
-
-  [[nodiscard]] std::string Name(size_t j) const {
-    return std::format("{}{}", kLinearTags[heads_[j].linear], heads_[j].index);
-  }
-
-  void LoadWeight(size_t j) {
-    Ld(program_,
-       layer_.weights[heads_[j].linear] +
-           (uint64_t{heads_[j].index} * kHeadWords * kKb * kWordA),
-       Mem::kWbuf, kWt[j % 2], kHeadWords, kKb, kKb * kWordA,
-       std::format("{} ld W {}", note_, Name(j)));
-  }
-
-  void PostVec(size_t j, uint32_t q_abuf) {
-    const Head& head = heads_[j];
-    if (head.linear == 2) {
-      program_.Vec({.op = VecOp::kCopy,
-                    .src = kCb[j % 2],
-                    .dst = kVt[j % 2],
-                    .rows_q = kQuads,
-                    .n8 = kHeadWords,
-                    .q = true},
-                   std::format("{} quant {}", note_, Name(j)));
-      return;
-    }
-    program_.Vec({.op = VecOp::kRope,
-                  .src = kCb[j % 2],
-                  .dst = head.linear == 0 ? q_abuf + (head.index * 2 * kQuads)
-                                          : kKt[j % 2],
-                  .rows_q = kQuads,
-                  .n8 = kHeadWords,
-                  .p_base = cross_ ? kPbCosCross : kPbCosSelf,
-                  .aux = 1,
-                  .q = true,
-                  .scratch = kScratch},
-                 std::format("{} rope+Q {}", note_, Name(j)));
-  }
-
-  void PostStore(size_t j) {
-    const Head& head = heads_[j];
-    if (head.linear == 0) {
-      return;
-    }
-    const bool key = head.linear == 1;
-    St(program_,
-       (key ? k_cache_ : v_cache_) +
-           ((row0_ + (uint64_t{2} * head.index)) * kWordA),
-       Mem::kAbuf, key ? kKt[j % 2] : kVt[j % 2], kQuads, 2, kKvBlocks * kWordA,
-       std::format("{} st {} suffix {}", note_, key ? "K" : "V", Name(j)));
-  }
-
-  Program& program_;
-  const DecoderLayer& layer_;
-  uint64_t k_cache_;
-  uint64_t v_cache_;
-  bool cross_;
-  uint64_t row0_;
-  std::string note_;
-  std::vector<Head> heads_;
-};
-
-class Attention {
- public:
-  Attention(Program& program, const Expert& expert, const Lm& lm, uint32_t l,
-            const Dims& dims, std::string_view note)
-      : program_(program),
-        expert_(expert),
-        cross_(IsCross(l)),
-        k_(cross_ ? expert.kc[l] : lm.k[l]),
-        v_(cross_ ? expert.vc[l] : lm.v[l]),
-        keys_(cross_ ? dims.Tokens() : dims.Tokens() + kSuffix),
-        valid_(cross_ ? dims.Prefix() : keys_),
-        s_(ScoreWords(dims)),
-        note_(note) {}
-
-  void Emit(uint32_t q_abuf) {
-    const uint32_t rows = keys_ / 4;
-    for (uint32_t g = 0; g < kKvHeads; ++g) {
-      const uint64_t column = uint64_t{2} * g * kWordA;
-      Ld(program_, k_ + column, Mem::kWbuf, g * 4 * rows, rows, 2,
-         kKvBlocks * kWordA, std::format("{} ld K group {}", note_, g),
-         DmaKind::kSplit8);
-      Ld(program_, v_ + column, Mem::kWbuf, (g * 4 * rows) + (2 * rows), rows,
-         2, kKvBlocks * kWordA, std::format("{} ld V group {}", note_, g),
-         DmaKind::kT32Split8);
-    }
-    if (!cross_) {
-      Ld(program_, expert_.mask, Mem::kFbuf, 2 * s_, kQuads, keys_ / 8,
-         uint64_t{keys_ / 8} * kWordF, std::format("{} ld mask", note_));
-    }
-    for (uint32_t h = 0; h < kQueryHeads; ++h) {
-      if (h >= 1) {
-        Softmax(h - 1);
-      }
-      Scores(h, q_abuf);
-      if (h >= 2) {
-        StoreOutput(h - 2);
-      }
-      if (h >= 1) {
-        Values(h - 1);
-      }
-    }
-    Softmax(kQueryHeads - 1);
-    StoreOutput(kQueryHeads - 2);
-    Values(kQueryHeads - 1);
-    StoreOutput(kQueryHeads - 1);
-  }
-
- private:
-  static constexpr std::array<uint32_t, 2> kP = {1536, 1664};
-
-  [[nodiscard]] uint32_t Group(uint32_t h) const { return (h / 3) * keys_; }
-
-  [[nodiscard]] uint32_t O(uint32_t h) const {
-    return (4 * s_) + ((h % 2) * kQuads * kHeadWords);
-  }
-
-  void Scores(uint32_t h, uint32_t q_abuf) {
-    for (const bool lo : {false, true}) {
-      program_.Gemm({.a_base = q_abuf + (h * 2 * kQuads),
-                     .a_stride = 2,
-                     .kb = 2,
-                     .m = kSuffix,
-                     .w_base = Group(h) + (lo ? keys_ / 4 : 0),
-                     .w_stride = 2,
-                     .n8 = keys_ / 8,
-                     .c_base = (h % 2) * s_,
-                     .wmode = lo ? WeightMode::kW8Lo : WeightMode::kW8Hi,
-                     .acc = lo},
-                    std::format("{} S {} h{}", note_, lo ? "lo" : "hi", h));
-    }
-  }
-
-  void Softmax(uint32_t h) {
-    const uint32_t s = (h % 2) * s_;
-    if (!cross_) {
-      program_.Vec({.op = VecOp::kAdd,
-                    .src = s,
-                    .src2 = 2 * s_,
-                    .dst = s,
-                    .rows_q = kQuads,
-                    .n8 = keys_ / 8},
-                   std::format("{} S + mask h{}", note_, h));
-    }
-    program_.Vec({.op = VecOp::kSoftmax,
-                  .src = s,
-                  .dst = kP[h % 2],
-                  .rows_q = kQuads,
-                  .n8 = keys_ / 8,
-                  .aux = valid_,
-                  .q = true,
-                  .scratch = 3 * s_},
-                 std::format("{} softmax+Q h{}", note_, h));
-  }
-
-  void Values(uint32_t h) {
-    const uint32_t blocks = keys_ / kBlock;
-    for (const bool lo : {false, true}) {
-      program_.Gemm({.a_base = kP[h % 2],
-                     .a_stride = blocks,
-                     .kb = blocks,
-                     .m = kSuffix,
-                     .w_base = Group(h) + ((lo ? 3 : 2) * (keys_ / 4)),
-                     .w_stride = blocks,
-                     .n8 = kHeadWords,
-                     .c_base = O(h),
-                     .wmode = lo ? WeightMode::kW8Lo : WeightMode::kW8Hi,
-                     .acc = lo},
-                    std::format("{} PV {} h{}", note_, lo ? "lo" : "hi", h));
-    }
-  }
-
-  void StoreOutput(uint32_t h) {
-    St(program_, expert_.o + (uint64_t{h} * kHeadWords * kWordF), Mem::kFbuf,
-       O(h), kQuads, kHeadWords, kQueryWords * kWordF,
-       std::format("{} st O h{}", note_, h));
-  }
-
-  Program& program_;
-  const Expert& expert_;
-  bool cross_;
-  uint64_t k_;
-  uint64_t v_;
-  uint32_t keys_;
-  uint32_t valid_;
-  uint32_t s_;
-  std::string note_;
-};
-
-void ProjResidual(Program& program, std::vector<Piece> pieces, uint64_t w,
+void ProjResidual(Program& program, std::vector<LinearPiece> pieces, uint64_t w,
                   uint32_t kb_total, const std::array<uint64_t, 2>& x,
                   std::string_view note) {
-  constexpr std::array<uint32_t, 2> kXr = {1536, 1984};
-  const auto after_first = [&](uint32_t nt) {
-    Ld(program, x[0] + (uint64_t{kTileFirst[nt]} * kWordF), Mem::kFbuf,
-       kXr[nt % 2], kQuads, kTileGroups[nt], kWords * kWordF,
-       std::format("{} ld residual nt{}", note, nt));
-  };
-  const auto post = [&](uint32_t nt) {
-    const uint32_t c = kQuads * kTileFirst[nt];
-    program.Vec({.op = VecOp::kAdd,
-                 .src = c,
-                 .src2 = kXr[nt % 2],
-                 .dst = c,
-                 .rows_q = kQuads,
-                 .n8 = kTileGroups[nt]},
-                std::format("{} residual nt{}", note, nt));
-    St(program, x[1] + (uint64_t{kTileFirst[nt]} * kWordF), Mem::kFbuf, c,
-       kQuads, kTileGroups[nt], kWords * kWordF,
-       std::format("{} st x nt{}", note, nt));
-  };
-  LinearTiles(program,
-              PaddedTiles({{.mode = WeightMode::kFp4, .offset = w}}, kb_total,
-                          std::move(pieces), false),
-              note, after_first, post);
+  EmitLinear(
+      program, Product({{.w = w}}, kb_total, std::move(pieces)), note,
+      [&](const LinearTile& tile) {
+        const uint64_t offset = uint64_t{tile.first} * kWordF;
+        const Tile residual = program.Alloc(Mem::kFbuf, kQuads * tile.groups);
+        Ld(program, x[0] + offset, Mem::kFbuf, residual.At(), kQuads,
+           tile.groups, kWords * kWordF,
+           std::format("{} ld residual t{}", note, tile.tile));
+        program.Vec({.op = VecOp::kAdd,
+                     .src = tile.c.At(),
+                     .src2 = residual.At(),
+                     .dst = tile.c.At(),
+                     .rows_q = kQuads,
+                     .n8 = tile.groups},
+                    std::format("{} residual t{}", note, tile.tile));
+        St(program, x[1] + offset, Mem::kFbuf, tile.c.At(), kQuads, tile.groups,
+           kWords * kWordF, std::format("{} st x t{}", note, tile.tile));
+      });
 }
 
-void GateUp(Program& program, const DecoderLayer& layer, uint32_t a_base,
-            uint32_t h_abuf, std::string_view note) {
-  constexpr std::array<uint32_t, 2> kWg = {0, 736};
-  constexpr std::array<uint32_t, 2> kWu = {368, 1104};
-  constexpr std::array<uint32_t, 2> kG = {0, 256};
-  constexpr std::array<uint32_t, 2> kU = {512, 768};
-  constexpr uint32_t kScratch = 1024;
-  const auto load_w = [&](uint32_t j) {
-    const uint64_t offset = uint64_t{j} * kGateGroups * kKb * kWordA;
-    Ld(program, layer.weights[kGate] + offset, Mem::kWbuf, kWg[j % 2],
-       kGateGroups, kKb, kKb * kWordA, std::format("{} ld W gate {}", note, j));
-    Ld(program, layer.weights[kUp] + offset, Mem::kWbuf, kWu[j % 2],
-       kGateGroups, kKb, kKb * kWordA, std::format("{} ld W up {}", note, j));
+Tile GateUp(Program& program, const DecoderLayer& layer, const Tile& a,
+            std::string_view note) {
+  const Tile h = program.Alloc(Mem::kAbuf, kGateTiles * kQuads * kGateBlocks);
+  const Tile scratch = program.Alloc(Mem::kFbuf, kQuads * kGateGroups);
+  const auto product = [&](size_t linear) {
+    return Linear{
+        .planes = {{.w = layer.weights[linear]}},
+        .kb_total = kKb,
+        .pieces = {{.a = a.At(), .a_stride = kKb, .kb = kKb, .kb_offset = 0}},
+        .quads = kQuads,
+        .chunk_quads = kQuads,
+        .groups = kHidden / 8,
+        .tile_groups = kGateGroups};
   };
-  const auto post = [&](uint32_t j) {
+  LinearEmitter gate(program, product(kGate), std::format("{} gate", note));
+  LinearEmitter up(program, product(kUp), std::format("{} up", note));
+  for (uint32_t j = 0; j < kGateTiles; ++j) {
+    const LinearTile g = gate.Emit(j, 0);
+    const LinearTile u = up.Emit(j, 0);
     program.Vec({.op = VecOp::kActMul,
-                 .src = kG[j % 2],
-                 .src2 = kU[j % 2],
-                 .dst = h_abuf + (j * kQuads * kGateBlocks),
+                 .src = g.c.At(),
+                 .src2 = u.c.At(),
+                 .dst = h.At(j * kQuads * kGateBlocks),
                  .rows_q = kQuads,
                  .n8 = kGateGroups,
                  .q = true,
-                 .scratch = kScratch},
+                 .scratch = scratch.At()},
                 std::format("{} silu_mul+Q {}", note, j));
-  };
-  load_w(0);
-  for (uint32_t j = 0; j < kGateTiles; ++j) {
-    if (j >= 1) {
-      post(j - 1);
-    }
-    for (const bool up : {false, true}) {
-      program.Gemm({.a_base = a_base,
-                    .a_stride = kKb,
-                    .kb = kKb,
-                    .m = kSuffix,
-                    .w_base = up ? kWu[j % 2] : kWg[j % 2],
-                    .w_stride = kKb,
-                    .n8 = kGateGroups,
-                    .c_base = up ? kU[j % 2] : kG[j % 2]},
-                   std::format("{} gemm {} {}", note, up ? "up" : "gate", j));
-    }
-    if (j + 1 < kGateTiles) {
-      load_w(j + 1);
-    }
   }
-  post(kGateTiles - 1);
+  return h;
 }
 
 void Layer(Program& program, const Expert& expert, const Lm& lm,
-           const Dims& dims, uint32_t l, const std::array<uint64_t, 3>& x,
-           std::string_view tag) {
-  constexpr uint32_t kA = 0;
-  constexpr uint32_t kQa = 512;
-  constexpr uint32_t kAo = 1024;
-  constexpr uint32_t kH = 2048;
+           const Dims& dims, uint32_t l, const Tile& rope,
+           const std::array<uint64_t, 3>& x, std::string_view tag) {
   const DecoderLayer& layer = expert.layers[l];
-  Ld(program, layer.pbuf, Mem::kPbuf, 0, 1, 2 * kKb, uint64_t{2} * kKb * kWordF,
-     std::format("{} ld PBUF (gamma x 2)", tag));
-  RmsNormQ(program, x[0], kPbLn1, kA, std::format("{} RMSNorm1", tag));
-  Qkv(program, layer, lm, l, dims.Tokens(), std::format("{} qkv", tag))
-      .Emit(kA, kQa);
-  Attention(program, expert, lm, l, dims, std::format("{} attn", tag))
-      .Emit(kQa);
-  Ld(program, expert.o, Mem::kFbuf, 0, kQuads, kQueryWords,
-     kQueryWords * kWordF, std::format("{} quant O ld O", tag));
-  program.Vec({.op = VecOp::kCopy,
-               .src = 0,
-               .dst = kAo,
-               .rows_q = kQuads,
-               .n8 = kQueryWords,
-               .q = true},
-              std::format("{} quant O", tag));
+  const bool cross = IsCross(l);
+  const uint32_t keys = cross ? dims.Tokens() : dims.Tokens() + kSuffix;
+  const Tile pb = program.Alloc(Mem::kPbuf, 2 * kKb);
+  Ld(program, layer.pbuf, Mem::kPbuf, pb.At(), 1, 2 * kKb,
+     uint64_t{2} * kKb * kWordF, std::format("{} ld PBUF (gamma x 2)", tag));
+  const Tile q = program.Alloc(Mem::kAbuf, kQueryHeads * 2 * kQuads);
+  const Tile a1 =
+      RmsNormQ(program, x[0], pb.At(kPbLn1), std::format("{} RMSNorm1", tag));
+  Qkv(program, layer, lm, l, dims.Tokens(), a1, q, rope,
+      std::format("{} qkv", tag));
+  EmitAttention(
+      program,
+      {.queries = q,
+       .k = cross ? expert.kc[l] : lm.k[l],
+       .v = cross ? expert.vc[l] : lm.v[l],
+       .o = expert.o,
+       .heads = kQueryHeads,
+       .kv_heads = kKvHeads,
+       .rows = kSuffix,
+       .chunk_quads = kQuads,
+       .embed = kQueryWords * 8,
+       .kv_blocks = kKvBlocks,
+       .hd = kHeadWords * 8,
+       .keys = keys,
+       .valid = {{.quad = 0, .keys = cross ? dims.Prefix() : keys}},
+       .mask = cross ? std::nullopt : std::optional<uint64_t>(expert.mask)},
+      std::format("{} attn", tag));
+  const Tile ao = program.Alloc(Mem::kAbuf, kQuads * kKbQuery);
+  EmitQuantize(program,
+               {.x = expert.o,
+                .quads = kQuads,
+                .words = kQueryWords,
+                .tile_quads = kQuads,
+                .dst = ao.At()},
+               std::format("{} quant O", tag));
   ProjResidual(
       program,
-      {{.a_base = kAo, .a_stride = kKbQuery, .kb = kKbQuery, .kb_offset = 0}},
+      {{.a = ao.At(), .a_stride = kKbQuery, .kb = kKbQuery, .kb_offset = 0}},
       layer.weights[kO], kKbQuery, {x[0], x[1]}, std::format("{} o_proj", tag));
-  RmsNormQ(program, x[1], kPbLn2, kA, std::format("{} RMSNorm2", tag));
-  GateUp(program, layer, kA, kH, std::format("{} mlp", tag));
-  std::vector<Piece> pieces;
+  const Tile a2 =
+      RmsNormQ(program, x[1], pb.At(kPbLn2), std::format("{} RMSNorm2", tag));
+  const Tile h = GateUp(program, layer, a2, std::format("{} mlp", tag));
+  std::vector<LinearPiece> pieces;
   pieces.reserve(kGateTiles);
   for (uint32_t j = 0; j < kGateTiles; ++j) {
-    pieces.push_back({.a_base = kH + (j * kQuads * kGateBlocks),
+    pieces.push_back({.a = h.At(j * kQuads * kGateBlocks),
                       .a_stride = kGateBlocks,
                       .kb = kGateBlocks,
                       .kb_offset = j * kGateBlocks});
@@ -704,175 +418,151 @@ void Layer(Program& program, const Expert& expert, const Lm& lm,
 void CrossKv(Program& program, const Expert& expert, const Lm& lm,
              const Dims& dims, uint32_t l) {
   const uint32_t quads = dims.Tokens() / 4;
-  const uint32_t a_words = quads * kKvBlocks;
-  const uint32_t c_words = quads * kKvGroups;
   const std::array<uint64_t, 2> sources = {lm.k[l], lm.v[l]};
   const std::array<uint64_t, 2> outputs = {expert.kc[l], expert.vc[l]};
-  const std::array<uint64_t, 2> weights = {expert.layers[l].weights[1],
-                                           expert.layers[l].weights[2]};
   for (uint32_t i = 0; i < 2; ++i) {
     const std::string note =
         std::format("E{} cross kv {}", l, i == 0 ? "k" : "v");
-    Ld(program, sources[i], Mem::kAbuf, i * a_words, quads, kKvBlocks,
+    const Tile a = program.Alloc(Mem::kAbuf, quads * kKvBlocks);
+    Ld(program, sources.at(i), Mem::kAbuf, a.At(), quads, kKvBlocks,
        kKvBlocks * kWordA, std::format("{} ld cache", note));
-    Ld(program, weights[i], Mem::kWbuf, i * kKvPlane, kKvGroups, kKvBlocks,
-       kKvBlocks * kWordA, std::format("{} ld W", note));
-    program.Gemm({.a_base = i * a_words,
-                  .a_stride = kKvBlocks,
-                  .kb = kKvBlocks,
-                  .m = dims.Tokens(),
-                  .w_base = i * kKvPlane,
-                  .w_stride = kKvBlocks,
-                  .n8 = kKvGroups,
-                  .c_base = i * c_words},
-                 std::format("{} gemm", note));
-    program.Vec({.op = VecOp::kCopy,
-                 .src = i * c_words,
-                 .dst = kKvOut + (i * a_words),
-                 .rows_q = quads,
-                 .n8 = kKvGroups,
-                 .q = true},
-                std::format("{} quant", note));
-    St(program, outputs[i], Mem::kAbuf, kKvOut + (i * a_words), quads,
-       kKvBlocks, kKvBlocks * kWordA, std::format("{} st", note));
+    EmitLinear(program,
+               {.planes = {{.w = expert.layers[l].weights[1 + i]}},
+                .kb_total = kKvBlocks,
+                .pieces = {{.a = a.At(),
+                            .a_stride = kKvBlocks,
+                            .kb = kKvBlocks,
+                            .kb_offset = 0}},
+                .quads = quads,
+                .chunk_quads = quads,
+                .groups = kKvGroups,
+                .tile_groups = kKvGroups},
+               note, [&](const LinearTile& tile) {
+                 const Tile out = program.Alloc(Mem::kAbuf, quads * kKvBlocks);
+                 program.Vec({.op = VecOp::kCopy,
+                              .src = tile.c.At(),
+                              .dst = out.At(),
+                              .rows_q = quads,
+                              .n8 = kKvGroups,
+                              .q = true},
+                             std::format("{} quant", note));
+                 St(program, outputs.at(i), Mem::kAbuf, out.At(), quads,
+                    kKvBlocks, kKvBlocks * kWordA, std::format("{} st", note));
+               });
   }
 }
 
-class Suffix {
- public:
-  Suffix(Program& program, const Expert& expert, std::string_view tag)
-      : program_(program), expert_(expert), tag_(tag) {}
-
-  void Emit(uint32_t step, uint64_t xt, uint64_t x0) {
-    Ld(program_, expert_.time[step], Mem::kAbuf, kAt, kQuads, kKb, kKb * kWordA,
-       std::format("{} ld time embedding (MXINT8)", tag_));
-    Ld(program_, xt, Mem::kFbuf, kXt, kQuads, kActionWords,
-       kActionWords * kWordF, std::format("{} ld x_t", tag_));
-    program_.Vec({.op = VecOp::kCopy,
-                  .src = kXt,
-                  .dst = kAx,
-                  .rows_q = kQuads,
-                  .n8 = kActionWords,
-                  .q = true},
-                 std::format("{} quant x_t", tag_));
-    LinearTiles(
-        program_,
-        PaddedTiles(W8Planes(expert_.heads[kHeadIn]), 1,
-                    {{.a_base = kAx, .a_stride = 1, .kb = 1, .kb_offset = 0}},
-                    false),
-        std::format("{} action_in", tag_), {}, [&](uint32_t nt) { BiasQ(nt); });
-    LinearTiles(program_,
-                PaddedTiles(W8Planes(expert_.heads[kHeadMlpInAction]), kKb,
-                            TiledPieces(kAa), false),
-                std::format("{} mlp_in(action)", tag_), {}, {});
-    LinearTiles(
-        program_,
-        PaddedTiles(
-            W8Planes(expert_.heads[kHeadMlpInTime]), kKb,
-            {{.a_base = kAt, .a_stride = kKb, .kb = kKb, .kb_offset = 0}},
-            true),
-        std::format("{} mlp_in(time)", tag_), {},
-        [&](uint32_t nt) { BiasSilu(nt); });
-    LinearTiles(program_,
-                PaddedTiles(W8Planes(expert_.heads[kHeadMlpOut]), kKb,
-                            TiledPieces(kAh), false),
-                std::format("{} mlp_out", tag_), {},
-                [&](uint32_t nt) { BiasStore(nt, x0); });
-  }
-
- private:
-  static constexpr uint32_t kAx = 0;
-  static constexpr uint32_t kAt = 512;
-  static constexpr uint32_t kAa = 1024;
-  static constexpr uint32_t kAh = 1536;
-  static constexpr uint32_t kXt = 2048;
-  static constexpr uint32_t kScratch = 2560;
-
-  void Bias(uint32_t nt, uint32_t pb, uint32_t dst, bool q) {
-    program_.Vec({.op = VecOp::kAddP,
-                  .src = kQuads * kTileFirst[nt],
-                  .dst = dst,
-                  .rows_q = kQuads,
-                  .n8 = kTileGroups[nt],
-                  .p_base = pb + (kTileFirst[nt] / 4),
-                  .q = q},
-                 std::format("{} bias{} nt{}", tag_, q ? "+Q" : "", nt));
-  }
-
-  void BiasQ(uint32_t nt) {
-    Bias(nt, kPbIn, kAa + (kQuads * (kTileFirst[nt] / 4)), true);
-  }
-
-  void BiasSilu(uint32_t nt) {
-    const uint32_t c = kQuads * kTileFirst[nt];
-    Bias(nt, kPbMlpIn, c, false);
-    program_.Vec({.op = VecOp::kAct,
-                  .src = c,
-                  .dst = kAh + (kQuads * (kTileFirst[nt] / 4)),
-                  .rows_q = kQuads,
-                  .n8 = kTileGroups[nt],
-                  .q = true,
-                  .scratch = kScratch},
-                 std::format("{} silu+Q nt{}", tag_, nt));
-  }
-
-  void BiasStore(uint32_t nt, uint64_t x0) {
-    const uint32_t c = kQuads * kTileFirst[nt];
-    Bias(nt, kPbMlpOut, c, false);
-    St(program_, x0 + (uint64_t{kTileFirst[nt]} * kWordF), Mem::kFbuf, c,
-       kQuads, kTileGroups[nt], kWords * kWordF,
-       std::format("{} st x0 nt{}", tag_, nt));
-  }
-
-  Program& program_;
-  const Expert& expert_;
-  std::string tag_;
-};
-
-void StepEpilogue(Program& program, const Expert& expert, uint32_t dt,
-                  const std::array<uint64_t, 4>& x, std::string_view tag) {
-  constexpr uint32_t kC = 3072;
-  constexpr uint32_t kXt = 3136;
-  RmsNormQ(program, x[0], kPbFinal, 0, std::format("{} final norm", tag));
-  Ld(program, x[1], Mem::kFbuf, kXt, kQuads, kActionWords,
-     kActionWords * kWordF, std::format("{} ld x_t", tag));
-  const auto post = [&](uint32_t) {
-    const VecArgs whole{.op = VecOp::kAddP,
-                        .src = kC,
-                        .dst = kC,
-                        .rows_q = kQuads,
-                        .n8 = kActionWords,
-                        .p_base = kPbOut};
-    program.Vec(whole, std::format("{} action_out bias", tag));
-    St(program, x[2], Mem::kFbuf, kC, kQuads, kActionWords,
-       kActionWords * kWordF, std::format("{} st v_t", tag));
-    program.Vec({.op = VecOp::kScale,
-                 .src = kC,
-                 .dst = kC,
+void Suffix(Program& program, const Expert& expert, const Tile& heads,
+            uint32_t step, uint64_t xt, uint64_t x0, std::string_view tag) {
+  const auto bias = [&](const LinearTile& tile, uint32_t offset, Place dst,
+                        bool q) {
+    program.Vec({.op = VecOp::kAddP,
+                 .src = tile.c.At(),
+                 .dst = dst,
                  .rows_q = kQuads,
-                 .n8 = kActionWords,
-                 .imm = dt},
-                std::format("{} dt * v_t", tag));
-    program.Vec({.op = VecOp::kAdd,
-                 .src = kC,
-                 .src2 = kXt,
-                 .dst = kC,
-                 .rows_q = kQuads,
-                 .n8 = kActionWords},
-                std::format("{} x_t + dt * v_t", tag));
-    St(program, x[3], Mem::kFbuf, kC, kQuads, kActionWords,
-       kActionWords * kWordF, std::format("{} st x_t next", tag));
+                 .n8 = tile.groups,
+                 .p_base = heads.At(offset + (tile.first / 4)),
+                 .q = q},
+                std::format("{} bias{} t{}", tag, q ? "+Q" : "", tile.tile));
   };
-  LinearTiles(
+  const Tile time = program.Alloc(Mem::kAbuf, kQuads * kKb);
+  Ld(program, expert.time[step], Mem::kAbuf, time.At(), kQuads, kKb,
+     kKb * kWordA, std::format("{} ld time embedding (MXINT8)", tag));
+  const Tile action = program.Alloc(Mem::kAbuf, kQuads * (kActionWords / 4));
+  EmitQuantize(program,
+               {.x = xt,
+                .quads = kQuads,
+                .words = kActionWords,
+                .tile_quads = kQuads,
+                .dst = action.At()},
+               std::format("{} quant x_t", tag));
+  const Tile in = program.Alloc(Mem::kAbuf, kQuads * kKb);
+  EmitLinear(
+      program,
+      Product(W8Planes(expert.heads[kHeadIn]), 1,
+              {{.a = action.At(), .a_stride = 1, .kb = 1, .kb_offset = 0}}),
+      std::format("{} action_in", tag), [&](const LinearTile& tile) {
+        bias(tile, kBiasIn, in.At(kQuads * (tile.first / 4)), true);
+      });
+  const Tile hidden = program.Alloc(Mem::kAbuf, kQuads * kKb);
+  const Tile scratch = program.Alloc(Mem::kFbuf, kQuads * kTileGroups);
+  LinearEmitter of_action(
+      program,
+      Product(W8Planes(expert.heads[kHeadMlpInAction]), kKb, TiledPieces(in)),
+      std::format("{} mlp_in(action)", tag));
+  LinearEmitter of_time(
+      program,
+      Product(W8Planes(expert.heads[kHeadMlpInTime]), kKb,
+              {{.a = time.At(), .a_stride = kKb, .kb = kKb, .kb_offset = 0}}),
+      std::format("{} mlp_in(time)", tag));
+  for (uint32_t t = 0; t < of_action.Tiles(); ++t) {
+    const LinearTile tile = of_action.Emit(t, 0);
+    of_time.Emit(t, 0, tile.c);
+    bias(tile, kBiasMlpIn, tile.c.At(), false);
+    program.Vec({.op = VecOp::kAct,
+                 .src = tile.c.At(),
+                 .dst = hidden.At(kQuads * (tile.first / 4)),
+                 .rows_q = kQuads,
+                 .n8 = tile.groups,
+                 .q = true,
+                 .scratch = scratch.At()},
+                std::format("{} silu+Q t{}", tag, t));
+  }
+  EmitLinear(
+      program,
+      Product(W8Planes(expert.heads[kHeadMlpOut]), kKb, TiledPieces(hidden)),
+      std::format("{} mlp_out", tag), [&](const LinearTile& tile) {
+        bias(tile, kBiasMlpOut, tile.c.At(), false);
+        St(program, x0 + (uint64_t{tile.first} * kWordF), Mem::kFbuf,
+           tile.c.At(), kQuads, tile.groups, kWords * kWordF,
+           std::format("{} st x0 t{}", tag, tile.tile));
+      });
+}
+
+void StepEpilogue(Program& program, const Expert& expert, const Tile& heads,
+                  uint32_t dt, const std::array<uint64_t, 4>& x,
+                  std::string_view tag) {
+  const Tile a = RmsNormQ(program, x[0], heads.At(kFinalGamma),
+                          std::format("{} final norm", tag));
+  const Tile xt = program.Alloc(Mem::kFbuf, kQuads * kActionWords);
+  Ld(program, x[1], Mem::kFbuf, xt.At(), kQuads, kActionWords,
+     kActionWords * kWordF, std::format("{} ld x_t", tag));
+  EmitLinear(
       program,
       {.planes = W8Planes(expert.heads[kHeadOut]),
        .kb_total = kKb,
-       .pieces = {{.a_base = 0, .a_stride = kKb, .kb = kKb, .kb_offset = 0}},
-       .groups = {kActionWords},
-       .first = {0},
-       .c_base = kC,
-       .accumulate = false},
-      std::format("{} action_out", tag), {}, post);
+       .pieces = {{.a = a.At(), .a_stride = kKb, .kb = kKb, .kb_offset = 0}},
+       .quads = kQuads,
+       .chunk_quads = kQuads,
+       .groups = kActionWords,
+       .tile_groups = kActionWords},
+      std::format("{} action_out", tag), [&](const LinearTile& tile) {
+        program.Vec({.op = VecOp::kAddP,
+                     .src = tile.c.At(),
+                     .dst = tile.c.At(),
+                     .rows_q = kQuads,
+                     .n8 = kActionWords,
+                     .p_base = heads.At(kBiasOut)},
+                    std::format("{} action_out bias", tag));
+        St(program, x[2], Mem::kFbuf, tile.c.At(), kQuads, kActionWords,
+           kActionWords * kWordF, std::format("{} st v_t", tag));
+        program.Vec({.op = VecOp::kScale,
+                     .src = tile.c.At(),
+                     .dst = tile.c.At(),
+                     .rows_q = kQuads,
+                     .n8 = kActionWords,
+                     .imm = dt},
+                    std::format("{} dt * v_t", tag));
+        program.Vec({.op = VecOp::kAdd,
+                     .src = tile.c.At(),
+                     .src2 = xt.At(),
+                     .dst = tile.c.At(),
+                     .rows_q = kQuads,
+                     .n8 = kActionWords},
+                    std::format("{} x_t + dt * v_t", tag));
+        St(program, x[3], Mem::kFbuf, tile.c.At(), kQuads, kActionWords,
+           kActionWords * kWordF, std::format("{} st x_t next", tag));
+      });
 }
 
 }  // namespace
@@ -881,12 +571,13 @@ Expert PlaceExpert(DdrImage& image, const SafeTensors& quant,
                    const SafeTensors& model, const Dims& dims) {
   Expert expert;
   PlaceHeads(image, model, expert);
-  expert.rope = Place(image, "ex.rope", ExpertRope(dims));
-  expert.tbuf = Place(image, "ex.tbuf", PackTbuf(MakeTbuf(Activation::kSilu)));
-  expert.mask = Place(image, "ex.mask", SelfMask(dims));
+  expert.rope = PlaceData(image, "ex.rope", ExpertRope(dims));
+  expert.tbuf =
+      PlaceData(image, "ex.tbuf", PackTbuf(MakeTbuf(Activation::kSilu)));
+  expert.mask = PlaceData(image, "ex.mask", SelfMask(dims));
   for (uint32_t k = 0; k < dims.steps; ++k) {
-    expert.time.push_back(
-        Place(image, std::format("ex.time{}", k), TimeInput(k, dims.steps)));
+    expert.time.push_back(PlaceData(image, std::format("ex.time{}", k),
+                                    TimeInput(k, dims.steps)));
   }
   expert.layers.resize(kLayers);
   for (uint32_t l = 0; l < kLayers; ++l) {
@@ -918,14 +609,18 @@ void EmitExpert(Program& program, const Expert& expert, const Lm& lm,
                 const Dims& dims) {
   const Program::Scope expert_scope(program, "expert");
   const uint32_t dt = Fp32OfFp64(exact::Real::Ratio(-1, dims.steps));
+  Tile rope;
+  Tile heads;
   {
     const Program::Scope scope(program, "setup");
-    Ld(program, expert.tbuf, Mem::kTbuf, 0, 1, kTbufWordsLoaded,
+    Ld(program, expert.tbuf, Mem::kTbuf, Place::Fixed(0), 1, kTbufWordsLoaded,
        kTbufWordsLoaded * kWordT, "ex ld TBUF (exp2 + silu)");
-    Ld(program, expert.rope, Mem::kPbuf, kPbCosSelf, 1, kRopeWords,
+    rope = program.Alloc(Mem::kPbuf, kRopeWords);
+    Ld(program, expert.rope, Mem::kPbuf, rope.At(), 1, kRopeWords,
        kRopeWords * kWordF, "ex ld PBUF cos/sin tiles (self / cross)");
-    Ld(program, expert.pb_heads, Mem::kPbuf, kPbIn, 1, kPbEnd - kPbIn,
-       uint64_t{kPbEnd - kPbIn} * kWordF,
+    heads = program.Alloc(Mem::kPbuf, kHeadsWords);
+    Ld(program, expert.pb_heads, Mem::kPbuf, heads.At(), 1, kHeadsWords,
+       uint64_t{kHeadsWords} * kWordF,
        "ex ld PBUF head biases and final norm gamma");
   }
   for (uint32_t l = 1; l < kLayers; l += 2) {
@@ -936,18 +631,18 @@ void EmitExpert(Program& program, const Expert& expert, const Lm& lm,
     const Program::Scope step(program, std::format("S{}", k));
     {
       const Program::Scope scope(program, "suffix");
-      Suffix(program, expert, std::format("S{} suffix", k))
-          .Emit(k, expert.xt[k], expert.x[0]);
+      Suffix(program, expert, heads, k, expert.xt[k], expert.x[0],
+             std::format("S{} suffix", k));
     }
     for (uint32_t l = 0; l < kLayers; ++l) {
       const Program::Scope scope(program, std::format("E{}", l));
-      Layer(program, expert, lm, dims, l,
+      Layer(program, expert, lm, dims, l, rope,
             {expert.x[l % 2], expert.x[2], expert.x[(l + 1) % 2]},
             std::format("S{} E{}", k, l));
     }
     const Program::Scope scope(program, "out");
     StepEpilogue(
-        program, expert, dt,
+        program, expert, heads, dt,
         {expert.x[kLayers % 2], expert.xt[k], expert.vt[k], expert.xt[k + 1]},
         std::format("S{} out", k));
   }

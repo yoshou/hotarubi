@@ -1903,6 +1903,9 @@ void Reciprocal(vp::Assembler& a, const std::array<uint32_t, 4>& planes,
   }
 }
 
+constexpr uint32_t kFsKw = kFsW + 16;
+constexpr uint32_t kFsKx = kFsKw + 64;
+
 Pass LaneCmp(vp::Cmp cmp, vp::Sel sel) {
   return {.cmp = cmp,
           .cmp_left = vp::CmpLeft::kPosition,
@@ -1955,6 +1958,8 @@ void FrameStartTime(vp::Assembler& a) {
 
 }  // namespace
 
+uint32_t FrameStartWords(uint32_t nkp) { return kFsKx + nkp; }
+
 vp::Assembler FrameStartKernel(uint32_t nkp, uint32_t ns) {
   vp::Assembler a(true);
   constexpr uint32_t kW0 = kFsW;
@@ -1973,11 +1978,11 @@ vp::Assembler FrameStartKernel(uint32_t nkp, uint32_t ns) {
   constexpr uint32_t kC1 = kFsW + 13;
   constexpr uint32_t kC2 = kFsW + 14;
   constexpr uint32_t kC3 = kFsW + 15;
-  constexpr uint32_t kKw = kFsW + 16;
+  constexpr uint32_t kKw = kFsKw;
   constexpr uint32_t kKr = kKw + 16;
   constexpr uint32_t kKt = kKw + 32;
   constexpr uint32_t kKu = kKw + 48;
-  constexpr uint32_t kKx = kKw + 64;
+  constexpr uint32_t kKx = kFsKx;
   const uint32_t one = FloatBits(1);
   a.LoadImmediate(11, 1);
   FrameStartTime(a);

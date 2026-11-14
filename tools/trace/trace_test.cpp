@@ -40,18 +40,21 @@ class TraceTest : public testing::Test {
     const uint64_t weights = image.Alloc("w", kWordA * 8);
     const uint64_t activations = image.Alloc("a", kWordA * 64);
     const uint64_t output = image.Alloc("out", kWordF * 64);
+    const compiler::Tile w = program.Alloc(compiler::Mem::kWbuf, 8);
+    const compiler::Tile a = program.Alloc(compiler::Mem::kAbuf, 64);
+    const compiler::Tile c = program.Alloc(compiler::Mem::kFbuf, 8);
     {
       const compiler::Program::Scope scope(program, "layer/load");
       program.Load({.ddr_offset = weights,
                     .mem = compiler::Mem::kWbuf,
-                    .onchip = 0,
+                    .onchip = w.At(),
                     .rows = 1,
                     .row_words = 8,
                     .ddr_stride = 0},
                    "ld W");
       program.Load({.ddr_offset = activations,
                     .mem = compiler::Mem::kAbuf,
-                    .onchip = 0,
+                    .onchip = a.At(),
                     .rows = 8,
                     .row_words = 8,
                     .ddr_stride = 144 * 8},
@@ -59,27 +62,27 @@ class TraceTest : public testing::Test {
     }
     {
       const compiler::Program::Scope scope(program, "layer/gemm");
-      program.Gemm({.a_base = 0,
+      program.Gemm({.a_base = a.At(),
                     .a_stride = 8,
                     .kb = 8,
                     .m = 32,
-                    .w_base = 0,
+                    .w_base = w.At(),
                     .w_stride = 8,
                     .n8 = 1,
-                    .c_base = 0},
+                    .c_base = c.At()},
                    "gemm");
     }
     {
       const compiler::Program::Scope scope(program, "layer/post");
       program.Vec({.op = compiler::VecOp::kRelu,
-                   .src = 0,
-                   .dst = 8,
+                   .src = c.At(),
+                   .dst = c.At(),
                    .rows_q = 8,
                    .n8 = 1},
                   "relu");
       program.Store({.ddr_offset = output,
                      .mem = compiler::Mem::kFbuf,
-                     .onchip = 8,
+                     .onchip = c.At(),
                      .rows = 8,
                      .row_words = 1,
                      .ddr_stride = 128},
@@ -88,6 +91,7 @@ class TraceTest : public testing::Test {
     program.Signal(1, 1, "signal");
     program.WaitHost(1, "wait");
     program.Halt();
+    program.Finalize({.window = 1});
     image.Put(instructions, program.Bytes());
     count_ = static_cast<uint32_t>(program.Size());
     std::vector<compiler::Stream> streams;
